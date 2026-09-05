@@ -81,6 +81,39 @@ One SQLite database. Core tables:
 - investment_transactions(id, account_id, date, action[Buy|Sell|Div|ReinvDiv|
   IntInc|...], symbol, quantity, price, amount, commission, memo) - lot-level
   investment activity (kept distinct from cash transactions).
+- crypto_transactions(id, account_id, date, action[BUY|SELL|SWAP_OUT|SWAP_IN|
+  TRANSFER_OUT|TRANSFER_IN|SEND|RECEIVE|REWARD|INTEREST|AIRDROP|MINING|FEE|FORK],
+  symbol, quantity, price, amount, basis, fee_symbol, fee_quantity, fee_amount,
+  transfer_account_id, transfer_pair_id, swap_group_id, tx_hash, memo, import_id,
+  fitid, created_at) - the event log for a cryptocurrency wallet-account (account
+  type 'crypto'), one row per single-asset delta (schema v51). Kept distinct from
+  both cash `transactions` and equity `investment_transactions`: quantities and
+  per-unit prices are text-encoded Decimal at wei scale (18 decimals), while the
+  fiat that moves is signed integer cents. A wallet-to-wallet move uses the same
+  transfer-mirror model as cash (two legs linked by `transfer_pair_id`), a
+  coin-for-coin swap links its two legs by `swap_group_id`, and `tx_hash` is the
+  on-chain exact-dedup key (fitid's role for chain activity). MAMMON domain layer
+  in mammon/crypto.py, which is the SOLE writer of the crypto_* tables (mirroring
+  investments.py's single-writer discipline); ledger.py stays the only writer of
+  the cash `transactions` table.
+- crypto_holdings(id, account_id, symbol, name, quantity, cost_basis,
+  UNIQUE(account_id, symbol)) - current coin position per (account, symbol), a
+  replay cache like `holdings` (schema v52).
+- crypto_holdings_checkpoints(account_id, year, symbol, quantity, cost_basis,
+  income, realized, ever_held, lots, PRIMARY KEY(account_id, year, symbol)) - the
+  per-(account, year, symbol) replay snapshot, the crypto twin of
+  `holdings_checkpoints` for fast open/scroll (schema v52). `income` is
+  staking/airdrop/mining income to date; `lots` is the JSON lot list.
+- The 'crypto' account type is a DISTINCT `accounts.type` value but is classified
+  INVESTMENT-LIKE for net-worth valuation, sidebar grouping and the allocation
+  pie via a single-source-of-truth `ledger.INVESTMENT_LIKE_TYPES` constant (which
+  every such classification tests membership in, rather than comparing to the
+  "investment" literal). The wallet address reuses the existing `account_number`
+  column (already blanked from the MCP surface); `asset_class = 'crypto'` carries
+  the allocation classification. Crypto quantity arithmetic runs under a raised
+  (>= 40 significant-digit) decimal context, because the Python default 28-digit
+  context can silently drop a wei when summing a large balance -- TEXT storage is
+  exact at any decimal count, so only summation is at risk.
 - reconciliations(id, account_id, statement_date, statement_balance, ...) - the
   record of COMPLETED reconciliations only.
 - reconcile_drafts(account_id PK, statement_date, beginning/ending_cents,

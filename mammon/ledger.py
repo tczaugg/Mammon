@@ -39,6 +39,17 @@ SPLIT_LABEL = "--Split--"
 # --------------------------------------------------------------------------
 # Accounts
 # --------------------------------------------------------------------------
+# The account types valued at MARKET rather than at their ledger cash balance,
+# and grouped together for net worth, the sidebar and the allocation pie. This
+# is the single source of truth: every "is this an investment?" classification
+# (valuation, grouping, summing) tests membership here rather than comparing to
+# the "investment" literal, so adding a market-valued type is a one-line change
+# and nothing silently values it as flat cash. 'crypto' is a DISTINCT type value
+# (a coin wallet is not an equity brokerage) but is investment-LIKE for these
+# purposes; see mammon/crypto.py.
+INVESTMENT_LIKE_TYPES = ("investment", "crypto")
+
+
 def create_account(
     conn: sqlite3.Connection,
     name: str,

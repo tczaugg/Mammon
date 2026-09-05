@@ -58,7 +58,7 @@ from mammon.ui.models import (
 _BAR_GROUPS = [
     ("Banking", ("checking", "savings", "cash")),
     ("Credit Card", ("credit",)),
-    ("Investing", ("investment",)),
+    ("Investing", ledger.INVESTMENT_LIKE_TYPES),
     ("Property & Debt", ("asset", "liability")),
 ]
 
@@ -1136,9 +1136,18 @@ class RegisterWidget(QWidget):
         # escrow split in the Category cell (Task 51), so give it more room there.
         self.view.setColumnWidth(
             R.CATEGORY, 250 if self.model.uses_increase_decrease() else 130)
-        self.view.setColumnWidth(R.TAG, 84)
+        self.view.setColumnWidth(R.TAG, 76)
+        # Payee is the ONLY stretching column, so it absorbs every spare pixel.
+        # Payee and Memo were both Stretch, and Stretch divides the leftover
+        # EVENLY: on a default (non-maximized) window that gave each about 175px,
+        # so an ordinary payee like "Anytown Water District" clipped while the
+        # Memo beside it -- blank on ~80% of rows -- held the same width. A
+        # register is read down its payee column; Memo is supplementary, so Memo
+        # takes a fixed, still-useful width and Payee gets the rest and grows
+        # with the window.
+        hh.setSectionResizeMode(R.MEMO, QHeaderView.Interactive)
+        self.view.setColumnWidth(R.MEMO, 150)
         hh.setSectionResizeMode(R.PAYEE, QHeaderView.Stretch)
-        hh.setSectionResizeMode(R.MEMO, QHeaderView.Stretch)
         # Which columns show is decided in ONE place (_apply_column_visibility):
         # the loan register drops Num/Tag, two-line mode collapses
         # Category/Memo/Tag, and the user's own column chooser layers on top.
@@ -5818,10 +5827,15 @@ class DownloadLogDialog(QDialog):
 # main window: account bar on the left, the selected register on the right
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    def __init__(self, conn, db_path=None, parent=None, webslinger=None):
+    def __init__(self, conn, db_path=None, parent=None, webslinger=None,
+                 db_key=None):
         super().__init__(parent)
         self.conn = conn
         self.db_path = db_path
+        # The key for THIS session, in memory only: never written to QSettings,
+        # the database, or any file (mammon.ui.password_dialog). None means the
+        # ledger is plaintext, which is the default and stays completely silent.
+        self.db_key = db_key
         # The automated-download collaborator. It degrades gracefully when
         # nothing is configured (Download simply explains what is missing);
         # tests inject a fake. Mammon holds NO credentials of its own -- the
@@ -5833,7 +5847,15 @@ class MainWindow(QMainWindow):
         self._find_dialog = None    # the modeless Find dialog, when open
         # Register view: one-line vs two-line, seeded from the saved preference.
         self.register_view_mode = "two" if prefs.two_line_default() else "one"
-        self.resize(1100, 660)
+        # Wide enough to read a register without maximizing. At 1100 the ten
+        # one-line columns left Payee under 160px, so an ordinary payee like
+        # "Anytown Water District" clipped on a freshly installed app -- the
+        # first thing a new user sees. Clamped to the available screen so a
+        # small or scaled display still gets a window that fits on it.
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        self.resize(min(1360, int(avail.width() * 0.92)) if avail else 1360,
+                    min(820, int(avail.height() * 0.92)) if avail else 820)
         self._autobackup_timer = None
         self._last_backup_fingerprint = None   # see _autobackup_tick
         self._build_menu()
@@ -5928,6 +5950,8 @@ class MainWindow(QMainWindow):
         settings.addAction("Reconcile to Statement…", self._reconcile_dialog)
         settings.addAction("Print Register…", self._print_register)
         settings.addSeparator()
+        settings.addAction("Database Password…", self._database_password_dialog)
+        settings.addSeparator()
         settings.addAction("Display Preferences…", self._display_preferences_dialog)
 
         reports = self.menuBar().addMenu("&Reports")
@@ -6005,9 +6029,12 @@ class MainWindow(QMainWindow):
             fingerprint = backup.db_fingerprint(self.conn, self.db_path)
             if fingerprint == getattr(self, "_last_backup_fingerprint", None):
                 return                      # nothing changed; write nothing
+            # The key goes with it: the online backup API refuses an unkeyed
+            # target for an encrypted source, and this handler swallows failures,
+            # so omitting it would silently stop backing up an encrypted ledger.
             backup.create_backup(self.conn, self.db_path, tag=backup.AUTO_TAG,
                                   keep=backup.DEFAULT_AUTO_KEEP,
-                                  incremental=True)
+                                  incremental=True, key=self.db_key)
             self._last_backup_fingerprint = fingerprint
             # Prune anything now past the retention window (idempotent, cheap).
             backup.purge_auto_backups()
@@ -6022,7 +6049,7 @@ class MainWindow(QMainWindow):
             return
         try:
             path = backup.create_backup(self.conn, self.db_path,
-                                        tag=backup.MANUAL_TAG)
+                                        tag=backup.MANUAL_TAG, key=self.db_key)
         except Exception as exc:
             QMessageBox.critical(self, "Back Up Database", f"Backup failed:\n{exc}")
             return
@@ -6073,7 +6100,8 @@ class MainWindow(QMainWindow):
             return
         target = self.db_path
         try:                                    # safety snapshot of current state
-            backup.create_backup(self.conn, target, tag=backup.MANUAL_TAG)
+            backup.create_backup(self.conn, target, tag=backup.MANUAL_TAG,
+                                 key=self.db_key)
         except Exception:                       # pragma: no cover - best effort
             pass
         if self._find_dialog is not None:       # dialogs bound to the old conn
@@ -6200,21 +6228,159 @@ class MainWindow(QMainWindow):
         if path:
             self.open_database(path)
 
-    def open_database(self, path):
-        """Point the whole window at a different Mammon database file."""
+    def open_database(self, path, key=None):
+        """Point the whole window at a different Mammon database file.
+
+        Prompts for a password when the file turns out to be encrypted and no
+        ``key`` was supplied. A plaintext file never prompts, so the default path
+        through here is exactly what it always was."""
+        from mammon import encryption
+        if key is None and encryption.is_encrypted(path):
+            key = self._ask_db_password(path)
+            if key is None:
+                return                      # cancelled: leave the window as it is
         old = self.conn
         # A Find dialog bound to the old connection must not outlive it.
         if self._find_dialog is not None:
             self._find_dialog.close()
             self._find_dialog = None
-        self._install_central(db.init_db(path))
+        self._install_central(db.init_db(path, key))
         self.db_path = path
+        self.db_key = key
         self._update_title()
         if old is not None:
             try:
                 old.close()
             except Exception:
                 pass
+
+    def _ask_db_password(self, path):
+        """Seam: ask the user for ``path``'s password. Overridden by tests, which
+        must never open a modal (CLAUDE.md: a dialog exec_()-ed under the offscreen
+        platform blocks forever)."""
+        from mammon.ui.password_dialog import ask_password
+        return ask_password(self, path)
+
+    def _database_password_dialog(self):
+        """Settings > Database Password: set, change, or remove it.
+
+        The conversion writes a NEW file and verifies it before anything is
+        swapped, so a failure at any point leaves the working ledger untouched --
+        which matters more here than anywhere else in the app, because the failure
+        mode is a database nobody can open."""
+        import os
+        from mammon import backup, encryption
+        from mammon.ui.password_dialog import SetPasswordDialog
+        if not self.db_path:
+            QMessageBox.warning(self, "Database Password",
+                                "This database has no file on disk.")
+            return
+        if not encryption.available():
+            QMessageBox.information(
+                self, "Database Password",
+                "Encryption needs the sqlcipher3 driver, which is not installed."
+                + chr(10) + chr(10) + "pip install mammon[encryption]")
+            return
+        encrypted = encryption.is_encrypted(self.db_path)
+        dlg = SetPasswordDialog(self, encrypted=encrypted)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        current, new = dlg.values()
+        if not encrypted and not new:
+            return                              # nothing asked for
+        try:
+            backup.create_backup(self.conn, self.db_path, tag=backup.MANUAL_TAG,
+                                 key=self.db_key)
+        except Exception:                       # pragma: no cover - best effort
+            pass
+        try:
+            if encrypted and not new:
+                out = encryption.decrypt_database(self.db_path, current)
+                new_key = None
+            elif encrypted:
+                out = encryption.change_password(self.db_path, current, new)
+                new_key = new
+            else:
+                out = encryption.encrypt_database(self.db_path, new)
+                new_key = new
+        except Exception as exc:
+            QMessageBox.critical(self, "Database Password",
+                                 "Nothing was changed." + chr(10) + chr(10) + str(exc))
+            return
+        # Swap the verified new file in, keeping the old one beside it until the
+        # replacement has actually opened.
+        target = self.db_path
+        previous = str(target) + ".previous"
+        try:
+            self.conn.close()
+        except Exception:                       # pragma: no cover - defensive
+            pass
+        self.conn = None
+        try:
+            os.replace(target, previous)
+            os.replace(str(out), target)
+        except Exception as exc:
+            self.open_database(target, self.db_key)
+            QMessageBox.critical(self, "Database Password",
+                                 "Could not replace the database:" + chr(10) + str(exc))
+            return
+        self.open_database(target, new_key)
+        try:
+            os.remove(previous)
+        except Exception:                       # pragma: no cover - best effort
+            pass
+        QMessageBox.information(
+            self, "Database Password",
+            "Encryption removed." if new_key is None else
+            ("Password changed." if encrypted else
+             "The database is now encrypted." + chr(10) + chr(10)
+             + "There is no recovery if you forget this password."))
+        if new_key is not None and not encrypted:
+            self._offer_to_clear_plaintext_backups()
+
+    def _offer_to_clear_plaintext_backups(self) -> None:
+        """After encrypting for the first time, deal with the snapshots already on
+        disk -- they are full PLAINTEXT copies of everything just protected.
+
+        This is not a tidy-up. Backups are the copies most likely to be synced off
+        the machine, which is the specific leak encryption is adopted to close;
+        leaving them means the ledger is still readable by anyone who reaches that
+        folder, and the password accomplished nothing against that threat.
+
+        It is offered rather than done, and it defaults to KEEPING them, because
+        for the next few minutes those snapshots are the only way back in if the
+        new password was mistyped or is misremembered. Destroying the last
+        recoverable copy at the exact moment the user is least sure of the
+        password would trade a privacy problem for a data-loss one."""
+        from mammon import backup
+        try:
+            stale = backup.plaintext_snapshots(self.db_path)
+        except Exception:                       # pragma: no cover - defensive
+            return
+        if not stale:
+            return
+        if QMessageBox.question(
+                self, "Unencrypted backups",
+                f"{len(stale)} earlier snapshot(s) of this database are still "
+                "unencrypted, including the one just taken." + chr(10) + chr(10)
+                + "They are complete, readable copies of everything you just "
+                "encrypted." + chr(10) + chr(10)
+                + "Delete them now? Keep them if you are not yet certain of the "
+                "new password -- they are the only way back in if it is wrong.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) != QMessageBox.Yes:
+            return
+        removed, failed = 0, []
+        for path in stale:
+            try:
+                path.unlink()
+                removed += 1
+            except Exception as exc:            # pragma: no cover - best effort
+                failed.append(f"{path.name}: {exc}")
+        msg = f"Deleted {removed} unencrypted snapshot(s)."
+        if failed:
+            msg += chr(10) + chr(10) + "Could not delete:" + chr(10) + chr(10).join(failed)
+        QMessageBox.information(self, "Unencrypted backups", msg)
 
     def _import_qif_dialog(self):
         path, _ = QFileDialog.getOpenFileName(

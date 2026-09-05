@@ -17,8 +17,11 @@ so init is safe to call on a brand-new file or an existing one.
 """
 from __future__ import annotations
 
-import sqlite3
+import sqlite3          # type annotations only; see mammon.sqldriver
 from pathlib import Path
+from typing import Optional
+
+from mammon import sqldriver
 
 # ---------------------------------------------------------------------------
 # Migration 1: initial schema
@@ -1438,6 +1441,99 @@ ALTER TABLE price_history ADD COLUMN price_low TEXT;
 ALTER TABLE price_history ADD COLUMN price_high TEXT;
 """
 
+# Migrations 51-53: cryptocurrency support. A crypto wallet is a new account
+# type ('crypto'), classified investment-like for net worth / grouping / the
+# allocation pie but stored as a DISTINCT type value. `accounts.type` is
+# free-text (no CHECK constraint), so introducing the type needs no migration;
+# the wallet address reuses the existing `accounts.account_number` column (which
+# the MCP authorizer already blanks), so no new sensitive column appears. These
+# three tables are the crypto twins of `investment_transactions` / `holdings` /
+# `holdings_checkpoints`, kept SEPARATE because a coin position is not an equity
+# lot: quantities are wei-scale (up to 18 decimals), the event taxonomy adds
+# swaps, on-chain transfers, staking/airdrop/mining income and network gas fees
+# that have no equity analogue, and the natural exact-dedup key is an on-chain
+# `tx_hash`. Quantities and per-unit prices are Decimal-encoded TEXT (exact at
+# any decimal count); the fiat that moves is signed integer cents.
+# `mammon/crypto.py` is the SOLE writer of these tables (mirroring
+# investments.py's single-writer discipline); ledger.py stays the only writer of
+# the cash `transactions` table. Price history is REUSED, namespaced by the
+# yfinance pair symbol ('BTC-USD', 'ETH-USD') to avoid a coin/stock collision,
+# so `price_history` needs no change.
+#
+# 51 -- the single event log, one row per single-asset delta. A wallet-to-wallet
+# move is the transfer mirror model again (two legs linked by `transfer_pair_id`,
+# each `transfer_account_id` pointing at the other wallet); a coin-for-coin swap
+# links its SWAP_OUT + SWAP_IN legs within one account by `swap_group_id`.
+# `tx_hash` is the exact-dedup key (fitid's role for chain activity); `fitid`
+# covers exchange rows that carry no chain hash.
+_V51 = """
+CREATE TABLE crypto_transactions (
+    id                  INTEGER PRIMARY KEY,
+    account_id          INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    date                TEXT NOT NULL,             -- ISO YYYY-MM-DD (storage/domain always ISO)
+    action              TEXT NOT NULL,             -- BUY|SELL|SWAP_OUT|SWAP_IN|TRANSFER_OUT|
+                                                   --   TRANSFER_IN|SEND|RECEIVE|REWARD|INTEREST|
+                                                   --   AIRDROP|MINING|FEE|FORK
+    symbol              TEXT,                      -- coin/token symbol, e.g. 'ETH', 'BTC', 'USDC'
+    quantity            TEXT,                      -- Decimal text, signed (out = negative), wei-scale
+    price               TEXT,                      -- Decimal text, per-unit USD FMV (nullable)
+    amount              INTEGER,                   -- signed cents: fiat that moved (buy/sell), else 0
+    basis               INTEGER,                   -- cents: cost basis of acquired qty (nullable)
+    fee_symbol          TEXT,                      -- coin the network fee was paid in
+    fee_quantity        TEXT,                      -- Decimal text, network fee quantity (nullable)
+    fee_amount          INTEGER,                   -- cents, USD value of the fee (nullable)
+    transfer_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    transfer_pair_id    INTEGER,                   -- links the two mirror legs of an own-wallet transfer
+    swap_group_id       INTEGER,                   -- links SWAP_OUT + SWAP_IN legs in one account
+    tx_hash             TEXT,                      -- on-chain tx hash: the natural exact-dedup key
+    memo                TEXT,
+    import_id           INTEGER REFERENCES imports(id) ON DELETE SET NULL,
+    fitid               TEXT,                      -- exchange-supplied id when there is no chain hash
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+# 52 -- the replay caches. `crypto_holdings` is the current position per
+# (account, symbol), the crypto twin of `holdings`. `crypto_holdings_checkpoints`
+# is the per-(account, year, symbol) replay snapshot, the exact analogue of
+# `holdings_checkpoints`, so a 40-year multi-wallet file opens and scrolls fast:
+# a position as of a later date is computed from the prior year's snapshot plus
+# only that year's rows. `income` is staking/airdrop/mining income to date (the
+# 'dividends' analogue); `lots` is the JSON lot list (same shape investments use).
+_V52 = """
+CREATE TABLE crypto_holdings (
+    id         INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol     TEXT NOT NULL,
+    name       TEXT,
+    quantity   TEXT NOT NULL DEFAULT '0',          -- Decimal text
+    cost_basis INTEGER,                             -- cents
+    UNIQUE(account_id, symbol)
+);
+CREATE TABLE crypto_holdings_checkpoints (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    year       INTEGER NOT NULL,
+    symbol     TEXT    NOT NULL,
+    quantity   TEXT    NOT NULL DEFAULT '0',        -- Decimal text
+    cost_basis INTEGER NOT NULL DEFAULT 0,          -- cents
+    income     INTEGER NOT NULL DEFAULT 0,          -- staking/airdrop/mining income to date
+    realized   INTEGER NOT NULL DEFAULT 0,          -- realized gain/loss to date
+    ever_held  INTEGER NOT NULL DEFAULT 0,
+    lots       TEXT,                                -- JSON lot list (FIFO/spec-ID)
+    PRIMARY KEY (account_id, year, symbol)
+);
+"""
+
+# 53 -- indexes, kept a SEPARATE migration so the CREATE TABLE statements above
+# are never edited after the fact. `(account_id, date)` for register/replay
+# scans, `tx_hash` and `fitid` for exact-dedup lookups on import.
+_V53 = """
+CREATE INDEX idx_crypto_txn_account_date ON crypto_transactions(account_id, date);
+CREATE INDEX idx_crypto_txn_tx_hash      ON crypto_transactions(tx_hash);
+CREATE INDEX idx_crypto_txn_fitid        ON crypto_transactions(fitid);
+CREATE INDEX idx_crypto_holdings_account ON crypto_holdings(account_id);
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -1490,25 +1586,41 @@ MIGRATIONS: list[str] = [
     _V48,
     _V49,
     _V50,
+    _V51,
+    _V52,
+    _V53,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    """Open a connection with the conventions Mammon relies on everywhere."""
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
+def connect(path: str | Path, key: Optional[str] = None) -> sqlite3.Connection:
+    """Open a connection with the conventions Mammon relies on everywhere.
+
+    Opened through :mod:`mammon.sqldriver`, which is SQLCipher when it is installed and
+    the standard library otherwise. No key is set here: an unkeyed SQLCipher database
+    is an ordinary plain SQLite file, so this is the same file it has always been.
+    Encryption is applied to a database by converting it (see :mod:`mammon.encryption`),
+    never by opening it differently.
+
+    ``Row`` must come from the SAME driver as the connection -- ``sqlite3.Row`` on a
+    SQLCipher cursor raises TypeError."""
+    conn = sqldriver.connect(str(path))
+    if key:
+        # Before every other statement: the key configures the codec that reads
+        # page 1. Raises DatabaseError when the key is wrong (sqldriver.apply_key).
+        sqldriver.apply_key(conn, key)
+    conn.row_factory = sqldriver.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
-def init_db(path: str | Path) -> sqlite3.Connection:
+def init_db(path: str | Path, key: Optional[str] = None) -> sqlite3.Connection:
     """Create or upgrade the Mammon database at ``path`` and return a connection.
 
     Idempotent: applies only migrations newer than the file's user_version.
     """
-    conn = connect(path)
+    conn = connect(path, key)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for target in range(current, len(MIGRATIONS)):
         conn.executescript(MIGRATIONS[target])

@@ -88,7 +88,10 @@ DARK = {
     "grid": "#34363b",
     "hdr_border_r": "#3a3d42",
     "hdr_border_b": "#3a3d42",
-    "alt_row": "#2b2d31",
+    "base_row": "#2b2d31",       # the unshaded row; AlternateBase sits above it
+    "alt_row": "#3b3e43",        # must stay LIGHTER than the base row (#2b2d31):
+                                 # they were the same value, so alternate-row
+                                 # shading was invisible in dark mode.
     "negative": "#ff6b6b",
     "balance_text": "#e3e5e8",
     "cell_text": "#e3e5e8",      # dark: table item text must be explicitly light,
@@ -362,7 +365,7 @@ def _build_dark_palette():
     from PyQt5.QtGui import QColor, QPalette
     p = QPalette()
     window = QColor(DARK["window"]); text = QColor(DARK["text"])
-    base = QColor("#2b2d31"); alt = QColor(DARK["alt_row"])
+    base = QColor(DARK["base_row"]); alt = QColor(DARK["alt_row"])
     button = QColor(DARK["btn_bg"]); disabled = QColor(DARK["disabled"])
     highlight = QColor(DARK["select"]); highlight_text = QColor("#ffffff")
     p.setColor(QPalette.Window, window)
