@@ -12,6 +12,8 @@ changes out of the box.
 """
 from __future__ import annotations
 
+import sys
+
 # Palette (approximate the classic desktop ledger) -- the LIGHT theme's named constants,
 # kept as module-level names for backward compatibility (tests + callers read
 # style.BLUE / style.RED / style.ALT_ROW).
@@ -24,9 +26,22 @@ BAR_BG = "#f5f7fa"      # account bar background
 LINE = "#d4d9e0"        # separators / borders
 SELECT = "#cfe0f2"      # selection highlight
 
-# The default register font (the classic desktop ledger uses a small Windows sans-serif).
-DEFAULT_FONT_FAMILY = "Segoe UI"
-DEFAULT_FONT_SIZE = 9
+# The default register font, PER PLATFORM. The look this UI is after is the
+# small system sans-serif of a classic desktop ledger -- which is a different
+# face and a different size on each OS. Hardcoding "Segoe UI" at 9pt gave macOS
+# an unavailable font at a size two points below anything native, and Linux
+# whatever the fontconfig fallback happened to be. Each entry is that platform's
+# own UI font at its own conventional size; the user can still override both
+# under Settings > Display Preferences.
+if sys.platform == "darwin":
+    DEFAULT_FONT_FAMILY = ".AppleSystemUIFont"
+    DEFAULT_FONT_SIZE = 13
+elif sys.platform.startswith("win"):
+    DEFAULT_FONT_FAMILY = "Segoe UI"
+    DEFAULT_FONT_SIZE = 9
+else:                                    # Linux/BSD: the near-universal default
+    DEFAULT_FONT_FAMILY = "DejaVu Sans"
+    DEFAULT_FONT_SIZE = 10
 
 DEFAULT_THEME = "light"
 

@@ -908,6 +908,42 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   detect own-wallet transfers; they are never written to a tracked file, and the
   test fixtures use synthetic ANON placeholders only.
 
+### 5.8j Cryptocurrency accounts in the UI (register, holdings, grouping)
+- **Grouping is already investment-like, by the shared constant.** A `type='crypto'`
+  wallet appears under the sidebar's "Investing" section next to equity brokerages
+  because the grouping table tests membership in `ledger.INVESTMENT_LIKE_TYPES`
+  (the single source of truth), not the `'investment'` literal. Its net-worth
+  contribution is its full market valuation, via `investments.display_balance`'s
+  delegation to `crypto.display_balance` (SRD 5.8h).
+- **A crypto wallet opens its OWN register, not the cash or investment one.**
+  `MainWindow.open_register` dispatches `type='crypto'` to `CryptoRegisterWidget`
+  (the crypto twin of the investment register). The register class is chosen by
+  EXACT type -- crypto and investment are both investment-like for valuation and
+  grouping, but their activity lives in DIFFERENT tables (`crypto_transactions`
+  vs `investment_transactions`), so widening the dispatch to the membership test
+  would misroute a wallet into a register that reads the wrong table.
+- **The crypto register is a THIN, read-only projection.** It renders through
+  `crypto.register_rows`, which owns every running-balance / cents / label
+  computation (the UI holds no SQL and no money or precision math). Columns: Date,
+  Action, Coin / Wallet, Quantity (stored SIGNED -- an OUT leg is negative), Price,
+  Coin Bal (running per-coin balance, folding in the same-coin gas so it ties to
+  `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a Buy/Sell), Cash Bal,
+  and Fee. The crypto event taxonomy renders as designed: a swap's two
+  `swap_group_id` legs BOTH read as one paired `OUT->IN` trade; a same-coin wallet
+  transfer renders as `[Other Wallet]` (the mirror model in coin, consuming no
+  category, SRD 5.8h); gas that rides an event shows as a `<qty> <SYM>` entry in the
+  Fee column. Events are entered by import, so the register is read-only (no inline
+  editor to defer out of `setModelData`).
+- **The holdings window values coins + cash to the account's own balance.**
+  `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price | Market Value |
+  Gain/Loss from `crypto.holding_values` (priced through the shared `{SYM}-USD`
+  path), with the fiat cash sleeve as the last row, and a footer that totals to
+  `crypto.account_valuation().total` -- the SAME number the accounts list shows, so
+  the two cannot drift. An unpriced coin leaves Price / Market Value / Gain-Loss
+  blank. Get Quotes prices the coins (a coin symbol IS its ticker, so unlike
+  equities there is no name-to-ticker guess to confirm) behind the injectable
+  `crypto.fetch_quotes` source.
+
 ### 5.8c Backup scoping (one folder per database)
 - Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
   the Restore picker opens in the CURRENT database's folder.

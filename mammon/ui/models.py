@@ -19,7 +19,7 @@ from PyQt5.QtCore import (QAbstractTableModel, QDate, QModelIndex, Qt, QTimer,
                           pyqtSignal)
 from PyQt5.QtGui import QBrush, QColor
 
-from mammon import categorize, import_review, investments, ledger
+from mammon import categorize, crypto, import_review, investments, ledger
 from mammon.ui import style
 
 
@@ -1767,6 +1767,131 @@ class InvestmentRegisterModel(QAbstractTableModel):
             return fmt_cents(r["cash_amt"]) if r["cash_amt"] else ""
         if col == self.CASH_BAL:
             return fmt_cents(r["cash_bal"])
+        return ""
+
+
+class CryptoRegisterModel(QAbstractTableModel):
+    """One crypto wallet's activity as a table, the crypto twin of
+    :class:`InvestmentRegisterModel`.
+
+    A crypto account's events (Buy/Sell, a coin-for-coin SWAP as two linked legs,
+    a same-coin wallet TRANSFER mirror, Send/income, gas Fees) live in the
+    ``crypto_transactions`` table -- neither the cash ``transactions`` table nor
+    ``investment_transactions`` -- so it needs its own projection. This is a THIN
+    projection over :func:`mammon.crypto.register_rows`, which derives the running
+    per-coin balance, the fiat cash-sleeve balance, the transfer/swap column label
+    and the gas ``fee`` label; the view holds NO quantity or cents math. A swap's
+    two legs render with a shared ``OUT->IN`` label so they read as one paired
+    trade; a wallet transfer renders as ``[Other Wallet]`` (the mirror model, in
+    coin). READ-ONLY: crypto events are entered by import, not inline editing."""
+
+    (DATE, ACTION, COIN, QUANTITY, PRICE,
+     COIN_BAL, AMOUNT, CASH_BAL, FEE) = range(9)
+    # The COIN column does double duty: a trade/income shows its coin symbol, a
+    # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair.
+    HEADERS = ["Date", "Action", "Coin / Wallet", "Quantity", "Price",
+               "Coin Bal", "Amount", "Cash Bal", "Fee"]
+    _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL)
+
+    def __init__(self, conn, account_id, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.account_id = account_id
+        self._rows: list = []
+        self._symbol_filter = None        # None -> show every coin
+        self.reload()
+
+    def set_symbol_filter(self, symbol):
+        """Restrict the register to one coin (``None`` shows all). The running
+        ``coin_bal`` per row is derived over the FULL history first (in
+        :func:`mammon.crypto.register_rows`), so filtering afterward keeps each
+        kept row's correct running balance for that coin."""
+        self._symbol_filter = symbol or None
+        self.reload()
+
+    def reload(self):
+        self.beginResetModel()
+        rows = crypto.register_rows(self.conn, self.account_id)
+        if self._symbol_filter is not None:
+            rows = [r for r in rows if r["symbol"] == self._symbol_filter]
+        self._rows = rows
+        self.endResetModel()
+
+    def account_name(self) -> str:
+        acct = ledger.get_account(self.conn, self.account_id)
+        return acct["name"] if acct else ""
+
+    def txn_at(self, row):
+        return self._rows[row] if 0 <= row < len(self._rows) else None
+
+    def row_for_txn(self, txn_id) -> int:
+        for i, r in enumerate(self._rows):
+            if r["id"] == txn_id:
+                return i
+        return -1
+
+    # ---- QAbstractTableModel API -----------------------------------------
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return self.HEADERS[section]
+        return None
+
+    def flags(self, index):
+        # Read-only: crypto events are entered by import, not inline editing.
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        r = self._rows[index.row()]
+        col = index.column()
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            return self._cell_text(r, col)
+        if role == Qt.TextAlignmentRole and col in self._NUMERIC:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.ForegroundRole:
+            # Amount / Cash Bal go red when negative (Quicken convention).
+            if col == self.AMOUNT and (r.get("cash_amt") or 0) < 0:
+                return QBrush(QColor(style.negative_color()))
+            if col == self.CASH_BAL and (r.get("cash_bal") or 0) < 0:
+                return QBrush(QColor(style.negative_color()))
+            ct = style.cell_text_color()   # legible item text in dark mode
+            if ct:
+                return QBrush(QColor(ct))
+        return None
+
+    def _cell_text(self, r, col) -> str:
+        if col == self.DATE:
+            return fmt_date(r["date"])
+        if col == self.ACTION:
+            return r["action"] or ""
+        if col == self.COIN:
+            # A trade/income shows its coin; a transfer shows [Other Wallet]; a
+            # swap shows the OUT->IN pair (crypto.register_rows.label).
+            return r.get("label") or r["symbol"] or ""
+        if col == self.QUANTITY:
+            # Stored SIGNED (an OUT leg is negative), shown verbatim.
+            return fmt_qty(r["quantity"]) if r["quantity"] is not None else ""
+        if col == self.PRICE:
+            return fmt_qty(r["price"]) if r["price"] else ""
+        if col == self.COIN_BAL:
+            # None on rows that move no coin (Quicken leaves the balance blank).
+            return fmt_qty(r["coin_bal"]) if r.get("coin_bal") is not None else ""
+        if col == self.AMOUNT:
+            # Fiat only moves on a Buy/Sell; blank for coin-only rows.
+            return fmt_cents(r["cash_amt"]) if r.get("cash_amt") else ""
+        if col == self.CASH_BAL:
+            return fmt_cents(r.get("cash_bal") or 0)
+        if col == self.FEE:
+            return r.get("fee_label") or ""
         return ""
 
 

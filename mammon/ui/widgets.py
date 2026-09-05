@@ -32,8 +32,8 @@ from PyQt5.QtWidgets import (
 # The context menu keeps the patchable name; structural chrome does not need it.
 _GearMenu = QMenu
 
-from mammon import (backup, categorize, db, downloads, import_review, investments,
-                    ledger, loans, scheduled)
+from mammon import (backup, categorize, crypto, db, downloads, import_review,
+                    investments, ledger, loans, scheduled)
 from mammon import webslinger as webslinger_mod
 from mammon.ui import prefs, sounds, style
 from mammon.ui.import_review_widget import ImportReviewPanel
@@ -44,8 +44,9 @@ from mammon.ui.delegates import (
     make_category_combo, make_date_edit, refresh_date_format,
 )
 from mammon.ui.models import (
-    AccountsModel, InvestmentRegisterModel, RegisterFilter, RegisterModel,
-    SearchResultsModel, fmt_cents, fmt_date, fmt_money, fmt_qty, parse_amount,
+    AccountsModel, CryptoRegisterModel, InvestmentRegisterModel, RegisterFilter,
+    RegisterModel, SearchResultsModel, fmt_cents, fmt_date, fmt_money, fmt_qty,
+    parse_amount,
 )
 
 # classic account groupings (account type -> section box)
@@ -55,6 +56,16 @@ from mammon.ui.models import (
 # implicit; naming it costs one header row and makes "where are my cards" a
 # glance instead of a scan. The order still matches Quicken's -- cards directly
 # below the bank accounts.
+def _app_icon():
+    """The application icon, or None when the icon files are absent. Never
+    fatal: a missing icon is cosmetic, and must not stop the app opening."""
+    try:
+        from mammon.ui.icons import app_icon
+        return app_icon()
+    except Exception:                        # pragma: no cover - defensive
+        return None
+
+
 _BAR_GROUPS = [
     ("Banking", ("checking", "savings", "cash")),
     ("Credit Card", ("credit",)),
@@ -3531,6 +3542,348 @@ class HoldingsDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# crypto holdings window (coin positions + current valuation)
+# ---------------------------------------------------------------------------
+class CryptoHoldingsDialog(QDialog):
+    """The coin positions in one crypto wallet: Coin | Quantity | Cost Basis |
+    Price | Market Value | Gain/Loss, valued at each coin's latest recorded USD
+    price (the shared ``{SYM}-USD`` price path) as of the ledger's last activity
+    -- the SAME basis the account bar and the register header use, so the totals
+    agree. The crypto twin of :class:`HoldingsDialog`.
+
+    The last row is CASH (the fiat cash sleeve), and the footer totals cash plus
+    coins to the account's displayed balance. An UNPRICED coin (no recorded
+    quote) shows blank Price / Market Value / Gain-Loss. Everything is read
+    through :mod:`mammon.crypto`; the dialog holds no SQL and no money math."""
+
+    SYMBOL, QUANTITY, COST, PRICE, MARKET, GAIN = range(6)
+    HEADERS = ["Coin", "Quantity", "Cost Basis", "Price", "Market Value",
+               "Gain/Loss"]
+
+    def __init__(self, conn, account_id, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.account_id = account_id
+        acct = ledger.get_account(conn, account_id)
+        self.account_name = acct["name"] if acct else ""
+        self.setWindowTitle(
+            f"Holdings - {self.account_name}" if self.account_name else "Holdings")
+
+        # Value as of the ledger's last activity (not the newest quote on record).
+        self.as_of = crypto.valuation_as_of(conn)
+        # Rebuild the replay cache so the table reflects the current lots.
+        crypto.rebuild_holdings(conn, account_id)
+        self._held = crypto.holding_values(conn, account_id, as_of=self.as_of)
+        # The one number the accounts list shows for this account, from the same
+        # function it uses -- so the two cannot drift.
+        self.valuation = crypto.account_valuation(conn, account_id, self.as_of)
+
+        outer = QVBoxLayout(self)
+        self.table = QTableWidget(len(self._held) + 1, len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(self.SYMBOL, QHeaderView.Stretch)
+        for col in (self.QUANTITY, self.COST, self.PRICE, self.MARKET, self.GAIN):
+            hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self._fill_table()
+        outer.addWidget(self.table)
+
+        # Read the coin total straight off the AccountValuation the accounts list
+        # uses -- no re-summing in the view, so the footer cannot drift from it
+        # (Coins + Cash == Total by construction).
+        self.total_label = QLabel(
+            f"Coins: {fmt_money(self.valuation.securities)}     "
+            f"Cash: {fmt_money(self.valuation.cash)}     "
+            f"Total: {fmt_money(self.valuation.total)}")
+        self.total_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.total_label.setStyleSheet("font-weight: bold;")
+        outer.addWidget(self.total_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        outer.addWidget(buttons)
+        self.resize(560, 360)
+
+    def _fill_table(self):
+        for i, h in enumerate(self._held):
+            priced = h.price is not None
+            self.table.setItem(i, self.SYMBOL, self._cell(h.symbol))
+            self.table.setItem(
+                i, self.QUANTITY, self._cell(fmt_qty(h.quantity), right=True))
+            self.table.setItem(
+                i, self.COST, self._cell(fmt_cents(h.cost_basis), right=True))
+            self.table.setItem(
+                i, self.PRICE,
+                self._cell(fmt_qty(h.price) if priced else "", right=True))
+            self.table.setItem(
+                i, self.MARKET,
+                self._cell(fmt_cents(h.market_value) if priced else "", right=True))
+            gain = self._cell(
+                fmt_cents(h.gain) if h.gain is not None else "", right=True)
+            if h.gain is not None and h.gain < 0:
+                gain.setForeground(QBrush(QColor(style.negative_color())))
+            self.table.setItem(i, self.GAIN, gain)
+        self._fill_cash_row(len(self._held))
+
+    def _fill_cash_row(self, row):
+        """The wallet's fiat cash sleeve, as the last row. Quantity/Cost/Price/
+        Gain stay blank -- cash has no lot, basis or gain."""
+        cash = self._cell("Cash")
+        font = cash.font()
+        font.setItalic(True)
+        cash.setFont(font)
+        self.table.setItem(row, self.SYMBOL, cash)
+        for col in (self.QUANTITY, self.COST, self.PRICE, self.GAIN):
+            self.table.setItem(row, col, self._cell(""))
+        market = self._cell(fmt_cents(self.valuation.cash), right=True)
+        if self.valuation.cash < 0:
+            market.setForeground(QBrush(QColor(style.negative_color())))
+        self.table.setItem(row, self.MARKET, market)
+
+    @staticmethod
+    def _cell(text, right=False):
+        item = QTableWidgetItem(text)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        if right:
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return item
+
+
+# ---------------------------------------------------------------------------
+# crypto register (crypto_transactions activity: buys, swaps, transfers, gas)
+# ---------------------------------------------------------------------------
+class CryptoRegisterWidget(QWidget):
+    """A per-account view for CRYPTO wallets: their Buys/Sells, coin-for-coin
+    Swaps (the paired SWAP_OUT/SWAP_IN legs), same-coin wallet Transfers (the
+    mirror model), income and gas Fees from the ``crypto_transactions`` table --
+    plus a header summarizing the wallet's market valuation (cash + coins). The
+    crypto twin of :class:`InvestmentRegisterWidget`.
+
+    Kept API-compatible with :class:`RegisterWidget` so MainWindow can stack it in
+    ``self._registers`` / ``self.stack`` interchangeably: it exposes a ``changed``
+    signal, a ``model`` with ``reload()``, and ``apply_display_prefs`` /
+    ``set_view_mode`` / ``select_txn``. The model is a READ-ONLY projection over
+    :mod:`mammon.crypto` (events are entered by import); Get Quotes prices the
+    coins and the Holdings button opens :class:`CryptoHoldingsDialog`."""
+
+    changed = pyqtSignal()               # kept for the register-stack contract
+    holdingsRequested = pyqtSignal(int)  # account_id
+
+    def __init__(self, conn, account_id, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.account_id = account_id
+        self.model = CryptoRegisterModel(conn, account_id)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Account title box (shares the cash register's QFrame styling) with the
+        # market valuation summary to the right.
+        self.header_box = QFrame()
+        self.header_box.setObjectName("registerTitleBox")
+        header_layout = QHBoxLayout(self.header_box)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        self.header = QLabel()
+        self.header.setObjectName("registerTitle")
+        header_layout.addWidget(self.header)
+        header_layout.addStretch()
+        self.valuation_label = QLabel()
+        self.valuation_label.setObjectName("investmentValuation")
+        header_layout.addWidget(self.valuation_label)
+
+        # Account actions live in a GEAR beside the account name (as in the cash
+        # and investment registers). AccountToolbar OWNS the actions and their
+        # account-id wiring; it is never shown.
+        self.toolbar = AccountToolbar(account_id, self)
+        self.toolbar.setVisible(False)
+        self.gear_menu = _GearMenu(self)
+        for act in self.toolbar.actions():
+            self.gear_menu.addAction(act)
+        self.gear_menu.addSeparator()
+        self.act_quotes = self.gear_menu.addAction("Get Quotes…")
+        self.act_quotes.setToolTip(
+            "Fetch the latest USD close for every coin held here and record it "
+            "in price history.")
+        self.act_quotes.triggered.connect(self.get_quotes)
+        self.gear_button = QToolButton()
+        self.gear_button.setObjectName("registerGear")
+        self.gear_button.setText("⚙")
+        self.gear_button.setToolTip("Account actions")
+        self.gear_button.setAutoRaise(True)
+        self.gear_button.setPopupMode(QToolButton.InstantPopup)
+        self.gear_button.setMenu(self.gear_menu)
+        header_layout.addWidget(self.gear_button)
+        layout.addWidget(self.header_box)
+
+        # Coin filter: pick one coin to see only its transactions (with the
+        # running Coin Bal). '(All coins)' clears the filter.
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("Coin:"))
+        self.coin_filter = QComboBox()
+        self.coin_filter.setObjectName("coinFilter")
+        self.coin_filter.setMinimumWidth(180)
+        self._reload_coin_filter()
+        self.coin_filter.currentIndexChanged.connect(self._on_coin_filter_changed)
+        filter_bar.addWidget(self.coin_filter)
+        filter_bar.addStretch()
+        layout.addLayout(filter_bar)
+
+        self.view = QTableView()
+        self.view.setModel(self.model)
+        self.view.setAlternatingRowColors(True)
+        self.view.verticalHeader().setVisible(False)
+        self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._configure_columns()
+        layout.addWidget(self.view)
+
+        bar = QHBoxLayout()
+        self.holdings_btn = QPushButton("Holdings…")
+        self.holdings_btn.clicked.connect(self._on_holdings)
+        bar.addWidget(self.holdings_btn)
+        bar.addStretch()
+        self.balance_label = QLabel()
+        bar.addWidget(self.balance_label)
+        layout.addLayout(bar)
+
+        self._refresh_header()
+
+    def _configure_columns(self):
+        """Fixed widths for Date + the right-aligned numeric columns, a tight
+        interactive Action, a stretched Coin/Wallet column, and a fixed Fee."""
+        hh = self.view.horizontalHeader()
+        M = CryptoRegisterModel
+        fixed = {M.DATE: 84, M.QUANTITY: 100, M.PRICE: 96, M.COIN_BAL: 100,
+                 M.AMOUNT: 96, M.CASH_BAL: 100, M.FEE: 96}
+        for col, width in fixed.items():
+            hh.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.view.setColumnWidth(col, width)
+        hh.setSectionResizeMode(M.ACTION, QHeaderView.Interactive)
+        self.view.setColumnWidth(M.ACTION, 104)
+        hh.setSectionResizeMode(M.COIN, QHeaderView.Stretch)
+
+    def _refresh_header(self):
+        """Re-read the account name and its market valuation (cash + coins),
+        valued as of the ledger's last activity -- the same basis the account bar
+        and net worth use, so the header total matches the sidebar balance."""
+        self.header.setText(self.model.account_name())
+        as_of = crypto.valuation_as_of(self.conn)
+        val = crypto.account_valuation(self.conn, self.account_id, as_of)
+        self.valuation_label.setText(
+            f"Cash: {fmt_money(val.cash)}     "
+            f"Coins: {fmt_money(val.securities)}     "
+            f"Total: {fmt_money(val.total)}")
+        self.balance_label.setText(f"Market Value: {fmt_money(val.total)}")
+
+    # ---- coin filter -----------------------------------------------------
+    def _reload_coin_filter(self):
+        combo = self.coin_filter
+        prev = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(All coins)", None)
+        for sym in crypto.symbols_used(self.conn, self.account_id):
+            combo.addItem(sym, sym)
+        idx = combo.findData(prev) if prev else 0
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_coin_filter_changed(self, _index):
+        self.model.set_symbol_filter(self.coin_filter.currentData())
+
+    def _on_holdings(self):
+        """Open the wallet's holdings window (coin positions, cost basis, market
+        value, gain/loss). Emits ``holdingsRequested`` first so a test (or a
+        future listener) can observe the request without driving the modal."""
+        self.holdingsRequested.emit(self.account_id)
+        dlg = CryptoHoldingsDialog(self.conn, self.account_id, parent=self)
+        dlg.exec_()
+
+    def get_quotes(self):
+        """Gear menu: price the wallet's coins. A coin symbol IS its ticker
+        (``ETH`` -> ``ETH-USD``), so unlike equities there is no name-to-ticker
+        guess to confirm; the network stays behind ``crypto.fetch_quotes``'
+        injectable source (a missing backend is reported as the setup step it
+        is)."""
+        symbols = crypto.symbols_used(self.conn, self.account_id)
+        if not symbols:
+            QMessageBox.information(self, "Get Quotes",
+                                    "No coins here to price yet.")
+            return
+        try:
+            crypto.fetch_quotes(self.conn, symbols)
+        except investments.QuoteSourceUnavailable as exc:
+            QMessageBox.warning(
+                self, "Get Quotes",
+                "No quote source is configured." + chr(10) + chr(10) + str(exc))
+            return
+        except Exception as exc:                  # provider / network failure
+            QMessageBox.warning(self, "Get Quotes",
+                                "Could not fetch quotes: %s" % exc)
+            return
+        self.model.reload()
+        self._refresh_header()
+        self.changed.emit()
+        QMessageBox.information(
+            self, "Get Quotes",
+            "Priced %d coin%s." % (len(symbols), "" if len(symbols) == 1 else "s"))
+
+    # ---- MainWindow register-stack contract ------------------------------
+    def apply_display_prefs(self, mode: str | None = None) -> None:
+        """Re-apply the register font + alternating-row shading. ``mode`` (the
+        one/two-line choice) does not apply to a crypto register, so it is
+        accepted and ignored for a uniform call site."""
+        self.view.setAlternatingRowColors(prefs.row_shading())
+        font = QFont(prefs.font_family(), prefs.font_size())
+        self.view.setFont(font)
+        self.view.horizontalHeader().setFont(font)
+        self._refresh_header()
+        self.view.viewport().update()
+
+    def set_view_mode(self, mode: str) -> None:
+        """No-op: crypto registers have no one/two-line variants."""
+        return
+
+    def scroll_to_newest(self) -> None:
+        """Scroll to the newest (bottom) activity row on first open."""
+        self.view.scrollToBottom()
+
+    def has_open_editor(self) -> bool:
+        """Always False: the crypto register is read-only, so no cell editor
+        ever opens (and the stack never needs to resolve one on the way out)."""
+        return False
+
+    def refresh(self) -> None:
+        """Re-read the register, the coin filter and the header totals."""
+        self.model.reload()
+        self._reload_coin_filter()
+        self._refresh_header()
+
+    def select_txn(self, txn_id) -> bool:
+        """Select and scroll to a crypto event by id -- where the Find dialog
+        lands for a hit in this account. Clears an active coin filter that hides
+        the target and retries, so cross-coin results still resolve."""
+        row = self.model.row_for_txn(txn_id)
+        if row < 0 and self.coin_filter.currentIndex() != 0:
+            self.coin_filter.setCurrentIndex(0)   # -> reloads unfiltered
+            row = self.model.row_for_txn(txn_id)
+        if row < 0:
+            return False
+        idx = self.model.index(row, 0)
+        self.view.setCurrentIndex(idx)
+        self.view.selectRow(row)
+        self.view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # new-account dialog
 # ---------------------------------------------------------------------------
 class NewAccountDialog(QDialog):
@@ -5858,6 +6211,9 @@ class MainWindow(QMainWindow):
                     min(820, int(avail.height() * 0.92)) if avail else 820)
         self._autobackup_timer = None
         self._last_backup_fingerprint = None   # see _autobackup_tick
+        icon = _app_icon()
+        if icon is not None:
+            self.setWindowIcon(icon)
         self._build_menu()
         # Reminders (parity): pre-enter every payment that has come due before
         # the registers load, so the rows are there the first time each is
@@ -6513,12 +6869,19 @@ class MainWindow(QMainWindow):
 
     def open_register(self, account_id):
         if account_id not in self._registers:
-            # Investment accounts get the investment register (their activity
-            # lives in a separate table with security/quantity/price fields);
-            # every other account type gets the cash register.
+            # Investment and crypto accounts each get their own register: their
+            # activity lives in a separate table (investment_transactions /
+            # crypto_transactions) with security/coin, quantity and price fields
+            # the cash RegisterWidget never shows. Both are grouped as
+            # INVESTMENT_LIKE_TYPES for net worth and the sidebar, but they read
+            # DIFFERENT tables, so the register class is chosen by exact type here
+            # rather than by that membership. Every other account type gets the
+            # cash register.
             acct = ledger.get_account(self.conn, account_id)
-            if acct is not None and acct["type"] == "investment":
+            if acct is not None and (acct["type"] or "") == "investment":
                 widget = InvestmentRegisterWidget(self.conn, account_id)
+            elif acct is not None and (acct["type"] or "") == "crypto":
+                widget = CryptoRegisterWidget(self.conn, account_id)
             else:
                 widget = RegisterWidget(self.conn, account_id)
             # Exclude the committing register from the cross-register reload: it
