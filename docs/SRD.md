@@ -1117,7 +1117,11 @@ am I doing this year", while Net Worth Over Time alone keeps the whole-ledger
 preset families (§5.8d) — no previously offered range was dropped when the rolling
 ones were added. The same dropdown was retrofitted onto the three inline chart windows
 that lacked it (Net Worth over time, Income by category, Spending by category),
-so every window that shows money over a range now offers the identical control. **Named saved filter sets moved off the old inline row into
+so every window that shows money over a range now offers the identical control.
+It is built by one shared factory (`report_filters.make_period_combo`), used by
+both the generalized window and the inline chart dialogs, so its width is pinned
+wide enough for the longest preset — `Earliest to date` — which the surrounding
+stretch layout otherwise clipped to `Earliest to d...`. **Named saved filter sets moved off the old inline row into
 that same gear popup** (`CustomizeDialog.add_saved_filter_row`), so range,
 accounts, categories and saved sets share one affordance. The
 window is a **thin projection**: it holds no SQL and does no money math. It
@@ -1129,9 +1133,18 @@ framework is writing one pure `*_rows(report) -> list[ReportRow]` projector
 pure function + that projector) — no new window class, no new write path, no
 new money logic. The framework hosts seven reports, each opened from its own
 Reports-menu entry and driven by one shared `ReportWindow`: **Cash Flow**
-(`reports.cash_flow`), **Income vs Expense** (`reports.income_expense`),
+(`reports.cash_flow`, whose spec renames the shared first column `Section` ->
+`Direction` — its values are Income / Expense / Transfers / Net, the directions
+money flowed — because Cash Flow alone adds a TRANSFERS section and folds it into
+its Net), **Income vs Expense** (`reports.income_expense`; kept DISTINCT from Cash
+Flow deliberately, not a duplicate — it excludes transfers entirely and its Net is
+income + expense only, so the two answer different questions),
 **Account Balances** (`reports.account_balances`, whose spec hides the account
-checklist and reads the "To" date as its as-of), **By Payee**
+checklist and reads the "To" date as its as-of; it is a print/export table, so its
+rows are re-ordered to match the LEFT SIDEBAR's account grouping — Banking, Credit
+Card, Investing, Property & Debt (`_SIDEBAR_TYPE_ORDER`, which mirrors
+`widgets._BAR_GROUPS` and a drift-guard test keeps in step), stable within each
+group — and its first column is renamed `Section` -> `Account Type`), **By Payee**
 (`reports.by_payee`, whose spec overrides the shared header with a two-column
 `["Payee", "Net Amount"]` set — **Payee first** — so the payee name has its own
 column instead of riding in the generic Category / Account slot, and the
@@ -1142,7 +1155,8 @@ payees pay IN — an employer, a pension, a tenant, a marketplace that both bill
 and remits — and summing one side reported an employer at their withholding
 while summing the other would hide every store. Net signs each payee the way the
 register does, negative = money out, so both read correctly in one column, and
-the header names it), the **Transactions**
+the header names it; the spec also sets `fit_first_column`, so the Payee column
+opens sized to its widest name rather than truncating long payees), the **Transactions**
 listing (`reports.transactions`, whose spec overrides the shared three-column
 header with an explicit six-column set — Date, Payee, Category / Account, Tag,
 Memo, Amount — via `ReportSpec.columns`, **Date first** so the Date header sits
@@ -1163,7 +1177,13 @@ the include-hidden toggle because the pure function takes no such flag. The
 `ReportWindow` projects the tree through one pure `itemize_tree_rows(tree)` into a
 depth-tagged `TreeRow` list feeding both the widget — re-nested by a depth stack —
 and the CSV / HTML / PDF export, which flattens it by indenting the Category
-column by depth so the hierarchy survives), and **Investment Performance**
+column by depth so the hierarchy survives. Clicking a column header sorts the
+transactions within each open group — Date (2nd key payee), Payee (2nd key date)
+or Amount (2nd key date), a second click on the same column toggling descending
+while the secondary key stays ascending; `itemize_tree_rows` takes the sort as a
+pure argument (`sort_key`/`sort_desc`) and the window re-projects the cached tree
+and re-opens the same groups. TRANSFERS counterparty rows stay in alphabetical
+order UNLESS Amount is the sort key, where they order by their net), and **Investment Performance**
 (`reports.investment_performance`, a consolidated
 per-holding snapshot — cost basis, market value, unrealized/realized gain, %
 return, dividend/interest income and return of capital — valued at prices as of
@@ -1197,7 +1217,7 @@ disagree; `as_of` caps only the valuation price, never the share/cost replay.
   force, so table, CSV, HTML and PDF never drift. `ReportWindow.export_csv_to(
   path)` is the testable seam — an explicit path, no dialog — that
   `_export_csv_dialog` calls after the file picker; e.g. a Cash Flow window
-  writes `Section,Category / Account,Amount` then rows like
+  writes `Direction,Category / Account,Amount` then rows like
   `Income,Salary,"4,200.00"`, a By Payee window writes `Payee,Net Amount` then rows
   like `Acme Grocers,150.00`, and an Itemize window writes `Category,Amount`.
 - **HTML/PDF print reuses one renderer.** `report_rows_to_html(rows, title,

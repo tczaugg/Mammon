@@ -21,7 +21,7 @@ from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QDate
 from PyQt5.QtWidgets import (
-    QWidget, QDialog, QHBoxLayout, QVBoxLayout, QFormLayout, QDateEdit,
+    QWidget, QDialog, QComboBox, QHBoxLayout, QVBoxLayout, QFormLayout, QDateEdit,
     QListWidget, QListWidgetItem, QPushButton, QGroupBox, QToolButton,
     QCheckBox,
 )
@@ -64,6 +64,32 @@ PERIOD_DEFAULT = "ytd"
 # Net Worth is a cumulative curve, not a within-period sum: a YTD slice would lop
 # off decades of history and mislead, so its window keeps the whole-ledger span.
 NET_WORTH_PERIOD_DEFAULT = "earliest"
+
+
+def make_period_combo(default_key: str = PERIOD_DEFAULT) -> QComboBox:
+    """Build the ONE Period dropdown every report and chart window shares (§5.9b).
+
+    Constructed here, in one place, so its sizing stays identical across the two
+    call sites that used to build it inline (:class:`ReportWindow` and the legacy
+    chart dialogs' ``_report_period_header``). It is widened to the longest preset
+    label (``"Earliest to date"``) plus room for the drop-down arrow: sitting in a
+    stretch layout the combo was otherwise squeezed to a default width that clipped
+    that label to ``"Earliest to d..."``. Seeding the current index here fires no
+    signal, and callers connect their own ``currentIndexChanged`` handler AFTER this
+    returns, so no premature refresh runs.
+    """
+    combo = QComboBox()
+    combo.setToolTip("Report period")
+    for label, key in PERIOD_PRESETS:
+        combo.addItem(label, key)
+    idx = combo.findData(default_key)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    fm = combo.fontMetrics()
+    measure = getattr(fm, "horizontalAdvance", fm.width)  # Qt >= 5.11 renamed it
+    widest = max(measure(label) for label, _ in PERIOD_PRESETS)
+    combo.setMinimumWidth(widest + 44)  # + drop-down arrow and frame padding
+    return combo
 
 
 def resolve_period(key, conn, today):
