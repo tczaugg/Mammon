@@ -16,7 +16,10 @@ into it, or routed through :mod:`mammon.ledger`:
   writer: this module is the SOLE writer of the ``crypto_*`` tables, so the
   transfer-mirror and swap-pairing invariants can be enforced in exactly one
   place. ``ledger.py`` remains the only writer of the cash ``transactions``
-  table -- crypto does not add a second writer there.
+  table -- crypto does not add a second writer there. The fiat side of a
+  buy/sell rides on the crypto row's own ``amount`` (an internal cash sleeve,
+  exactly as ``investments`` keeps buy/sell cash in ``investment_transactions``
+  rather than opening a second cash ledger), so there is ONE story for both.
 
 Conventions (locked, same as the rest of the app):
 
@@ -29,8 +32,9 @@ Conventions (locked, same as the rest of the app):
   significant digits, so ``Decimal('1e11') + 1 wei`` silently drops the wei.
   Storage is always exact; only quantity ARITHMETIC is at risk. Every quantity
   calculation here therefore runs inside a local high-precision decimal context
-  (>= 40 significant digits) via :func:`quantity_context`, rather than trusting
-  the process default.
+  (>= 40 significant digits) via :func:`quantity_context` -- the replay entry
+  points wrap their whole body in ``with decimal.localcontext(...)``, so all the
+  nested lot math inherits it -- rather than trusting the process default.
 
 A crypto account is a DISTINCT ``accounts.type`` value (``'crypto'``) -- a coin
 wallet is not an equity brokerage -- but is classified INVESTMENT-LIKE
@@ -39,21 +43,49 @@ allocation pie. The wallet address lives in the existing
 ``accounts.account_number`` column (already blanked from the MCP surface), and
 ``asset_class = 'crypto'`` carries the allocation classification.
 
-Phase 1 scope: schema plus enough domain scaffolding to CREATE a ``'crypto'``
-account and read it back. The ``record_*`` / ``update_*`` / ``delete_*`` event
-writers, holdings replay, per-year checkpoints, valuation, the wallet-to-wallet
-transfer mirror (``transfer_pair_id``) and coin-for-coin swap pairing
-(``swap_group_id``) arrive with the crypto_transactions writers.
+Event taxonomy (schema v51 ``action`` enum) mapped to primitives:
+
+- ``BUY`` / ``SELL`` -- fiat<->coin. BUY adds a lot and debits the cash sleeve
+  (``amount<0``); SELL disposes coin for cash (``amount>0``) and books realized
+  gain (proceeds - the cost relieved from lots, per ``accounts.lot_method``).
+- ``SWAP_OUT`` + ``SWAP_IN`` -- a coin-for-coin trade is TWO single-asset legs
+  in ONE account, linked by ``swap_group_id`` (the intra-account analogue of
+  ``transfer_pair_id``, distinct because a swap is two coins in one account, not
+  one coin across two accounts). SWAP_OUT is a disposal at fair-market value;
+  SWAP_IN establishes a new lot whose basis is that same FMV.
+- ``TRANSFER_OUT`` + ``TRANSFER_IN`` -- a wallet-to-wallet move of the SAME coin
+  is the EXISTING transfer mirror model re-expressed for coin QUANTITY instead
+  of cents: two rows linked by ``transfer_pair_id``, each ``transfer_account_id``
+  pointing at the other wallet. No fiat, no realized gain; the cost basis rides
+  along (the OUT leg relieves it, the IN leg re-adds exactly that basis). Edit
+  one leg's date/quantity -> the mirror syncs; delete one -> both go.
+- ``SEND`` / ``RECEIVE`` -- to/from a third party. SEND is a disposal at FMV;
+  RECEIVE is ordinary income at FMV (basis = FMV).
+- ``REWARD`` / ``INTEREST`` / ``AIRDROP`` / ``MINING`` -- in-kind income credited
+  as coin QUANTITY (not cents), basis = FMV at receipt, accruing to the
+  checkpoint ``income`` column (the crypto analogue of an investments dividend).
+- ``FEE`` -- a network/gas fee. When it rides an existing action it is carried
+  in ``fee_symbol`` / ``fee_quantity`` / ``fee_amount`` on the parent row (on
+  Ethereum, moving 100 USDC costs gas IN ETH -- one action, two holdings deltas);
+  when the fee coin must debit a distinct holding on its own it is a standalone
+  ``FEE`` row. Either way the default treatment is a PLAIN EXPENSE: the fee
+  quantity's basis simply leaves the holding, no realized gain is booked (tax-lot
+  precision on gas is an opt-in the user has not asked for).
+- ``FORK`` -- a chain split crediting a new symbol; basis per policy (default the
+  caller-supplied FMV, or 0 -- disputed, so never hardcoded here).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import decimal
-from decimal import Decimal
+import json
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional
 
 import sqlite3
 
-from mammon import ledger
+from mammon import ledger, investments
 
 # The distinct account.type value for a crypto wallet, and the asset_class that
 # flows a coin position into the allocation pie / rebalance drift.
@@ -64,6 +96,28 @@ CRYPTO_ASSET_CLASS = "crypto"
 # a wei when summing a large balance; 40 clears realistic integer-part +
 # 18-decimal magnitudes with room to spare. See the module docstring.
 QUANTITY_PRECISION = 40
+
+LOT_METHODS = ("average", "fifo", "lifo")
+
+# ---------------------------------------------------------------------------
+# Action vocabulary (compared normalized to UPPER-case; stored UPPER-case to
+# match the schema v51 enum). Which actions ADD coin (with basis), which REMOVE
+# it, which removals are true DISPOSALS (book realized gain at FMV/proceeds) as
+# opposed to a basis-preserving transfer/fee, and which are income (accrue FMV
+# to the checkpoint ``income`` total).
+# ---------------------------------------------------------------------------
+_ADD_ACTIONS = {
+    "BUY", "SWAP_IN", "TRANSFER_IN", "RECEIVE",
+    "REWARD", "INTEREST", "AIRDROP", "MINING", "FORK",
+}
+_REMOVE_ACTIONS = {"SELL", "SWAP_OUT", "TRANSFER_OUT", "SEND", "FEE"}
+# A disposal for value books realized gain; a TRANSFER_OUT (basis rides to the
+# other wallet) and a FEE (plain expense) remove coin WITHOUT booking a gain.
+_DISPOSAL_ACTIONS = {"SELL", "SWAP_OUT", "SEND"}
+# In-kind income: credited as coin, valued at FMV, summed into checkpoint income.
+_INCOME_ACTIONS = {"RECEIVE", "REWARD", "INTEREST", "AIRDROP", "MINING"}
+
+ACTIONS = _ADD_ACTIONS | _REMOVE_ACTIONS
 
 
 def quantity_context() -> decimal.Context:
@@ -78,6 +132,29 @@ def quantity_context() -> decimal.Context:
     return decimal.Context(prec=QUANTITY_PRECISION)
 
 
+# ---------------------------------------------------------------------------
+# Decimal / money helpers (mirror investments._D / _cents / _qty_text -- kept
+# local so this module does not reach into another module's private internals).
+# ---------------------------------------------------------------------------
+_CENT = Decimal("1")
+_HUNDRED = Decimal("100")
+
+
+def _D(value) -> Decimal:
+    """Tolerant Decimal parse; '' / None -> 0."""
+    if value is None or value == "":
+        return Decimal(0)
+    try:
+        return Decimal(str(value).strip())
+    except InvalidOperation:
+        return Decimal(0)
+
+
+def _cents(value: Decimal) -> int:
+    """Round a Decimal amount to integer cents, HALF_UP."""
+    return int(value.quantize(_CENT, rounding=ROUND_HALF_UP))
+
+
 def _qty_text(qty: Decimal) -> str:
     """A clean, exponent-free Decimal string for storage ('100' not '1E+2'),
     normalized under the high-precision quantity context so a wei-scale value
@@ -86,6 +163,33 @@ def _qty_text(qty: Decimal) -> str:
         if qty == 0:
             return "0"
         return format(qty.normalize(), "f")
+
+
+def _row_value(row, key):
+    """Read ``key`` from a sqlite3.Row OR a plain dict, tolerating its absence."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _norm(action) -> str:
+    """Normalize an action for comparison: trim, upper-case, collapse spaces."""
+    return (action or "").strip().upper().replace(" ", "_").replace("-", "_")
+
+
+def _validate_date(date: str) -> None:
+    """Fail loudly on a non-ISO date rather than storing garbage the replay
+    (which slices ``substr(date,1,4)`` for the year) would silently mishandle."""
+    _dt.date.fromisoformat(date)
+
+
+def pair_symbol(symbol: str) -> str:
+    """The yfinance USD pair ticker for a bare coin symbol -- ``'ETH'`` ->
+    ``'ETH-USD'``. Prices are stored in the shared ``price_history`` table under
+    this pair, which is the namespace that keeps a coin ``ABC`` from colliding
+    with a stock ``ABC`` (see db.py migration 51-53 rationale)."""
+    return f"{(symbol or '').strip().upper()}-USD"
 
 
 # ---------------------------------------------------------------------------
@@ -144,3 +248,962 @@ def list_accounts(conn: sqlite3.Connection,
     return [a for a in ledger.list_accounts(
         conn, include_closed=include_closed, include_hidden=include_hidden)
         if (a["type"] or "") == CRYPTO_ACCOUNT_TYPE]
+
+
+def get_lot_method(conn, account_id: int) -> str:
+    """How this account costs a disposal: ``average`` (the default), ``fifo`` or
+    ``lifo``. Shares the ``accounts.lot_method`` column with investments."""
+    row = conn.execute("SELECT lot_method FROM accounts WHERE id=?",
+                       (account_id,)).fetchone()
+    m = (row["lot_method"] if row is not None else None) or "average"
+    return m if m in LOT_METHODS else "average"
+
+
+# ---------------------------------------------------------------------------
+# Replay state (per-symbol lots + running totals), mirrored on investments'
+# _Lot / _Position but with an ``income`` total (coin-denominated income at FMV)
+# in place of ``dividends``.
+# ---------------------------------------------------------------------------
+@dataclass
+class _Lot:
+    """One tax lot: coin acquired together, and what it cost (cents). ``date`` /
+    ``txn_id`` name the acquiring row; both None for coin whose lot history is
+    not known (a position restored from a pre-lots snapshot)."""
+    qty: Decimal = Decimal(0)
+    cost: int = 0
+    date: Optional[str] = None
+    txn_id: Optional[int] = None
+
+
+@dataclass
+class _Position:
+    """Full per-symbol replay state: the open lots (qty + cost) plus the running
+    totals the holdings/per-coin views need -- ``income`` (in-kind income valued
+    at FMV), ``realized`` gain/loss booked on disposals, and ``ever_held``."""
+    qty: Decimal = Decimal(0)
+    cost: int = 0            # cents, cost basis of the remaining coin
+    income: int = 0          # cents, in-kind income attributed to the symbol
+    realized: int = 0        # cents, realized gain/loss from disposals
+    ever_held: bool = False
+    lots: list = field(default_factory=list)
+    gains: list = field(default_factory=list, compare=False)
+
+
+@dataclass
+class RealizedGain:
+    """One disposal matched to one lot: when the coin was acquired and disposed,
+    what it brought, what it cost."""
+    sale_txn_id: Optional[int]
+    symbol: str
+    acquired: Optional[str]
+    sold: str
+    quantity: Decimal
+    proceeds: int                     # cents
+    basis: int                        # cents relieved
+
+    @property
+    def gain(self) -> int:
+        return self.proceeds - self.basis
+
+
+def _basis_of(t, qty: Decimal) -> int:
+    """Cost basis (cents) an acquiring action assigns to the acquired ``qty``.
+    Prefers an explicit ``basis`` (income FMV, or a transfer's basis-riding
+    value), then the fiat ``amount`` a BUY spent, then ``price*qty``."""
+    b = _row_value(t, "basis")
+    if b is not None:
+        return abs(int(b))
+    amount = _row_value(t, "amount")
+    if amount not in (None, 0):
+        return abs(int(amount))
+    price = _row_value(t, "price")
+    return _cents(qty * _D(price) * _HUNDRED) if price else 0
+
+
+def _proceeds_of(t, qty: Decimal) -> int:
+    """Disposal proceeds (cents) at FMV: the fiat ``amount`` a SELL brought in,
+    else ``price*qty`` (a SWAP_OUT/SEND carries its FMV as the per-unit price),
+    else an explicit ``basis``."""
+    amount = _row_value(t, "amount")
+    if amount not in (None, 0):
+        return abs(int(amount))
+    price = _row_value(t, "price")
+    if price:
+        return _cents(qty * _D(price) * _HUNDRED)
+    b = _row_value(t, "basis")
+    return abs(int(b)) if b is not None else 0
+
+
+def _planned(plan: list, lot) -> Decimal:
+    return sum((x for l, x in plan if l is lot), Decimal(0))
+
+
+def _spread_cost(pos: _Position) -> None:
+    """Re-spread ``pos.cost`` over the open lots in proportion to their coin, the
+    last lot absorbing the rounding so the lots always sum to the position."""
+    total_qty = sum((lot.qty for lot in pos.lots), Decimal(0))
+    if not pos.lots or total_qty <= 0:
+        return
+    allotted = 0
+    for i, lot in enumerate(pos.lots):
+        lot.cost = (pos.cost - allotted if i == len(pos.lots) - 1
+                    else _cents(Decimal(pos.cost) * lot.qty / total_qty))
+        allotted += lot.cost
+
+
+def _relieve(pos: _Position, q: Decimal, method: str) -> list:
+    """Take ``q`` coin out of ``pos`` and return what each lot gave up as
+    ``[(lot_date, lot_txn_id, qty, cost)]``, lowering ``pos.cost`` by the total.
+    Order per ``method`` -- oldest first (fifo/average) or newest first (lifo);
+    average spreads the position's per-coin average over the coin removed. With
+    no lot history the aggregate average is relieved. Mirrors
+    ``investments._relieve`` minus specify-lots (crypto has no lot_assignments)."""
+    if q <= 0 or pos.qty <= 0:
+        return []
+    if not pos.lots:
+        avg = Decimal(pos.cost) / pos.qty
+        taken = min(pos.cost, _cents(avg * q))
+        pos.cost -= taken
+        return [(None, None, q, taken)]
+    method = (method or "average").lower()
+    plan: list = []
+    remaining = q
+    order = list(reversed(pos.lots)) if method == "lifo" else list(pos.lots)
+    for lot in order:
+        if remaining <= 0:
+            break
+        avail = lot.qty - _planned(plan, lot)
+        if avail <= 0:
+            continue
+        take = min(avail, remaining)
+        plan.append((lot, take))
+        remaining -= take
+    out: list = []
+    if method == "average":
+        avg = Decimal(pos.cost) / pos.qty
+        total = min(pos.cost, _cents(avg * q))
+        planned_qty = sum((x for _, x in plan), Decimal(0))
+        allotted = 0
+        for i, (lot, take) in enumerate(plan):
+            c = (total - allotted if i == len(plan) - 1
+                 else _cents(Decimal(total) * take / planned_qty))
+            allotted += c
+            out.append((lot.date, lot.txn_id, take, c))
+        for lot, take in plan:
+            lot.qty -= take
+        pos.lots = [lot for lot in pos.lots if lot.qty > 0]
+        pos.cost -= total
+        _spread_cost(pos)
+    else:
+        total = 0
+        for lot, take in plan:
+            c = lot.cost if take >= lot.qty else _cents(Decimal(lot.cost) * take / lot.qty)
+            lot.cost -= c
+            lot.qty -= take
+            total += c
+            out.append((lot.date, lot.txn_id, take, c))
+        pos.lots = [lot for lot in pos.lots if lot.qty > 0]
+        pos.cost -= total
+    return out
+
+
+def _gain_rows(t, sym: str, q: Decimal, proceeds: int, taken: list) -> list:
+    """One :class:`RealizedGain` per lot a disposal drew on, the net proceeds
+    shared out by coin (the last lot absorbs the rounding)."""
+    if not taken:
+        return []
+    total_qty = sum((x for _, _, x, _ in taken), Decimal(0))
+    out, allotted = [], 0
+    for i, (date, txn_id, take, cost) in enumerate(taken):
+        p = (proceeds - allotted if i == len(taken) - 1
+             else _cents(Decimal(proceeds) * take / total_qty))
+        allotted += p
+        out.append(RealizedGain(_row_value(t, "id"), sym, date, t["date"], take, p, cost))
+    return out
+
+
+def _apply_fee(positions: dict, t, method: str) -> None:
+    """Apply a network/gas fee carried on the parent row (``fee_symbol`` /
+    ``fee_quantity``) as a PLAIN EXPENSE: the fee coin's basis simply leaves the
+    holding, no realized gain. Handles the same-coin case (ETH gas on an ETH move
+    reduces the same position) and the different-coin case (ETH gas on a token
+    move reduces the ETH position) uniformly."""
+    fsym = _row_value(t, "fee_symbol")
+    fq = _D(_row_value(t, "fee_quantity"))
+    if not fsym or fq <= 0:
+        return
+    fpos = positions.setdefault(fsym, _Position())
+    _relieve(fpos, fq, method)
+    fpos.qty -= fq
+    if fpos.qty == 0:
+        fpos.cost = 0
+        fpos.lots = []
+    fpos.ever_held = True
+
+
+def _apply_txn(positions: dict, t, method: str = "average") -> None:
+    """Fold one crypto transaction into the running per-symbol :class:`_Position`
+    map. ONE branch table shared by the from-inception replay and the
+    snapshot+delta replay, so a holdings read and the checkpoint path can never
+    disagree. Quantity is stored SIGNED (out negative); the magnitude used here is
+    ``abs`` so a mis-signed import cannot flip an add into a remove."""
+    sym = _row_value(t, "symbol")
+    a = _norm(_row_value(t, "action"))
+    q = _D(_row_value(t, "quantity"))
+    aq = abs(q)
+    if sym:
+        pos = positions.setdefault(sym, _Position())
+        if a in _ADD_ACTIONS:
+            basis = _basis_of(t, aq)
+            pos.qty += aq
+            pos.cost += basis
+            if aq > 0:
+                pos.lots.append(_Lot(aq, basis, _row_value(t, "date"),
+                                     _row_value(t, "id")))
+            if a in _INCOME_ACTIONS:
+                pos.income += basis
+            pos.ever_held = True
+        elif a in _REMOVE_ACTIONS:
+            cost_before = pos.cost
+            taken = _relieve(pos, aq, method)
+            pos.qty -= aq
+            if pos.qty == 0:
+                pos.cost = 0
+                pos.lots = []
+            if a in _DISPOSAL_ACTIONS:
+                proceeds = _proceeds_of(t, aq)
+                pos.realized += proceeds - (cost_before - pos.cost)
+                pos.gains.extend(_gain_rows(t, sym, aq, proceeds, taken))
+            pos.ever_held = True
+    # A network fee can ride ANY action (or a standalone FEE row carries it in the
+    # main quantity, handled by the _REMOVE branch above).
+    _apply_fee(positions, t, method)
+
+
+# ---------------------------------------------------------------------------
+# Holdings replay + per-year checkpoints (a direct port of the investments
+# machinery, targeting the crypto_* tables; the ``income`` column stands in for
+# investments' ``dividends``).
+# ---------------------------------------------------------------------------
+def _txn_years(conn, account_id: int) -> list[int]:
+    rows = conn.execute(
+        "SELECT DISTINCT substr(date,1,4) AS yr FROM crypto_transactions "
+        "WHERE account_id=? ORDER BY yr",
+        (account_id,),
+    ).fetchall()
+    return [int(r["yr"]) for r in rows]
+
+
+def _boundary_year(conn, account_id: int, as_of: Optional[str]) -> int:
+    if as_of is not None:
+        return int(as_of[:4])
+    row = conn.execute(
+        "SELECT MAX(substr(date,1,4)) FROM crypto_transactions WHERE account_id=?",
+        (account_id,),
+    ).fetchone()
+    return int(row[0]) if row and row[0] else 0
+
+
+def _list_txns_in_range(conn, account_id: int,
+                        after: Optional[str], through: Optional[str]) -> list:
+    """Crypto transactions in application order (date, id) with dates in
+    ``(after, through]`` -- either bound may be ``None`` for open-ended."""
+    sql = "SELECT * FROM crypto_transactions WHERE account_id=?"
+    params: list = [account_id]
+    if after is not None:
+        sql += " AND date>?"
+        params.append(after)
+    if through is not None:
+        sql += " AND date<=?"
+        params.append(through)
+    sql += " ORDER BY date, id"
+    return conn.execute(sql, tuple(params)).fetchall()
+
+
+def _load_holdings_checkpoint(conn, account_id: int, before_year: int):
+    """Seed positions from the newest year-end snapshot strictly before
+    ``before_year``. Returns ``(positions, snapshot_year)``; ``snapshot_year`` is
+    ``None`` (positions empty) when no earlier snapshot exists."""
+    yr = conn.execute(
+        "SELECT MAX(year) FROM crypto_holdings_checkpoints WHERE account_id=? AND year<?",
+        (account_id, before_year),
+    ).fetchone()
+    snap_year = yr[0] if yr else None
+    if snap_year is None:
+        return {}, None
+    positions: dict[str, _Position] = {}
+    for r in conn.execute(
+        "SELECT symbol, quantity, cost_basis, income, realized, ever_held, lots "
+        "FROM crypto_holdings_checkpoints WHERE account_id=? AND year=?",
+        (account_id, snap_year),
+    ).fetchall():
+        qty = _D(r["quantity"])
+        raw = _row_value(r, "lots")
+        if raw:
+            lots = [_Lot(_D(l[1]), int(l[2]), l[0], l[3]) for l in json.loads(raw)]
+        else:
+            lots = [_Lot(qty, r["cost_basis"] or 0, None, None)] if qty > 0 else []
+        positions[r["symbol"]] = _Position(
+            qty=qty, cost=r["cost_basis"], income=r["income"],
+            realized=r["realized"], ever_held=bool(r["ever_held"]), lots=lots,
+        )
+    return positions, snap_year
+
+
+def _replay_positions(conn, account_id: int, as_of: Optional[str] = None,
+                      use_snapshots: bool = True) -> dict:
+    """Replay the account's crypto transactions into per-symbol
+    :class:`_Position` records as of ``as_of`` (default: everything). The ONE
+    engine behind :func:`compute_holdings` and the valuation/realized-gain views.
+    When ``use_snapshots`` is set (and snapshots exist), the position is seeded
+    from the prior year's checkpoint and only the remaining current-year rows are
+    replayed -- IDENTICAL to a from-inception replay (asserted in the tests); pass
+    ``use_snapshots=False`` for that inception oracle. All quantity math runs
+    under the high-precision context (wraps the whole body)."""
+    with decimal.localcontext(quantity_context()):
+        positions: dict[str, _Position]
+        lower: Optional[str] = None
+        if use_snapshots:
+            boundary_year = _boundary_year(conn, account_id, as_of)
+            positions, snap_year = _load_holdings_checkpoint(conn, account_id, boundary_year)
+            if snap_year is not None:
+                lower = f"{snap_year}-12-31"
+        else:
+            positions = {}
+        method = get_lot_method(conn, account_id)
+        for t in _list_txns_in_range(conn, account_id, lower, as_of):
+            _apply_txn(positions, t, method)
+        return positions
+
+
+def compute_holdings(conn, account_id: int, as_of: Optional[str] = None) -> dict:
+    """Replay into ``{symbol: _Lot(qty, cost)}`` -- pure read, a thin projection
+    of :func:`_replay_positions` (qty + cost only)."""
+    return {
+        sym: _Lot(pos.qty, pos.cost)
+        for sym, pos in _replay_positions(conn, account_id, as_of).items()
+    }
+
+
+def _write_snapshot(conn, account_id: int, year: int, positions: dict) -> None:
+    """Persist the per-symbol replay state as the year-end snapshot for ``year``
+    (replacing any existing rows for that year)."""
+    conn.execute(
+        "DELETE FROM crypto_holdings_checkpoints WHERE account_id=? AND year=?",
+        (account_id, year),
+    )
+    for sym, pos in positions.items():
+        lots = json.dumps([[lot.date, _qty_text(lot.qty), lot.cost, lot.txn_id]
+                           for lot in pos.lots])
+        conn.execute(
+            "INSERT INTO crypto_holdings_checkpoints"
+            "(account_id, year, symbol, quantity, cost_basis, income, realized,"
+            " ever_held, lots) VALUES (?,?,?,?,?,?,?,?,?)",
+            (account_id, year, sym, _qty_text(pos.qty), pos.cost,
+             pos.income, pos.realized, int(pos.ever_held), lots),
+        )
+
+
+def _replay_snapshots_from(conn, account_id: int, years: list[int], seed: dict) -> None:
+    """Replay ``years`` forward starting from ``seed`` (a per-symbol
+    :class:`_Position` map), writing the running state as each year's snapshot."""
+    with decimal.localcontext(quantity_context()):
+        positions = seed
+        method = get_lot_method(conn, account_id)
+        for year in years:
+            lower = f"{year - 1}-12-31"
+            for t in _list_txns_in_range(conn, account_id, lower, f"{year}-12-31"):
+                _apply_txn(positions, t, method)
+            _write_snapshot(conn, account_id, year, positions)
+
+
+def rebuild_holdings_checkpoints(conn, account_id: int) -> None:
+    """Recompute every year-end holdings snapshot for the account from inception.
+    A snapshot for year Y is the full replay state through Dec 31 of Y."""
+    conn.execute("DELETE FROM crypto_holdings_checkpoints WHERE account_id=?",
+                 (account_id,))
+    _replay_snapshots_from(conn, account_id, _txn_years(conn, account_id), {})
+    conn.commit()
+
+
+def recompute_holdings_checkpoints_from_year(conn, account_id: int, from_year: int) -> None:
+    """Cascade a change dated in ``from_year``: drop snapshots for that year and
+    all later, reseed from the ``from_year - 1`` snapshot, replay each affected
+    year forward. Earlier snapshots are untouched (the analogue of
+    ledger._touch_checkpoints)."""
+    conn.execute(
+        "DELETE FROM crypto_holdings_checkpoints WHERE account_id=? AND year>=?",
+        (account_id, from_year),
+    )
+    seed, _ = _load_holdings_checkpoint(conn, account_id, from_year)
+    years = [y for y in _txn_years(conn, account_id) if y >= from_year]
+    _replay_snapshots_from(conn, account_id, years, seed)
+    conn.commit()
+
+
+def _invalidate_holdings_checkpoints_from(conn, account_id: int, date: str) -> None:
+    """Drop snapshots for the year of ``date`` and later after a raw write, so
+    reads fall back to a correct from-inception replay until the next
+    :func:`rebuild_holdings` rebuilds them."""
+    if not date:
+        return
+    conn.execute(
+        "DELETE FROM crypto_holdings_checkpoints WHERE account_id=? AND year>=?",
+        (account_id, int(date[:4])),
+    )
+
+
+def rebuild_holdings(conn, account_id: int) -> list[dict]:
+    """Recompute the account's crypto_holdings from its transactions and replace
+    the rows (dropping any fully-closed position). Refreshes the year-end
+    snapshots first (from-inception) so the replay below reads fresh checkpoints.
+    Returns the resulting holdings as dicts."""
+    rebuild_holdings_checkpoints(conn, account_id)
+    positions = _replay_positions(conn, account_id)
+    conn.execute("DELETE FROM crypto_holdings WHERE account_id=?", (account_id,))
+    out: list[dict] = []
+    for sym, pos in positions.items():
+        if pos.qty == 0:
+            continue
+        conn.execute(
+            "INSERT INTO crypto_holdings(account_id, symbol, quantity, cost_basis) "
+            "VALUES (?,?,?,?)",
+            (account_id, sym, _qty_text(pos.qty), pos.cost),
+        )
+        out.append({"symbol": sym, "quantity": _qty_text(pos.qty),
+                    "cost_basis": pos.cost})
+    conn.commit()
+    return out
+
+
+def list_holdings(conn, account_id: int) -> list:
+    return conn.execute(
+        "SELECT * FROM crypto_holdings WHERE account_id=? ORDER BY symbol",
+        (account_id,)).fetchall()
+
+
+def get_holding(conn, account_id: int, symbol: str):
+    return conn.execute(
+        "SELECT * FROM crypto_holdings WHERE account_id=? AND symbol=?",
+        (account_id, symbol)).fetchone()
+
+
+def realized_gains(conn, account_id: int, as_of: Optional[str] = None) -> list:
+    """Every :class:`RealizedGain` this account's disposals booked on/before
+    ``as_of``. Uses the from-inception replay (``use_snapshots=False``) because
+    the per-lot gain detail is not stored in the snapshot rows."""
+    out: list = []
+    for pos in _replay_positions(conn, account_id, as_of,
+                                 use_snapshots=False).values():
+        out.extend(pos.gains)
+    out.sort(key=lambda g: (g.sold or "", g.symbol))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Event writers (SINGLE WRITER of crypto_transactions / crypto_holdings)
+# ---------------------------------------------------------------------------
+_EDITABLE = {
+    "date", "action", "symbol", "quantity", "price", "amount", "basis",
+    "fee_symbol", "fee_quantity", "fee_amount", "memo", "tx_hash", "fitid",
+}
+
+
+def record_event(conn, account_id: int, date: str, action: str, *,
+                 symbol=None, quantity=None, price=None, amount=None, basis=None,
+                 fee_symbol=None, fee_quantity=None, fee_amount=None,
+                 transfer_account_id=None, transfer_pair_id=None, swap_group_id=None,
+                 tx_hash=None, memo=None, fitid=None, import_id=None,
+                 commit: bool = True) -> int:
+    """The low-level insert -- one row per single-asset delta. Quantities/prices
+    are encoded to exponent-free Decimal TEXT; cents are stored as-is (signed).
+    Invalidates checkpoints from ``date`` forward; does NOT rebuild holdings (the
+    caller does, after a batch of edits). Use the ``record_buy`` / ``record_sell``
+    / ``record_swap`` / ``record_wallet_transfer`` / ``record_income`` wrappers
+    for the common events; this is the escape hatch."""
+    _validate_date(date)
+    act = _norm(action)
+    if act not in ACTIONS:
+        raise ValueError(f"unknown crypto action {action!r}; one of {sorted(ACTIONS)}")
+    cur = conn.execute(
+        "INSERT INTO crypto_transactions"
+        "(account_id, date, action, symbol, quantity, price, amount, basis,"
+        " fee_symbol, fee_quantity, fee_amount, transfer_account_id,"
+        " transfer_pair_id, swap_group_id, tx_hash, memo, import_id, fitid)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            account_id, date, act, symbol or None,
+            _qty_text(_D(quantity)) if quantity not in (None, "") else None,
+            _qty_text(_D(price)) if price not in (None, "") else None,
+            int(amount) if amount is not None else None,
+            int(basis) if basis is not None else None,
+            fee_symbol or None,
+            _qty_text(_D(fee_quantity)) if fee_quantity not in (None, "") else None,
+            int(fee_amount) if fee_amount is not None else None,
+            transfer_account_id, transfer_pair_id, swap_group_id,
+            tx_hash or None, memo or None, import_id, fitid or None,
+        ),
+    )
+    _invalidate_holdings_checkpoints_from(conn, account_id, date)
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+def record_buy(conn, account_id: int, date: str, symbol: str, quantity, cost, *,
+               price=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
+               memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+    """Buy ``quantity`` of ``symbol`` for ``cost`` cents (fiat out). Establishes a
+    lot; the fiat debits the account's internal cash sleeve (``amount<0``)."""
+    q = abs(_D(quantity))
+    cost_cents = abs(int(cost))
+    if price is None and q > 0:
+        with decimal.localcontext(quantity_context()):
+            price = (Decimal(cost_cents) / _HUNDRED) / q
+    return record_event(conn, account_id, date, "BUY", symbol=symbol, quantity=q,
+                        price=price, amount=-cost_cents, fee_symbol=fee_symbol,
+                        fee_quantity=fee_quantity, fee_amount=fee_amount,
+                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+
+
+def record_sell(conn, account_id: int, date: str, symbol: str, quantity, proceeds, *,
+                price=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
+                memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+    """Sell ``quantity`` of ``symbol`` for ``proceeds`` cents (fiat in). Books
+    realized gain from the lots per the account's method."""
+    q = abs(_D(quantity))
+    proceeds_cents = abs(int(proceeds))
+    if price is None and q > 0:
+        with decimal.localcontext(quantity_context()):
+            price = (Decimal(proceeds_cents) / _HUNDRED) / q
+    return record_event(conn, account_id, date, "SELL", symbol=symbol, quantity=-q,
+                        price=price, amount=proceeds_cents, fee_symbol=fee_symbol,
+                        fee_quantity=fee_quantity, fee_amount=fee_amount,
+                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+
+
+def record_send(conn, account_id: int, date: str, symbol: str, quantity, fmv, *,
+                fee_symbol=None, fee_quantity=None, fee_amount=None, memo=None,
+                tx_hash=None, fitid=None, import_id=None) -> int:
+    """Send ``quantity`` of ``symbol`` to a third party -- a disposal at ``fmv``
+    cents fair-market value (books realized gain vs the relieved basis). A network
+    fee (gas) rides the ``fee_*`` fields. If the recipient is really an
+    intermediary the user controls, prefer :func:`record_wallet_transfer` with an
+    account-per-intermediary instead (CLAUDE.md), so no gain is realized."""
+    q = abs(_D(quantity))
+    fmv_cents = abs(int(fmv))
+    price = None
+    if q > 0:
+        with decimal.localcontext(quantity_context()):
+            price = (Decimal(fmv_cents) / _HUNDRED) / q
+    return record_event(conn, account_id, date, "SEND", symbol=symbol, quantity=-q,
+                        price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
+                        fee_amount=fee_amount, memo=memo, tx_hash=tx_hash,
+                        fitid=fitid, import_id=import_id)
+
+
+def record_income(conn, account_id: int, date: str, action: str, symbol: str,
+                  quantity, fmv, *, memo=None, tx_hash=None, fitid=None,
+                  import_id=None) -> int:
+    """Credit ``quantity`` of ``symbol`` as in-kind income (RECEIVE / REWARD /
+    INTEREST / AIRDROP / MINING / FORK) at ``fmv`` cents fair-market value. Basis
+    = FMV; the income actions accrue FMV to the checkpoint ``income`` total (FORK
+    basis is per policy -- pass ``fmv=0`` for the $0-basis treatment)."""
+    act = _norm(action)
+    if act not in (_INCOME_ACTIONS | {"FORK"}):
+        raise ValueError(f"{action!r} is not an income/fork action")
+    q = abs(_D(quantity))
+    fmv_cents = abs(int(fmv))
+    price = None
+    if q > 0:
+        with decimal.localcontext(quantity_context()):
+            price = (Decimal(fmv_cents) / _HUNDRED) / q
+    return record_event(conn, account_id, date, act, symbol=symbol, quantity=q,
+                        price=price, basis=fmv_cents, memo=memo, tx_hash=tx_hash,
+                        fitid=fitid, import_id=import_id)
+
+
+def record_fee(conn, account_id: int, date: str, symbol: str, quantity, *,
+               usd_value=None, memo=None, tx_hash=None, fitid=None,
+               import_id=None) -> int:
+    """A STANDALONE network/gas fee row (use this only when the fee is not carried
+    on a parent action's ``fee_*`` fields -- e.g. a periodic fee sweep). Removes
+    ``quantity`` of ``symbol`` as a plain expense; ``usd_value`` (cents) is stored
+    on ``fee_amount`` for reference and does not move the fiat cash sleeve."""
+    q = abs(_D(quantity))
+    return record_event(conn, account_id, date, "FEE", symbol=symbol, quantity=-q,
+                        fee_amount=usd_value, memo=memo, tx_hash=tx_hash,
+                        fitid=fitid, import_id=import_id)
+
+
+def record_swap(conn, account_id: int, date: str, symbol_out: str, quantity_out,
+                symbol_in: str, quantity_in, fmv, *, fee_symbol=None,
+                fee_quantity=None, fee_amount=None, memo=None, tx_hash=None,
+                fitid=None, import_id=None) -> tuple[int, int]:
+    """A coin-for-coin swap: dispose ``quantity_out`` of ``symbol_out`` and
+    acquire ``quantity_in`` of ``symbol_in``, both valued at ``fmv`` cents (the
+    agreed USD value of the trade). Written as TWO linked single-asset legs
+    (SWAP_OUT + SWAP_IN) sharing a ``swap_group_id`` -- never one row with two
+    symbols, which would break holdings replay. The OUT leg is a disposal at FMV
+    (books realized gain vs its relieved basis); the IN leg's basis IS that FMV.
+    Any network fee rides the OUT leg. Returns ``(out_id, in_id)``."""
+    _validate_date(date)
+    if not symbol_out or not symbol_in:
+        raise ValueError("a swap needs both an out and an in symbol")
+    qo = abs(_D(quantity_out))
+    qi = abs(_D(quantity_in))
+    fmv_cents = abs(int(fmv))
+    with decimal.localcontext(quantity_context()):
+        price_out = (Decimal(fmv_cents) / _HUNDRED) / qo if qo > 0 else None
+        price_in = (Decimal(fmv_cents) / _HUNDRED) / qi if qi > 0 else None
+    out_id = record_event(conn, account_id, date, "SWAP_OUT", symbol=symbol_out,
+                          quantity=-qo, price=price_out, fee_symbol=fee_symbol,
+                          fee_quantity=fee_quantity, fee_amount=fee_amount,
+                          memo=memo, tx_hash=tx_hash, fitid=fitid,
+                          import_id=import_id, commit=False)
+    in_id = record_event(conn, account_id, date, "SWAP_IN", symbol=symbol_in,
+                         quantity=qi, price=price_in, basis=fmv_cents, memo=memo,
+                         tx_hash=tx_hash, import_id=import_id, commit=False)
+    conn.execute(
+        "UPDATE crypto_transactions SET swap_group_id=? WHERE id IN (?,?)",
+        (out_id, out_id, in_id),
+    )
+    conn.commit()
+    return out_id, in_id
+
+
+def _basis_to_move(conn, account_id: int, date: str, symbol: str,
+                   q: Decimal, method: str) -> int:
+    """The cost basis (cents) that ``q`` coin of ``symbol`` carries out of the
+    source wallet as of ``date`` -- computed by relieving ``q`` from a THROWAWAY
+    replay of the source, so it equals exactly what the TRANSFER_OUT leg will
+    relieve on replay. Stamped on both transfer legs so basis is conserved."""
+    with decimal.localcontext(quantity_context()):
+        positions = _replay_positions(conn, account_id, as_of=date)
+        pos = positions.get(symbol)
+        if pos is None or pos.qty <= 0:
+            return 0
+        cost_before = pos.cost
+        _relieve(pos, min(q, pos.qty), method)   # mutates the throwaway copy
+        return cost_before - pos.cost
+
+
+def record_wallet_transfer(conn, from_account_id: int, to_account_id: int,
+                           date: str, symbol: str, quantity, *, basis=None,
+                           fee_symbol=None, fee_quantity=None, fee_amount=None,
+                           memo=None, tx_hash=None, fitid=None,
+                           import_id=None) -> tuple[int, int]:
+    """Move ``quantity`` of ``symbol`` between the user's OWN wallets, using the
+    EXISTING transfer mirror model re-expressed for coin quantity: two rows
+    (TRANSFER_OUT in ``from``, TRANSFER_IN in ``to``) linked by
+    ``transfer_pair_id``, each ``transfer_account_id`` pointing at the other
+    wallet. No fiat, no realized gain; the cost basis rides along (computed from
+    the source's lots unless ``basis`` cents is supplied). A network fee (usually
+    gas in a third coin) rides the OUT leg. Returns ``(out_id, in_id)``."""
+    _validate_date(date)
+    if from_account_id == to_account_id:
+        raise ValueError("cannot transfer to the same wallet")
+    for aid in (from_account_id, to_account_id):
+        if get_account(conn, aid) is None:
+            raise KeyError(f"no account {aid}")
+    q = abs(_D(quantity))
+    if basis is None:
+        basis = _basis_to_move(conn, from_account_id, date, symbol, q,
+                               get_lot_method(conn, from_account_id))
+    basis = int(basis)
+    out_id = record_event(conn, from_account_id, date, "TRANSFER_OUT",
+                          symbol=symbol, quantity=-q,
+                          transfer_account_id=to_account_id, basis=basis,
+                          fee_symbol=fee_symbol, fee_quantity=fee_quantity,
+                          fee_amount=fee_amount, memo=memo, tx_hash=tx_hash,
+                          fitid=fitid, import_id=import_id, commit=False)
+    in_id = record_event(conn, to_account_id, date, "TRANSFER_IN", symbol=symbol,
+                         quantity=q, transfer_account_id=from_account_id,
+                         basis=basis, memo=memo, tx_hash=tx_hash,
+                         import_id=import_id, commit=False)
+    conn.execute("UPDATE crypto_transactions SET transfer_pair_id=? WHERE id=?",
+                 (in_id, out_id))
+    conn.execute("UPDATE crypto_transactions SET transfer_pair_id=? WHERE id=?",
+                 (out_id, in_id))
+    conn.commit()
+    return out_id, in_id
+
+
+def get_event(conn, txn_id: int):
+    return conn.execute("SELECT * FROM crypto_transactions WHERE id=?",
+                        (txn_id,)).fetchone()
+
+
+def list_events(conn, account_id: int) -> list:
+    return conn.execute(
+        "SELECT * FROM crypto_transactions WHERE account_id=? ORDER BY date, id",
+        (account_id,)).fetchall()
+
+
+def symbols_used(conn, account_id: int) -> list:
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM crypto_transactions "
+        "WHERE account_id=? AND symbol IS NOT NULL AND symbol<>'' ORDER BY symbol",
+        (account_id,)).fetchall()
+    return [r["symbol"] for r in rows]
+
+
+def _apply_update(conn, txn_id: int, updates: dict) -> None:
+    cols = ", ".join(f"{k}=?" for k in updates)
+    conn.execute(f"UPDATE crypto_transactions SET {cols} WHERE id=?",
+                 (*updates.values(), txn_id))
+
+
+def _encode_update(k, v):
+    """Encode one editable field the way :func:`record_event` stores it."""
+    if k in ("quantity", "price", "fee_quantity"):
+        return _qty_text(_D(v)) if v not in (None, "") else None
+    if k in ("amount", "basis", "fee_amount"):
+        return int(v) if v is not None else None
+    if k == "action":
+        return _norm(v)
+    return v
+
+
+def update_event(conn, txn_id: int, **fields) -> None:
+    """Edit an event. If it is one side of a wallet transfer, the linked leg is
+    kept in sync -- ``date`` mirrors, ``quantity`` mirrors NEGATED, ``memo`` and
+    ``basis`` mirror verbatim (the CLAUDE.md transfer invariant, in coin). If it
+    is a swap leg, the sibling leg's ``date`` mirrors (a swap's two legs share a
+    date; their quantities differ per coin and are NOT mirrored). Checkpoints are
+    invalidated from the earliest year touched on every affected account."""
+    row = get_event(conn, txn_id)
+    if row is None:
+        raise KeyError(f"no crypto transaction {txn_id}")
+    old_date = row["date"]
+    if "date" in fields:
+        _validate_date(fields["date"])
+    if "action" in fields and _norm(fields["action"]) not in ACTIONS:
+        raise ValueError(f"unknown crypto action {fields['action']!r}")
+    updates = {}
+    for k, v in fields.items():
+        if k not in _EDITABLE:
+            raise ValueError(f"unknown crypto transaction field: {k}")
+        updates[k] = _encode_update(k, v)
+    if not updates:
+        return
+    _apply_update(conn, txn_id, updates)
+    affected: list[tuple[int, str]] = [(row["account_id"], old_date)]
+    if "date" in updates:
+        affected.append((row["account_id"], updates["date"]))
+
+    pair_id = row["transfer_pair_id"]
+    if pair_id is not None:
+        pair = get_event(conn, pair_id)
+        if pair is not None:
+            mirror = {}
+            if "date" in updates:
+                mirror["date"] = updates["date"]
+            if "quantity" in updates:
+                with decimal.localcontext(quantity_context()):
+                    mirror["quantity"] = _qty_text(-_D(updates["quantity"]))
+            if "memo" in fields:            # mirror an explicit clear too
+                mirror["memo"] = updates["memo"]
+            if "basis" in updates:
+                mirror["basis"] = updates["basis"]
+            if mirror:
+                _apply_update(conn, pair_id, mirror)
+                affected.append((pair["account_id"], pair["date"]))
+                if "date" in mirror:
+                    affected.append((pair["account_id"], mirror["date"]))
+
+    group_id = row["swap_group_id"]
+    if group_id is not None and "date" in updates:
+        for r in conn.execute(
+                "SELECT id, account_id, date FROM crypto_transactions "
+                "WHERE swap_group_id=? AND id<>?", (group_id, txn_id)).fetchall():
+            _apply_update(conn, r["id"], {"date": updates["date"]})
+            affected.append((r["account_id"], r["date"]))
+            affected.append((r["account_id"], updates["date"]))
+
+    for aid, d in affected:
+        _invalidate_holdings_checkpoints_from(conn, aid, d)
+    conn.commit()
+
+
+def delete_event(conn, txn_id: int) -> bool:
+    """Delete an event. If it is one side of a wallet transfer, BOTH legs go; if
+    it is a swap leg, ALL legs sharing its ``swap_group_id`` go (a swap or a
+    transfer is one economic event -- half of it is never valid). Returns whether
+    anything was deleted."""
+    row = get_event(conn, txn_id)
+    if row is None:
+        return False
+    ids = {txn_id}
+    if row["transfer_pair_id"] is not None:
+        ids.add(row["transfer_pair_id"])
+    if row["swap_group_id"] is not None:
+        for r in conn.execute(
+                "SELECT id FROM crypto_transactions WHERE swap_group_id=?",
+                (row["swap_group_id"],)).fetchall():
+            ids.add(r["id"])
+    marks = ",".join("?" * len(ids))
+    affected = [(r["account_id"], r["date"]) for r in conn.execute(
+        f"SELECT account_id, date FROM crypto_transactions WHERE id IN ({marks})",
+        tuple(ids)).fetchall()]
+    conn.execute(f"DELETE FROM crypto_transactions WHERE id IN ({marks})", tuple(ids))
+    for aid, d in affected:
+        _invalidate_holdings_checkpoints_from(conn, aid, d)
+    conn.commit()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Price history + valuation
+# ---------------------------------------------------------------------------
+# The shared money/holding value shapes: reuse the investments dataclasses so a
+# crypto holding and an equity holding project identically for the UI.
+HoldingValue = investments.HoldingValue
+AccountValuation = investments.AccountValuation
+Quote = investments.Quote
+QuoteSourceUnavailable = investments.QuoteSourceUnavailable
+
+
+def latest_price(conn, symbol: str, as_of: Optional[str] = None) -> Optional[Decimal]:
+    """The most recent recorded USD close for a BARE coin ``symbol`` on/before
+    ``as_of`` (looked up under the ``'{SYM}-USD'`` pair in ``price_history``)."""
+    return investments.latest_price(conn, pair_symbol(symbol), as_of)
+
+
+def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
+    """``(date, close)`` pairs for the coin's ``'{SYM}-USD'`` series, ascending."""
+    return investments.price_history(conn, pair_symbol(symbol), as_of)
+
+
+def _resolve_price(conn, symbol, as_of, prices) -> Optional[Decimal]:
+    """The price to value ``symbol`` at ``as_of``: an explicit ``prices`` override
+    (keyed by BARE symbol) wins, else the latest recorded pair close. ``None`` when
+    neither is available -- the holding is reported unpriced, never guessed at."""
+    if prices and symbol in prices:
+        return _D(prices[symbol])
+    return latest_price(conn, symbol, as_of)
+
+
+def holding_values(conn, account_id: int, as_of: Optional[str] = None,
+                   prices: Optional[dict] = None) -> list:
+    """Value each crypto holding at its latest pair price (or an injected
+    ``prices`` override, BARE symbol -> price). Unpriced holdings get
+    market_value 0 and gain None. Reads the cached ``crypto_holdings`` table, so
+    call :func:`rebuild_holdings` after writing events."""
+    out: list = []
+    for h in list_holdings(conn, account_id):
+        sym = h["symbol"]
+        qty = _D(h["quantity"])
+        cost = h["cost_basis"] or 0
+        price = _resolve_price(conn, sym, as_of, prices)
+        if price is None:
+            out.append(HoldingValue(sym, qty, cost, None, 0, None))
+        else:
+            with decimal.localcontext(quantity_context()):
+                mv = _cents(qty * price * _HUNDRED)
+            out.append(HoldingValue(sym, qty, cost, price, mv, mv - cost))
+    return out
+
+
+def crypto_cash(conn, account_id: int, as_of: Optional[str] = None) -> int:
+    """Net fiat (cents) from the account's crypto transactions on/before ``as_of``
+    -- the internal cash sleeve. Only BUY (``amount<0``) and SELL (``amount>0``)
+    carry fiat; every other action's ``amount`` is NULL/0. Kept parallel to
+    ``investments.investment_cash`` so both domains tell one cash story."""
+    sql = ("SELECT COALESCE(SUM(amount), 0) FROM crypto_transactions "
+           "WHERE account_id=? AND amount IS NOT NULL")
+    params: list = [account_id]
+    if as_of is not None:
+        sql += " AND date<=?"
+        params.append(as_of)
+    return int(conn.execute(sql, tuple(params)).fetchone()[0] or 0)
+
+
+def account_valuation(conn, account_id: int, as_of: Optional[str] = None,
+                      prices: Optional[dict] = None) -> AccountValuation:
+    """Total value of a crypto account: cash (the ordinary ledger balance -- an
+    opening balance / any linked cash rows -- plus the crypto cash sleeve) plus
+    the market value of its coin holdings. ``prices`` (bare symbol -> price)
+    overrides recorded prices for what-if / testing."""
+    hvs = holding_values(conn, account_id, as_of, prices)
+    securities = sum(hv.market_value for hv in hvs)
+    cash = (ledger.account_balance(conn, account_id, as_of)
+            + crypto_cash(conn, account_id, as_of))
+    unpriced = [hv.symbol for hv in hvs if hv.price is None]
+    return AccountValuation(
+        account_id=account_id, cash=cash, securities=securities,
+        total=cash + securities, holdings=hvs, unpriced=unpriced,
+    )
+
+
+def valuation_as_of(conn) -> Optional[str]:
+    """The date to value at when the caller names none: the most recent date the
+    ledger knows ANYTHING -- a transaction (cash, investment or crypto) or a
+    recorded price. A recorded price counts as activity, so a just-fetched crypto
+    quote actually moves the displayed value (see investments.valuation_as_of)."""
+    return investments.valuation_as_of(conn)
+
+
+def display_balance(conn, account_id: int, as_of: Optional[str] = None,
+                    prices: Optional[dict] = None) -> int:
+    """The balance to SHOW for a crypto account (cents): the full market
+    valuation (cash sleeve + coin value). For a non-crypto account this defers to
+    :func:`investments.display_balance` so a single call values any account
+    correctly."""
+    acct = ledger.get_account(conn, account_id)
+    if not is_crypto_account(acct):
+        return investments.display_balance(conn, account_id, as_of, prices)
+    eff = as_of if as_of is not None else valuation_as_of(conn)
+    return account_valuation(conn, account_id, eff, prices).total
+
+
+# ---------------------------------------------------------------------------
+# Auto-quotes (network behind an injectable QuoteSource; tests pass a fake).
+# ---------------------------------------------------------------------------
+class CryptoQuoteSource:
+    """A quote backend for crypto: it accepts BARE coin symbols, maps each to its
+    yfinance ``'{SYM}-USD'`` pair, and returns :class:`Quote` objects keyed by the
+    PAIR (so they store under the pair symbol in ``price_history``, avoiding a
+    coin/stock namespace clash). The mapping is the only crypto-specific bit; the
+    actual network fetch is delegated to a backend (default: the shared
+    :class:`investments.YFinanceQuoteSource`, whose lazy ``import yfinance`` keeps
+    the app from hard-depending on it). Tests inject their own ``source`` into
+    :func:`fetch_quotes` and never touch this."""
+
+    source_name = "yfinance"
+
+    def __init__(self, backend=None):
+        self._backend = backend
+
+    def get_quotes(self, symbols):
+        pairs = [pair_symbol(s) for s in symbols if (s or "").strip()]
+        backend = self._backend or investments.YFinanceQuoteSource()
+        return backend.get_quotes(pairs)
+
+
+def default_quote_source():
+    """The default crypto quote backend, or raise if none is installed. Only
+    called when :func:`fetch_quotes` is given no explicit source."""
+    return CryptoQuoteSource(investments.default_quote_source())
+
+
+def fetch_quotes(conn, symbols, source=None) -> list:
+    """Fetch the latest USD close for each BARE coin symbol and store it in
+    ``price_history`` under the ``'{SYM}-USD'`` pair. The source is given the bare
+    symbols and returns Quotes already keyed by the pair (see
+    :class:`CryptoQuoteSource`). Tests pass a fake ``source``; production omits it
+    and gets yfinance via :func:`default_quote_source`."""
+    syms: list[str] = []
+    for s in symbols:
+        s = (s or "").strip()
+        if s and s not in syms:
+            syms.append(s)
+    if not syms:
+        return []
+    src = source or default_quote_source()
+    quotes = src.get_quotes(syms)
+    default_name = getattr(src, "source_name", None)
+    for q in quotes:
+        investments.record_price(conn, q.symbol, q.date, q.close,
+                                 q.source or default_name)
+    return quotes

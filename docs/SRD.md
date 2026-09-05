@@ -795,6 +795,73 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
 - `holdings` and `holdings_checkpoints` are derived, so they are REBUILT, not
   patched: a merge changes the lot replay itself.
 
+### 5.8h Cryptocurrency accounts
+- A cryptocurrency wallet is a DISTINCT account type (`accounts.type = 'crypto'`)
+  that is classified INVESTMENT-LIKE (`ledger.INVESTMENT_LIKE_TYPES`) for net
+  worth, sidebar grouping and the allocation pie -- a coin wallet is not an
+  equity brokerage, but it is valued at market, not at its cash balance. The
+  domain layer is `mammon/crypto.py`, a parallel of `mammon/investments.py`: it
+  is the SOLE writer of the `crypto_*` tables (mirroring investments' single-
+  writer discipline), and `ledger.py` stays the only writer of the cash
+  `transactions` table -- crypto adds no second writer there. The fiat side of a
+  buy/sell rides on the crypto row's own `amount` (an internal cash sleeve, the
+  way investments keeps buy/sell cash in `investment_transactions`), so both
+  domains tell one cash story and no cash-ledger row is written for a trade.
+- **Quantities and per-unit prices are Decimal-encoded TEXT; fiat is signed
+  integer cents.** TEXT storage round-trips an 18-decimal wei value exactly. The
+  one new hazard over equities is SUMMATION, not storage: Python's default
+  28-significant-digit decimal context can silently drop a wei from a large
+  balance, so every quantity calculation in `crypto.py` runs inside a local
+  high-precision context (`crypto.quantity_context()`, `prec >= 40`). The replay
+  entry points wrap their whole body in `decimal.localcontext(...)`, so the
+  nested lot math inherits it.
+- **Event taxonomy** (the `crypto_transactions.action` enum), each one
+  `crypto.record_*` call: `BUY`/`SELL` (fiat<->coin; SELL books realized gain
+  from the lots per `accounts.lot_method`), a coin-for-coin **swap** as two
+  linked single-asset legs `SWAP_OUT`+`SWAP_IN` sharing a `swap_group_id`
+  (SWAP_OUT is a disposal at fair-market value, SWAP_IN's basis IS that FMV --
+  never one row crammed with two symbols, which would break holdings replay),
+  `SEND`/`RECEIVE` to/from a third party (SEND disposes at FMV, RECEIVE is income
+  at FMV), the in-kind income actions `REWARD`/`INTEREST`/`AIRDROP`/`MINING`
+  (credited as coin quantity, basis = FMV, accruing to the checkpoint `income`
+  total -- the crypto twin of a dividend), `FEE` (a network/gas fee), and `FORK`
+  (basis per policy, default the supplied FMV or 0 -- disputed, never hardcoded).
+- **A wallet-to-wallet move of the same coin is the EXISTING transfer mirror
+  model, re-expressed for coin QUANTITY instead of cents**: two rows
+  (`TRANSFER_OUT` in the source, `TRANSFER_IN` in the destination) linked by
+  `transfer_pair_id`, each `transfer_account_id` pointing at the other wallet. No
+  fiat, no realized gain; the cost basis rides along (the OUT leg relieves it, the
+  IN leg re-adds exactly that basis, computed from the source's lots). Editing one
+  leg's date/quantity syncs the mirror (quantity negated); deleting one deletes
+  both -- the CLAUDE.md transfer invariant, in coin. A transfer renders as
+  `[Other Wallet]`, consuming no category row, exactly like a cash transfer.
+- **Gas / network fee.** When a fee rides an existing action it is carried in
+  `fee_symbol`/`fee_quantity`/`fee_amount` on the parent row (moving a token on
+  Ethereum costs gas IN ETH -- one action, two holdings deltas); a fee that must
+  debit a distinct holding on its own is a standalone `FEE` row. Either way the
+  default treatment is a PLAIN EXPENSE: the fee quantity's basis simply leaves the
+  holding, no realized gain is booked (tax-lot precision on gas is an opt-in the
+  user has not requested).
+- **Holdings and per-year checkpoints** are the direct crypto ports of the
+  investments machinery. `crypto_holdings` is a replay cache; `crypto_holdings_
+  checkpoints` is the per-(account, year, symbol) snapshot for fast open/scroll,
+  with an `income` column standing in for investments' `dividends`. Any write
+  invalidates the affected years' snapshots; a read seeds from the prior year's
+  snapshot and replays only the current-year delta, which is IDENTICAL to a
+  from-inception replay (asserted against that oracle, mirroring
+  `test_year_end_snapshots.py`).
+- **Valuation reuses the price-history infrastructure, namespaced.** Crypto
+  quotes are stored in the shared `price_history` table under the yfinance USD
+  pair (`'ETH'` -> `'ETH-USD'`), the namespace that keeps a coin `ABC` from
+  colliding with a stock `ABC`. `crypto.fetch_quotes` maps a bare symbol to its
+  pair via a `CryptoQuoteSource` (default backend: the shared yfinance source,
+  lazily imported; tests inject a fake), and valuation looks the coin up under
+  that pair. A crypto account's displayed balance -- and its net-worth
+  contribution -- is its full market valuation (cash sleeve + coin value):
+  `investments.display_balance` delegates a `'crypto'` account to
+  `crypto.display_balance`, so the app's single valuation entry point values any
+  account correctly.
+
 ### 5.8c Backup scoping (one folder per database)
 - Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
   the Restore picker opens in the CURRENT database's folder.
