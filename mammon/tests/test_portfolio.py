@@ -1,0 +1,212 @@
+"""mammon.portfolio: open lots valued at a date, the money-weighted return of
+an account and of one security, and allocation by asset class."""
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+
+from mammon import db, investments, ledger, portfolio
+
+
+@pytest.fixture
+def conn(tmp_path):
+    c = db.init_db(tmp_path / "portfolio.db")
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def world(conn):
+    chk = ledger.create_account(conn, "Checking", "checking", opening_balance=50000_00)
+    inv = ledger.create_account(conn, "Brokerage", "investment", opening_balance=0)
+    ledger.create_transfer(conn, chk, inv, "2025-01-02", 10000_00, payee="Fund brokerage")
+    investments.record_investment(conn, inv, "2025-01-03", "Buy", symbol="AAPL",
+                                  quantity="100", price="100.00", amount=-10000_00)
+    investments.record_investment(conn, inv, "2025-06-01", "Div", symbol="AAPL", amount=200_00)
+    investments.record_price(conn, "AAPL", "2025-12-31", "110.00")
+    investments.rebuild_holdings(conn, inv)
+    return {"chk": chk, "inv": inv}
+
+
+# ---------------------------------------------------------------------------
+# lots valued at a date
+# ---------------------------------------------------------------------------
+def test_open_lots_are_valued_with_term_and_days(conn, world):
+    inv = world["inv"]
+    investments.record_investment(conn, inv, "2025-11-20", "Buy", symbol="AAPL",
+                                  quantity="10", price="105.00", amount=-1050_00)
+    investments.rebuild_holdings(conn, inv)
+    lots = portfolio.open_lots(conn, inv, as_of="2026-02-01")
+    assert [(l.acquired, str(l.quantity), l.cost, l.term, l.days_held) for l in lots] == [
+        ("2025-01-03", "100", 10000_00, "long", 394),
+        ("2025-11-20", "10", 1050_00, "short", 73)]
+    assert lots[0].price == Decimal("110.00") and lots[0].market_value == 11000_00
+    assert lots[0].gain == 1000_00 and lots[1].gain == 50_00
+    assert portfolio.open_lots(conn, inv, symbol="MSFT") == []
+    # Unpriced: value and gain unknown, not zero gain.
+    investments.record_investment(conn, inv, "2025-12-01", "Buy", symbol="ZZZ",
+                                  quantity="1", price="5.00", amount=-5_00)
+    z = [l for l in portfolio.open_lots(conn, inv, as_of="2026-02-01") if l.symbol == "ZZZ"]
+    assert z[0].price is None and z[0].gain is None and z[0].market_value == 0
+
+
+# ---------------------------------------------------------------------------
+# money-weighted return
+# ---------------------------------------------------------------------------
+def test_xirr_solves_known_rates_and_refuses_one_signed_flows():
+    r = portfolio.xirr([("2025-01-01", -1000_00), ("2026-01-01", 1100_00)])
+    assert abs(r - 0.10) < 1e-6
+    r2 = portfolio.xirr([("2025-01-01", -1000_00), ("2025-07-01", -500_00),
+                         ("2026-01-01", 1650_00)])
+    assert abs(1000_00 + 500_00 / (1 + r2) ** (181 / 365) - 1650_00 / (1 + r2)) < 1e-3
+    assert portfolio.xirr([("2025-01-01", 100_00), ("2026-01-01", 100_00)]) is None
+    assert portfolio.xirr([]) is None
+    assert portfolio.xirr([("2025-01-01", -100_00), ("2026-01-01", 20_00)]) < -0.7
+
+
+def test_account_performance_counts_only_what_crossed_the_boundary(conn, world):
+    inv = world["inv"]
+    p = portfolio.account_performance(conn, inv, "2025-01-01", "2025-12-31")
+    assert (p.start_value, p.end_value, p.money_in, p.money_out, p.income) == \
+        (0, 11200_00, 10000_00, 0, 200_00)
+    assert p.gain == 1200_00
+    assert 0.115 < p.irr < 0.125             # 10,000 -> 11,200 over 363 days
+    # The transfer leg is one flow, not two (the ledger leg only).
+    assert portfolio.external_flows(conn, inv, "2025-01-01", "2025-12-31") == \
+        [("2025-01-02", 10000_00)]
+    # A withdrawal recorded as an investment row is money out; a duplicate
+    # ledger leg for the same transfer is not counted again.
+    investments.record_investment(conn, inv, "2025-09-01", "XOut", amount=500_00,
+                                  transfer_account_id=world["chk"])
+    ledger.create_transfer(conn, inv, world["chk"], "2025-09-01", 500_00, payee="to checking")
+    p2 = portfolio.account_performance(conn, inv, "2025-01-01", "2025-12-31")
+    assert (p2.money_in, p2.money_out) == (10000_00, 500_00)
+
+
+def test_security_performance_uses_buys_sales_and_cash_dividends(conn, world):
+    inv = world["inv"]
+    p = portfolio.security_performance(conn, inv, "AAPL", "2025-01-01", "2025-12-31")
+    assert (p.start_value, p.end_value, p.money_in, p.money_out, p.income) == \
+        (0, 11000_00, 10000_00, 200_00, 200_00)
+    assert p.gain == 1200_00 and 0.115 < p.irr < 0.125
+    # A later window starts from the shares' value the day before.
+    investments.record_price(conn, "AAPL", "2025-12-30", "108.00")
+    p3 = portfolio.security_performance(conn, inv, "AAPL", "2025-12-31", "2025-12-31")
+    assert (p3.start_value, p3.end_value, p3.money_in) == (10800_00, 11000_00, 0)
+
+
+# ---------------------------------------------------------------------------
+# allocation
+# ---------------------------------------------------------------------------
+def test_allocation_groups_by_asset_class_security_and_account(conn, world):
+    inv = world["inv"]
+    ira = ledger.create_account(conn, "IRA", "investment", opening_balance=0)
+    ledger.create_transfer(conn, world["chk"], ira, "2025-01-15", 5000_00, payee="Fund IRA")
+    investments.record_investment(conn, ira, "2025-02-01", "Buy", symbol="BND",
+                                  quantity="50", price="80.00", amount=-4000_00)
+    investments.record_investment(conn, ira, "2025-02-01", "Buy", symbol="MYST",
+                                  quantity="1", price="1.00", amount=-1_00)
+    investments.record_price(conn, "BND", "2025-12-31", "80.00")
+    investments.rebuild_holdings(conn, ira)
+    portfolio.set_security(conn, "AAPL", name="Apple", sec_type="stock",
+                           asset_class="domestic_stock")
+    portfolio.set_security(conn, "BND", sec_type="etf", asset_class="bond")
+    with pytest.raises(ValueError):
+        portfolio.set_security(conn, "BND", asset_class="crypto")
+    assert portfolio.get_security(conn, "AAPL")["name"] == "Apple"
+    portfolio.set_security(conn, "AAPL", name="")             # clears just the name
+    assert portfolio.get_security(conn, "AAPL")["asset_class"] == "domestic_stock"
+
+    a = portfolio.allocation(conn, as_of="2025-12-31")
+    ira_cash = 5000_00 - 4000_00 - 1_00
+    assert a.total == 11200_00 + 4000_00 + ira_cash
+    assert [(s.key, s.value) for s in a.by_class] == [
+        ("domestic_stock", 11000_00), ("bond", 4000_00), ("cash", 200_00 + ira_cash)]
+    assert abs(sum(s.pct for s in a.by_class) - 100.0) < 1e-9
+    assert [(s.key, s.value) for s in a.by_security] == [("AAPL", 11000_00), ("BND", 4000_00)]
+    assert [(s.label, s.value) for s in a.by_account] == \
+        [("Brokerage", 11200_00), ("IRA", 4000_00 + ira_cash)]
+    assert a.unpriced == ["MYST"]
+    only = portfolio.allocation(conn, [ira], as_of="2025-12-31")
+    assert [(s.key, s.value) for s in only.by_class] == [("bond", 4000_00), ("cash", ira_cash)]
+
+
+def test_allocation_scope_reaches_cash_accounts_and_property_but_never_debt(conn, world):
+    """Quicken allocates investment accounts only; Mammon widens the scope, so
+    a house is part of the answer to "where is my money" once classified."""
+    house = ledger.create_account(conn, "House", "asset", opening_balance=400000_00)
+    car = ledger.create_account(conn, "Car", "asset", opening_balance=20000_00)
+    ledger.create_account(conn, "Mortgage", "liability", opening_balance=-250000_00)
+    ledger.create_account(conn, "Visa", "credit", opening_balance=-1500_00)
+    portfolio.set_security(conn, "AAPL", asset_class="domestic_stock")
+    chk_balance = ledger.account_balance(conn, world["chk"], "2025-12-31")
+
+    inv_only = portfolio.allocation(conn, as_of="2025-12-31")           # the default
+    assert [s.key for s in inv_only.by_class] == ["domestic_stock", "cash"]
+    assert inv_only.scope == "investments" and inv_only.account_classes == {}
+
+    with_cash = portfolio.allocation(conn, as_of="2025-12-31", scope="with_cash")
+    # A cash-shaped account counts as cash with nothing said -- the rule that
+    # already applied to a brokerage's idle cash, not a guess about the user.
+    assert dict((s.key, s.value) for s in with_cash.by_class)["cash"] == 200_00 + chk_balance
+    assert with_cash.account_classes == {world["chk"]: "cash"}
+
+    every = portfolio.allocation(conn, as_of="2025-12-31", scope="everything")
+    by_class = dict((s.key, s.value) for s in every.by_class)
+    assert by_class["unclassified"] == 400000_00 + 20000_00      # never guessed
+    assert every.account_classes[house] == "unclassified"
+    # Debt is in no scope: an allocation is of what you own.
+    assert "Mortgage" not in [s.label for s in every.by_account]
+    assert "Visa" not in [s.label for s in every.by_account]
+    assert every.total == inv_only.total + chk_balance + 420000_00
+
+    portfolio.set_account_asset_class(conn, house, "real_estate")
+    every = portfolio.allocation(conn, as_of="2025-12-31", scope="everything")
+    by_class = dict((s.key, s.value) for s in every.by_class)
+    assert by_class["real_estate"] == 400000_00 and by_class["unclassified"] == 20000_00
+    assert portfolio.account_asset_class(ledger.get_account(conn, house)) == "real_estate"
+    portfolio.set_account_asset_class(conn, house, None)          # back to unsaid
+    assert portfolio.account_asset_class(ledger.get_account(conn, house)) == "unclassified"
+    with pytest.raises(ValueError):
+        portfolio.set_account_asset_class(conn, house, "crypto")
+    with pytest.raises(ValueError):
+        portfolio.allocation(conn, scope="nonsense")
+    # Naming a liability outright still does not allocate it.
+    mortgage = ledger.get_account_by_name(conn, "Mortgage")["id"]
+    assert portfolio.allocation(conn, [mortgage], as_of="2025-12-31").total == 0
+
+
+def test_hidden_accounts_and_records_gaps_are_kept_out_of_the_way(conn, world):
+    """Two ways an investment account reports pure CASH, and what each does.
+
+    Hidden means "leave this out of my totals" (investments.net_worth), so the
+    allocation must agree -- it used to disagree, counting money net worth did
+    not. An account that is merely INCOMPLETE is still counted, because it is
+    still the user's money, but it is NAMED: its balance lands wholly in Cash
+    and is otherwise indistinguishable from a real cash position."""
+    chk = world["chk"]
+    # A 529 plan: contributions went in, the shares they bought were never
+    # entered. Visible, so still counted -- but reported.
+    plan = ledger.create_account(conn, "State529 -- Child A", "investment",
+                                 opening_balance=0)
+    ledger.create_transfer(conn, chk, plan, "2025-02-01", 46_000_00, payee="529")
+    # An account the user has hidden as incomplete: out of the totals entirely.
+    espp = ledger.create_account(conn, "ESPP (incomplete)", "investment",
+                                 opening_balance=0)
+    ledger.create_transfer(conn, chk, espp, "2025-02-01", 87_000_00, payee="ESPP")
+    ledger.set_account_hidden(conn, espp, True)
+
+    a = portfolio.allocation(conn, as_of="2025-12-31")
+    names = [n for n, _ in a.cash_only_accounts]
+    assert names == ["State529 -- Child A"]
+    assert dict(a.cash_only_accounts)["State529 -- Child A"] == 46_000_00
+    assert "ESPP (incomplete)" not in [s.label for s in a.by_account]
+
+    # Opting back in is available, and matches what the old default did.
+    fuller = portfolio.allocation(conn, as_of="2025-12-31", include_hidden=True)
+    assert fuller.total == a.total + 87_000_00
+    assert "ESPP (incomplete)" in [n for n, _ in fuller.cash_only_accounts]
+
+    # A brokerage with real holdings AND idle cash is not a records gap.
+    assert "Brokerage" not in names

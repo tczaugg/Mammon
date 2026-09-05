@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mammon"
+version = "0.1.0"
+description = "A classic-register personal finance ledger: one SQLite file you own, decades of history, downloads reviewed before they post."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
+dependencies = [
+    "PyQt5>=5.15",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]          # python -m mammon.mcp_server
+quotes = ["yfinance>=0.2"]  # Get Quotes in the investment register
+dev = ["pytest>=8"]
+
+[project.scripts]
+mammon = "mammon.app:main"
+mammon-mcp = "mammon.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["mammon*"]
+
+[tool.setuptools.package-data]
+mammon = ["tests/fixtures/*"]

@@ -1,0 +1,10 @@
+# What Mammon needs to run. Python 3.12 or newer; everything else is the
+# standard library (SQLite included).
+PyQt5>=5.15
+matplotlib>=3.7
+
+# Optional, imported only when the feature is used. Uncomment what you want,
+# or install the extras from pyproject.toml: pip install -e .[mcp,quotes,dev]
+# mcp>=1.2          # python -m mammon.mcp_server (ask an LLM about the ledger)
+# yfinance>=0.2     # Get Quotes in the investment register
+# pytest>=8         # python -m pytest mammon/tests

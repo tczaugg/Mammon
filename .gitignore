@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Private financial data. NEVER commit any of this: the ledger, its backups,
+# institution exports, and download logs all contain real account activity.
+# ---------------------------------------------------------------------------
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.bak
+*.QIF
+*.qif
+*.ofx
+*.qfx
+*.OFX
+*.QFX
+!mammon/tests/fixtures/*
+download.log
+*_crash.log
+
+# Internal planning docs — never check in or reference from tracked files
+docs/parity_roadmap.md
+docs/quicken_research.md
+docs/priorities_proposal_2026-09.md
+docs/crypto_plan.md
+
+# Credentials / local config
+.env
+*.key
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
