@@ -15,7 +15,7 @@ import sqlite3
 
 import pytest
 
-from mammon import budgets, db, ledger, mcp_server, mcp_tools
+from mammon import budgets, db, ledger, mcp_server, mcp_tools, sqldriver
 
 
 @pytest.fixture
@@ -161,7 +161,7 @@ def test_tools_serve_over_readonly_connection(dbfile, conn, seeded):
     write -- and return the same numbers as the writer connection."""
     ro = mcp_server.open_readonly(str(dbfile))
     try:
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(sqldriver.OperationalError):
             ro.execute("DELETE FROM budget_lines")     # connection really is read-only
         got = mcp_tools.budget_vs_actual(ro, seeded["budget"], "2026-01", "2026-02")
         assert got["actual"] == "760.00"

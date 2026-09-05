@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 
 from mammon import (budgets, db, investments, ledger, loans, mcp_server, mcp_tools,
-                    rebalance, scheduled)
+                    rebalance, scheduled, sqldriver)
 
 
 @pytest.fixture
@@ -251,7 +251,7 @@ def test_query_is_read_only_and_blanks_identifying_columns(conn, seeded):
 def test_open_readonly_refuses_writes_and_schema_mismatch(dbfile, conn, seeded):
     ro = mcp_server.open_readonly(str(dbfile))
     assert ro.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 4
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(sqldriver.OperationalError):
         ro.execute("DELETE FROM transactions")
     ro.close()
     conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION - 1}")

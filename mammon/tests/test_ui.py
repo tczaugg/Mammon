@@ -2535,7 +2535,9 @@ def test_theme_pref_roundtrip_and_theme_aware_color_defaults(qapp):
     # switch to dark: unset colors now default to the DARK palette
     prefs.set_theme("dark")
     assert prefs.theme() == "dark"
-    assert prefs.alt_row_color() == style.DARK["alt_row"] == "#2b2d31"
+    assert prefs.alt_row_color() == style.DARK["alt_row"] == "#3b3e43"
+    # ...and it must differ from the unshaded row, or the shading does nothing.
+    assert style.DARK["alt_row"] != style.DARK["base_row"]
     assert prefs.negative_color() == style.DARK["negative"] == "#ff6b6b"
 
     # an explicit pick overrides the theme default

@@ -32,12 +32,12 @@ from __future__ import annotations
 import argparse
 import functools
 import inspect
-import sqlite3
+import sqlite3          # type annotations only; see mammon.sqldriver
 import sys
 import typing
 from typing import Optional
 
-from mammon import db, mcp_tools
+from mammon import db, mcp_tools, sqldriver
 
 
 class SchemaMismatch(RuntimeError):
@@ -82,7 +82,7 @@ def _bind(fn, conn):
     def wrapper(*args, **kwargs):
         try:
             return fn(conn, *args, **kwargs)
-        except (ValueError, LookupError, KeyError, sqlite3.Error) as exc:
+        except (ValueError, LookupError, KeyError, sqldriver.Error) as exc:
             return {"error": str(exc)}
 
     wrapper.__signature__ = sig.replace(
@@ -124,7 +124,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except SchemaMismatch as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except sqlite3.Error as exc:
+    except sqldriver.Error as exc:
         print(f"cannot open {path}: {exc}", file=sys.stderr)
         return 2
     server = build_server(conn, host=args.host, port=args.port)

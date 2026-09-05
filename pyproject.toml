@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.2"]          # python -m mammon.mcp_server
 quotes = ["yfinance>=0.2"]  # Get Quotes in the investment register
+encryption = ["sqlcipher3>=0.5"]  # optional at-rest encryption; see docs/encryption.md
 dev = ["pytest>=8"]
 
 [project.scripts]

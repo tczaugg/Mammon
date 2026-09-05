@@ -18,7 +18,11 @@ from mammon import crashlog, db, ledger, rename_tree
 
 def sample_data(conn) -> None:
     """Seed a small, self-contained example: three accounts, a few categories,
-    ordinary payments/deposits, and one transfer (to exercise every column)."""
+    ordinary payments/deposits, and one transfer (to exercise every column).
+
+    This is the MINIMAL fixture the test suite builds on; --demo seeds
+    :func:`mammon.demo.build` instead. Changing what this produces breaks the
+    tests that assert against these exact rows."""
     chk = ledger.create_account(conn, "Checking", "checking",
                                 opening_balance=2_500_00, opening_date="2020-01-01")
     sav = ledger.create_account(conn, "Savings", "savings",
@@ -60,8 +64,15 @@ def _ensure_seed(conn, demo: bool) -> None:
     # Seed the example accounts ONLY on an explicit --demo. Never fabricate a
     # "test set" into a real or empty database on first open (that made the
     # sample data masquerade as the user's real data).
+    #
+    # --demo builds the FULL synthetic ledger (mammon.demo), not sample_data
+    # above: the account bar's group subtotals, the running balance, and the
+    # Financial Calendar all need real history before they show anything.
+    # sample_data stays as it is because ~40 tests use it as a minimal fixture
+    # and assert its exact contents.
     if demo and not ledger.list_accounts(conn, include_closed=True):
-        sample_data(conn)
+        from mammon import demo as demo_mod
+        demo_mod.build(conn)
 
 
 def _resolve_db(arg, root=None) -> str:
@@ -147,6 +158,36 @@ def _launch_gui(conn, db_path, account) -> int:
     return app.exec_()
 
 
+def _launch_gui_locked(db_path, account=None) -> int:
+    """Start the GUI for an ENCRYPTED database: ask, then open.
+
+    Separate from :func:`_launch_gui` because the order is forced. The password
+    dialog is a Qt widget, so a QApplication must exist before it can be shown --
+    which means the application starts before the database is open, the reverse of
+    the normal path. Cancelling exits without opening anything, and never falls
+    back to opening the file unkeyed."""
+    from PyQt5.QtWidgets import QApplication
+
+    from mammon.ui import prefs
+    from mammon.ui.password_dialog import ask_password
+    from mammon.ui.style import apply_theme
+    from mammon.ui.widgets import MainWindow
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    apply_theme(app, prefs.display_prefs())
+    key = ask_password(None, db_path)
+    if key is None:
+        return 1
+    conn = db.init_db(db_path, key)
+    crashlog.install_excepthook(crashlog.crash_log_path(db_path))
+    crashlog.install_qt_message_handler(crashlog.crash_log_path(db_path))
+    window = MainWindow(conn, db_path=db_path, db_key=key)
+    if account is not None:
+        window.open_register(account)
+    window.show()
+    return app.exec_()
+
+
 def main(argv=None) -> int:
     # ``argv is None`` MUST fall through to argparse's default (``sys.argv[1:]``),
     # NOT an empty list. ``python -m mammon.app --db X`` reaches here via
@@ -157,6 +198,12 @@ def main(argv=None) -> int:
     # ``--db`` win from the CLI exactly as it already does from tests.
     args = build_parser().parse_args(argv)
     db_path = _resolve_db(args.db)
+    # An encrypted ledger needs its password before anything can be read from it,
+    # and asking needs a QApplication -- so the prompt happens inside the GUI
+    # launch, not here. A plaintext ledger (the default) opens exactly as before.
+    from mammon import encryption
+    if encryption.is_encrypted(db_path):
+        return _launch_gui_locked(db_path, args.account)
     conn = _open_db(db_path)
     _ensure_seed(conn, args.demo)
     return _launch_gui(conn, db_path, args.account)

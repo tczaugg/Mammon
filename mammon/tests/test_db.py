@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mammon import db
+from mammon import db, sqldriver
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -117,14 +117,14 @@ def test_rename_tree_tables_and_uniqueness(tmp_path):
                  "VALUES (1, NULL, 'AMAZON', 1)")
     conn.commit()
     # Same token at the same (root) level -> rejected by the edge unique index.
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqldriver.IntegrityError):
         conn.execute("INSERT INTO rename_nodes(parent_id, token, depth) "
                      "VALUES (NULL, 'AMAZON', 1)")
     conn.rollback()
     conn.execute("INSERT INTO rename_node_payees(node_id, payee, count) "
                  "VALUES (1, 'Amazon', 1)")
     conn.commit()
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqldriver.IntegrityError):
         conn.execute("INSERT INTO rename_node_payees(node_id, payee, count) "
                      "VALUES (1, 'Amazon', 1)")
 
@@ -218,7 +218,7 @@ def test_v20_unreconciles_auto_marked_transfer_legs(tmp_path):
 
 def test_foreign_keys_enforced(tmp_path):
     conn = db.init_db(tmp_path / "mammon.db")
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqldriver.IntegrityError):
         # account_id 999 does not exist
         conn.execute(
             "INSERT INTO transactions(account_id, date, amount) VALUES (999, '2026-01-01', -100)"

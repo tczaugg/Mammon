@@ -101,7 +101,7 @@ dropped in migration 28.
 ### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 50).
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 53).
 **Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
 databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
 

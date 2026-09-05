@@ -87,11 +87,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import sqlite3
+import sqlite3          # type annotations only; see mammon.sqldriver
 from datetime import datetime, timedelta
 import os
 from pathlib import Path
 from typing import Optional, Union
+
+from mammon import sqldriver
 
 # Backups live here by default (the location the user asked for). Tests pass an
 # explicit ``backup_dir`` so they never write into the repo's real folder.
@@ -249,6 +251,19 @@ def snapshot_db_name(path) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # page-level deltas
 # ---------------------------------------------------------------------------
+# Both drivers' Connection types. A SQLCipher connection is NOT an instance of
+# sqlite3.Connection (the two modules define separate types), so a check against
+# only the stdlib one silently mistook a live connection for a file path and
+# tried to open it as a filename. Backups are the last line of defence; they do
+# not get to be fussy about which driver the caller opened the ledger with.
+_CONNECTION_TYPES = tuple({sqldriver.Connection, sqlite3.Connection})
+
+
+def _connect_like(conn):
+    """The ``connect`` belonging to the same driver as ``conn``."""
+    return sqldriver.connect if isinstance(conn, sqldriver.Connection) else sqlite3.connect
+
+
 def _page_size_of(blob: bytes) -> int:
     """The page size recorded in a SQLite file header (offset 16, big-endian).
 
@@ -428,6 +443,34 @@ def restore_backup(snapshot, out_path, *, baseline_dir=None,
     return out
 
 
+def plaintext_snapshots(db_path, backup_dir=None) -> list:
+    """Snapshots of ``db_path`` that are NOT encrypted, oldest first.
+
+    Enabling encryption protects the ledger from that moment on; it does nothing
+    for the snapshots already on disk. Those are full copies -- the safety backup
+    this very change takes, plus up to DEFAULT_AUTO_KEEP auto-backups -- and they
+    sit in the folder most likely to be swept into a cloud sync, which is the leak
+    encryption was adopted to close. So the app has to be able to name them.
+
+    A ``.delta`` carries no SQLite header of its own (it is gzipped pages behind a
+    JSON header), so its state is its BASELINE's: pages copied from a plaintext
+    database are plaintext, whatever the delta wraps them in.
+    """
+    from mammon import encryption
+    out = []
+    for path in list_backups(db_path, backup_dir=backup_dir):
+        try:
+            if is_delta(path):
+                baseline = path.parent / delta_header(path)["baseline"]
+                if baseline.exists() and not encryption.is_encrypted(baseline):
+                    out.append(path)
+            elif not encryption.is_encrypted(path):
+                out.append(path)
+        except Exception:                       # unreadable: not our business here
+            continue
+    return out
+
+
 def create_backup(
     source: Union[sqlite3.Connection, str, Path],
     db_path=None,
@@ -435,6 +478,7 @@ def create_backup(
     tag: str = MANUAL_TAG,
     backup_dir=None,
     keep: Optional[int] = None,
+    key: Optional[str] = None,
     when: Optional[datetime] = None,
     incremental: bool = False,
 ) -> Path:
@@ -446,6 +490,8 @@ def create_backup(
     when ``source`` is a Connection and inferred from ``source`` otherwise.
     ``keep`` (when set) prunes older snapshots of the SAME (db-name, tag) to the
     newest ``keep`` after writing. ``when`` overrides the timestamp (tests).
+    ``key`` is the encryption key of an encrypted ledger and MUST be supplied for
+    one: without it the snapshot is written unencrypted (see below).
 
     With ``incremental``, the copy is compared against the newest full snapshot
     for this (db-name, tag) and stored as a page delta when that is materially
@@ -454,14 +500,14 @@ def create_backup(
     baseline yet, too much changed, or anything at all went wrong). Callers that
     need a standalone database file from either kind use :func:`restore_backup`.
     """
-    if isinstance(source, sqlite3.Connection):
+    if isinstance(source, _CONNECTION_TYPES):
         if db_path is None:
             raise ValueError("db_path is required when backing up a live connection")
         conn = source
         own = False
     else:
         db_path = db_path if db_path is not None else source
-        conn = sqlite3.connect(str(source))
+        conn = sqldriver.connect(str(source))
         own = True
 
     when = when or datetime.now()
@@ -473,7 +519,17 @@ def create_backup(
     staged = dest_dir / (dest_path.name + ".part")
 
     try:
-        target = sqlite3.connect(str(staged))
+        # The target MUST come from the same driver as the source: the online
+        # backup API copies between two connections of one module and rejects a
+        # mixed pair. A caller may hand us either kind, so follow the source.
+        target = _connect_like(conn)(str(staged))
+        # ...and it must carry the SAME KEY, or a snapshot of an encrypted ledger
+        # is written in plaintext. The backup API copies decrypted pages into
+        # whatever the target's codec does with them, and an unkeyed target has
+        # no codec -- so the one file most likely to be synced off the machine
+        # would be the only unprotected copy of the data.
+        if key:
+            sqldriver.apply_key(target, key)
         try:
             conn.backup(target)
         finally:

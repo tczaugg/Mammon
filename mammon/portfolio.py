@@ -58,9 +58,9 @@ ALLOCATION_SCOPE_LABELS = {
 }
 _CASH_TYPES = ("checking", "savings", "cash")
 _SCOPE_TYPES = {
-    "investments": ("investment",),
-    "with_cash": ("investment",) + _CASH_TYPES,
-    "everything": ("investment",) + _CASH_TYPES + ("asset",),
+    "investments": ledger.INVESTMENT_LIKE_TYPES,
+    "with_cash": ledger.INVESTMENT_LIKE_TYPES + _CASH_TYPES,
+    "everything": ledger.INVESTMENT_LIKE_TYPES + _CASH_TYPES + ("asset",),
 }
 
 
@@ -493,7 +493,7 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
         acct = ledger.get_account(conn, aid)
         name = acct["name"] if acct is not None else str(aid)
         atype = (acct["type"] if acct is not None else "") or ""
-        if atype != "investment":
+        if atype not in ledger.INVESTMENT_LIKE_TYPES:
             # An explicitly named liability is still not allocated -- the caller
             # asking for "these accounts" does not make a debt an asset.
             if atype in ("credit", "liability"):

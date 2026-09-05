@@ -2019,7 +2019,7 @@ def display_balance(conn, account_id: int, as_of: Optional[str] = None,
 
     Every other account type is its plain ledger balance, untouched."""
     acct = ledger.get_account(conn, account_id)
-    if acct is not None and acct["type"] == "investment":
+    if acct is not None and acct["type"] in ledger.INVESTMENT_LIKE_TYPES:
         # No explicit date -> as of the last thing the ledger knows, transaction
         # or quote (valuation_as_of explains why a quote has to count).
         eff = as_of if as_of is not None else valuation_as_of(conn)
