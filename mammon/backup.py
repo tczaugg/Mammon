@@ -103,10 +103,11 @@ from mammon import sqldriver
 # into an unrelated tree -- the same CWD trap app._resolve_db already avoids
 # for the database itself. Overridable for tests via MAMMON_DATA_DIR.
 def _install_data_dir() -> Path:
-    env = os.environ.get("MAMMON_DATA_DIR")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parent.parent / "data"
+    """Kept as a thin alias so existing callers and tests still work; the rule
+    itself lives in :mod:`mammon.paths`, which is the only place that decides
+    where data goes."""
+    from mammon import paths
+    return paths.data_dir()
 
 
 def default_backup_dir() -> Path:
