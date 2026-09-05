@@ -170,9 +170,14 @@ def test_spending_by_tag_fans_a_line_to_each_of_its_tags(conn, accounts):
     rows = {r.name: (r.count, r.cents) for r in rep.rows}
     assert rows["vacation"] == (2, 140_00)
     assert rows["reimbursable"] == (1, 100_00)
-    assert rows["(no tag)"] == (1, 25_00)
-    # Overlapping tags mean the tag totals double-count on purpose.
-    assert rep.total == 140_00 + 100_00 + 25_00
+    # Untagged money is NOT a row: "(no tag)" is not a tag, and on a real ledger
+    # it swamps the report (97.8% of it, 158x the largest real tag) and sorts to
+    # the top, burying every tag the report exists to show.
+    assert "(no tag)" not in rows
+    assert rep.total == 140_00 + 100_00        # tagged money only
+    # Overlapping tags still fan out on purpose: the $100 dinner is counted
+    # under both of its tags, so the total exceeds the money that moved.
+    assert rep.total > 140_00
 
 
 # --------------------------------------------------------------------------
@@ -288,3 +293,56 @@ def test_register_tag_cell_edits_one_comma_separated_slot(qapp, conn, accounts):
     QCoreApplication.processEvents()   # deferred inline-edit reload
     assert ledger.get_tags(conn, m.txn_at(0)["id"]) == ["solo"]
     assert m.data(m.index(0, RegisterModel.TAG), Qt.DisplayRole) == "solo"
+
+
+def test_a_split_leg_is_counted_under_its_own_tag(tmp_path):
+    """Per-leg attribution, the reason `splits.tag_id` exists (migration 54).
+
+    One $250 parts order split $100/$150 across two projects. A report line for
+    a split leg used to inherit the PARENT's tag, so a leg's own project was
+    invisible; the alternative considered -- folding leg tags up onto the
+    transaction -- would have credited the whole $250 to BOTH tags, reporting
+    $500 of spending against a $250 payment.
+    """
+    from mammon import db
+    from mammon.importers import import_file
+    from mammon.reports.tags import spending_by_tag
+
+    conn = db.init_db(str(tmp_path / "t.db"))
+    path = tmp_path / "x.QIF"
+    path.write_text(
+        "!Type:Bank\nD2/15'18\nT-250.00\nPBig Order\n"
+        "LBusiness:Research/Rig 8\n"
+        "SBusiness:Research/Rig 8\n$-100.00\n"
+        "SBusiness:Research/Rig 9\n$-150.00\n^\n", encoding="utf-8")
+    import_file(conn, str(path), account="Checking")
+
+    rows = {r.name: r.cents for r in
+            spending_by_tag(conn, "2018-01-01", "2018-12-31").rows}
+    assert rows == {"Rig 8": 100_00, "Rig 9": 150_00}
+    assert sum(rows.values()) == 250_00
+
+
+def test_a_row_tag_and_a_leg_tag_both_apply(tmp_path):
+    """A transaction tagged 'reimbursable' whose legs carry projects: the leg is
+    both. spending_by_tag counts a line under EVERY tag it carries, so the row
+    tag reaches each leg's amount and the leg tag reaches only its own."""
+    from mammon import db, ledger
+    from mammon.reports.tags import spending_by_tag
+
+    conn = db.init_db(str(tmp_path / "t.db"))
+    aid = ledger.create_account(conn, "Checking", "checking")
+    cat = ledger.resolve_category(conn, "Business:Research")
+    txn = ledger.add_transaction(conn, aid, "2018-02-15", -250_00, payee="Big Order")
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": -100_00, "memo": ""},
+        {"category_id": cat, "amount": -150_00, "memo": ""}])
+    ledger.set_tags(conn, txn, ["reimbursable"])
+    for leg, name in zip(ledger.get_splits(conn, txn), ("Rig 8", "Rig 9")):
+        conn.execute("UPDATE splits SET tag_id=? WHERE id=?",
+                     (ledger.tag_id(conn, name), leg["id"]))
+    conn.commit()
+
+    rows = {r.name: r.cents for r in
+            spending_by_tag(conn, "2018-01-01", "2018-12-31").rows}
+    assert rows == {"reimbursable": 250_00, "Rig 8": 100_00, "Rig 9": 150_00}

@@ -2321,8 +2321,11 @@ def test_display_prefs_defaults_reproduce_current_look(qapp):
     from mammon.ui import prefs, style
 
     assert prefs.theme() == style.DEFAULT_THEME == "light"
-    assert prefs.font_family() == style.DEFAULT_FONT_FAMILY == "Segoe UI"
-    assert prefs.font_size() == style.DEFAULT_FONT_SIZE == 9
+    # Compared against the constants, not literals: the default font is chosen
+    # per platform (Segoe UI on Windows, the system face on macOS, DejaVu on
+    # Linux), so a hardcoded name here would fail the suite everywhere but one OS.
+    assert prefs.font_family() == style.DEFAULT_FONT_FAMILY
+    assert prefs.font_size() == style.DEFAULT_FONT_SIZE
     assert prefs.row_shading() is True
     assert prefs.alt_row_color() == style.ALT_ROW == "#f4f6f9"
     assert prefs.negative_color() == style.RED == "#c0392b"

@@ -24,6 +24,7 @@ from mammon.importers.record import (
     NormalizedTxn,
     normalize_security_name,
     clean_category,
+    split_category_tag,
     decimal_text,
     dollars_to_cents,
     parse_date,
@@ -49,6 +50,11 @@ class QifExtras:
     # Quicken export (and mammon.export) leads with, so a category's kind
     # survives the trip even when no transaction in the file uses it.
     categories: list = field(default_factory=list)
+    # (name, description) from !Type:Tag, the tag master a Quicken export leads
+    # with. Carried for the same reason as `categories`: a tag the user defined
+    # but has not used yet still exists, and its description is the only place
+    # its meaning is written down.
+    tags: list = field(default_factory=list)
 
 
 def parse_qif(
@@ -68,6 +74,7 @@ def parse_qif(
 
     fields: dict[str, str] = {}
     sec_fields: dict[str, str] = {}
+    tag_fields: dict[str, str] = {}
     cat_fields: dict[str, str] = {}
     split_cat: list[str] = []
     split_amt: list[str] = []
@@ -107,9 +114,12 @@ def parse_qif(
                     mode, sec_fields = "security", {}
                 elif kind.startswith("prices"):
                     mode = "prices"
+                elif kind.startswith("tag") or kind.startswith("class"):
+                    # Quicken's tag master (called "class" before 2010).
+                    mode, tag_fields = "tag", {}
                 else:
-                    # !Type:Cat / Tag / Class / Memorized / Budget / Template --
-                    # metadata sections we do not consume.
+                    # !Type:Memorized / Budget / Template -- metadata sections we
+                    # do not consume.
                     mode = "skip"
             # other ! directives (Option, Clear:AutoSwitch, ...) are ignored
             continue
@@ -133,6 +143,15 @@ def parse_qif(
                 cat_fields = {}
             else:
                 cat_fields[code] = val
+            continue
+        # Tag master: N name, D description; one block per ^. Same shape as the
+        # category list above, and read on its own terms for the same reason.
+        if mode == "tag":
+            if code == "^":
+                _flush_tag(collector, tag_fields)
+                tag_fields = {}
+            else:
+                tag_fields[code] = val
             continue
         # Security master: N name, S symbol, T type; one block per ^.
         if mode == "security":
@@ -165,6 +184,15 @@ def parse_qif(
 
     flush()  # tolerate a trailing txn with no closing ^
     return records
+
+
+def _flush_tag(collector: Optional[QifExtras], f: dict) -> None:
+    """Record one !Type:Tag block: N is the name, D an optional description."""
+    if collector is None:
+        return
+    name = (f.get("N") or "").strip()
+    if name:
+        collector.tags.append((name, (f.get("D") or "").strip() or None))
 
 
 def _flush_category(collector: Optional[QifExtras], f: dict) -> None:
@@ -208,10 +236,11 @@ def _build_cash(fields, split_cat, split_amt, split_memo, account, account_type)
     lcat = fields.get("L", "").strip()
     transfer_account = ""
     category = ""
+    tag = ""
     if lcat.startswith("[") and lcat.endswith("]"):
         transfer_account = lcat[1:-1].strip()
     else:
-        category = clean_category(lcat)
+        category, tag = split_category_tag(lcat)
     cleared, reconciled = _cleared(fields.get("C", ""))
     amount = dollars_to_cents(fields.get("T") or fields.get("U") or "0")
 
@@ -222,8 +251,11 @@ def _build_cash(fields, split_cat, split_amt, split_memo, account, account_type)
         # TRANSFER leg (a mortgage principal posting to the house/loan account,
         # a paycheck 401(k) deferral to the retirement account); the core insert
         # path resolves the bracket to a transfer_account_id on the split row.
-        cat = c if (c.startswith("[") and c.endswith("]")) else clean_category(c)
-        splits.append((cat, dollars_to_cents(a or "0"), m))
+        if c.startswith("[") and c.endswith("]"):
+            cat, leg_tag = c, ""
+        else:
+            cat, leg_tag = split_category_tag(c)
+        splits.append((cat, dollars_to_cents(a or "0"), m, leg_tag))
 
     if splits:
         # A split transaction is ``--Split--``, not itself a transfer: Quicken
@@ -234,6 +266,10 @@ def _build_cash(fields, split_cat, split_amt, split_memo, account, account_type)
         # legs, including any ``[Account]`` transfer leg, own the posting.
         transfer_account = ""
         category = ""
+        # ...and for the same reason the echoed L tag is the FIRST LEG's tag,
+        # already captured on that leg. Keeping it here too would tag the whole
+        # transaction with one leg's project.
+        tag = ""
 
     return NormalizedTxn(
         external_account=account,
@@ -247,6 +283,7 @@ def _build_cash(fields, split_cat, split_amt, split_memo, account, account_type)
         check_number=fields.get("N", ""),
         cleared=cleared,
         reconciled=reconciled,
+        tags=[tag] if tag else [],
         splits=splits,
     )
 

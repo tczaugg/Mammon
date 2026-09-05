@@ -1534,6 +1534,36 @@ CREATE INDEX idx_crypto_txn_fitid        ON crypto_transactions(fitid);
 CREATE INDEX idx_crypto_holdings_account ON crypto_holdings(account_id);
 """
 
+# 54 -- completes first-class tags (parity roadmap item 12).
+#
+# Three gaps closed at once, all in the same feature:
+#
+# `splits.tag_id` -- a tag PER SPLIT LEG. `transaction_tags` is keyed on the
+# transaction, so until now a tag could only describe a whole row. Quicken tags
+# a split leg (`SBusiness:Research/Rig 8`), and that is the case the tag exists
+# to serve: one parts order split across several projects. Unioning those onto
+# the parent would credit the WHOLE order to every project in it, silently
+# overstating each one in a by-tag spending report -- the same double-count the
+# transfer rules exist to prevent. A leg carries at most one tag because that is
+# all QIF can express; the many-per-ROW model is unchanged and still lives in
+# `transaction_tags`.
+#
+# `tags.color` -- a hex string (`#3b6ea5`), NULL meaning "not chosen", which the
+# UI fills from the shared categorical palette. Colors are per-tag identity, so
+# a tag keeps its color between the register, the By Tag report and chart
+# wedges, where color previously followed a slice's RANK and changed as the
+# ranking moved.
+#
+# `tags.description` -- Quicken's tag list carries one (`!Type:Tag` N/D pairs),
+# and discarding it on import is the bug this migration's own import fix is
+# about; there is no reason to drop it a second time on the way in.
+_V54 = """
+ALTER TABLE splits ADD COLUMN tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL;
+CREATE INDEX idx_splits_tag ON splits(tag_id);
+ALTER TABLE tags ADD COLUMN color TEXT;
+ALTER TABLE tags ADD COLUMN description TEXT;
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -1589,6 +1619,7 @@ MIGRATIONS: list[str] = [
     _V51,
     _V52,
     _V53,
+    _V54,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

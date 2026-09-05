@@ -1652,7 +1652,7 @@ def test_import_loan_split_leaves_non_loan_and_source_split_untouched(conn):
     importers.import_records(conn, [importers.NormalizedTxn(
         external_account="Home Mortgage", date="2024-03-01", amount_cents=1998_65,
         payee="Servicer", fitid="SRC-SPLIT",
-        splits=[("Interest Exp", 1000_00, None), ("Principal", 998_65, None)])],
+        splits=[("Interest Exp", 1000_00, None, ""), ("Principal", 998_65, None, "")])],
         provider="test")
     stid = conn.execute(
         "SELECT id FROM transactions WHERE account_id=? AND date=?",

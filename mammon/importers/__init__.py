@@ -164,6 +164,7 @@ def import_file(
         prices=extras.prices if extras else None,
         positions=positions,
         categories=extras.categories if extras else None,
+        tags=extras.tags if extras else None,
     )
     # Post-import AUDIT: surface any OFX investment action types the parser could
     # not map (they were dropped, not silently defaulted into cash-in).

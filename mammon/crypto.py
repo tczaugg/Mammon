@@ -948,6 +948,115 @@ def symbols_used(conn, account_id: int) -> list:
     return [r["symbol"] for r in rows]
 
 
+def register_rows(conn, account_id: int) -> list[dict]:
+    """The account's crypto events in application order (date, id), each augmented
+    with the running-balance / label fields the register shows -- so the register
+    UI stays a THIN projection and all quantity/cents math is tested HERE, not in
+    :mod:`mammon.ui` (the crypto twin of :func:`investments.register_rows`). Each
+    returned row is a plain dict: the stored ``crypto_transactions`` columns plus
+    five derived keys.
+
+      * ``coin_bal`` -- running quantity of THAT ROW's symbol as clean Decimal
+        text, after this row's main leg (:data:`_ADD_ACTIONS` -> +qty,
+        :data:`_REMOVE_ACTIONS` -> -qty, applied to ``abs(quantity)`` so a signed
+        OUT row cannot flip an add into a remove -- the same rule
+        :func:`_apply_txn` uses) AND its same-coin gas ``fee_*`` leg. ``None`` on
+        rows that move no coin. The last ``coin_bal`` per symbol ties to
+        :func:`rebuild_holdings` (both fold the main delta then the fee).
+      * ``cash_amt`` -- the row's effect on the internal fiat cash sleeve: the
+        signed ``amount`` on a BUY/SELL (the only events that move fiat), else 0.
+      * ``cash_bal`` -- running cash sleeve AFTER the row, opening at the account's
+        ``opening_balance`` and accumulating ``cash_amt``.
+      * ``label`` -- the Coin/Wallet column text: ``[Other Wallet]`` for either
+        leg of a wallet transfer (the mirror model, rendered exactly like a cash
+        transfer's ``[Other]`` and consuming no category), ``OUT->IN`` for either
+        leg of a swap (so the two ``swap_group_id`` legs read as one paired
+        trade), else the bare symbol.
+      * ``fee_label`` -- the gas that rode this event as ``"<qty> <SYM>"`` (e.g.
+        ``"0.01 ETH"``), or ``""``.
+
+    All quantity arithmetic runs under the wei-scale high-precision context.
+    """
+    acct = ledger.get_account(conn, account_id)
+    opening = 0
+    if acct is not None:
+        try:
+            opening = int(acct["opening_balance"] or 0)
+        except (KeyError, IndexError):
+            opening = 0
+    events = list_events(conn, account_id)
+
+    # swap_group_id -> {out, in} symbols, so BOTH legs render the same pair label.
+    swap_pairs: dict = {}
+    for t in events:
+        gid = _row_value(t, "swap_group_id")
+        if gid is None:
+            continue
+        entry = swap_pairs.setdefault(gid, {"out": None, "in": None})
+        a = _norm(_row_value(t, "action"))
+        if a == "SWAP_OUT":
+            entry["out"] = _row_value(t, "symbol")
+        elif a == "SWAP_IN":
+            entry["in"] = _row_value(t, "symbol")
+
+    name_cache: dict = {}
+
+    def _other_wallet(taid):
+        if taid is None:
+            return ""
+        if taid not in name_cache:
+            oa = ledger.get_account(conn, taid)
+            name_cache[taid] = (oa["name"] if oa else "") or ""
+        return name_cache[taid]
+
+    out: list[dict] = []
+    with decimal.localcontext(quantity_context()):
+        bals: dict[str, Decimal] = {}
+        cash = opening
+        for t in events:
+            a = _norm(_row_value(t, "action"))
+            sym = _row_value(t, "symbol")
+            aq = abs(_D(_row_value(t, "quantity")))
+            coin_bal = None
+            if sym and a in _ADD_ACTIONS:
+                bals[sym] = bals.get(sym, Decimal(0)) + aq
+                coin_bal = _qty_text(bals[sym])
+            elif sym and a in _REMOVE_ACTIONS:
+                bals[sym] = bals.get(sym, Decimal(0)) - aq
+                coin_bal = _qty_text(bals[sym])
+            # Gas riding this action: a same-coin fee folds into this row's
+            # coin_bal; any fee coin's running balance is reduced so a later row
+            # of that coin reflects it (keeping the column tied to holdings).
+            fsym = _row_value(t, "fee_symbol")
+            fq = _D(_row_value(t, "fee_quantity"))
+            fee_label = ""
+            if fsym and fq > 0:
+                bals[fsym] = bals.get(fsym, Decimal(0)) - fq
+                fee_label = f"{_qty_text(fq)} {fsym}"
+                if fsym == sym:
+                    coin_bal = _qty_text(bals[fsym])
+            camt = int(_row_value(t, "amount") or 0) if a in ("BUY", "SELL") else 0
+            cash += camt
+
+            if a in ("TRANSFER_OUT", "TRANSFER_IN"):
+                label = f"[{_other_wallet(_row_value(t, 'transfer_account_id'))}]"
+            elif a in ("SWAP_OUT", "SWAP_IN"):
+                pair = swap_pairs.get(_row_value(t, "swap_group_id"), {})
+                o, i = pair.get("out"), pair.get("in")
+                label = f"{o or '?'}->{i or '?'}" if (o or i) else (sym or "")
+            else:
+                label = sym or ""
+
+            row = dict(t)
+            row["coin_bal"] = coin_bal
+            row["cash_amt"] = camt
+            row["cash_bal"] = cash
+            row["label"] = label
+            row["fee_label"] = fee_label
+            out.append(row)
+    return out
+
+
 def _apply_update(conn, txn_id: int, updates: dict) -> None:
     cols = ", ".join(f"{k}=?" for k in updates)
     conn.execute(f"UPDATE crypto_transactions SET {cols} WHERE id=?",

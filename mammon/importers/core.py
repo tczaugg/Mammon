@@ -52,6 +52,7 @@ def import_records(
     prices=None,
     positions=None,
     categories=None,
+    tags=None,
 ) -> ImportResult:
     """Ingest ``records`` into the ledger, dedup, and record the run.
 
@@ -102,6 +103,7 @@ def import_records(
     claimed: set[int] = set()
     claimed_inv: set[int] = set()
     _apply_categories(conn, categories)
+    _apply_tag_master(conn, tags)
     # Which accounts this FILE carries a register for, by date: the test for
     # whether the counter-side of a transfer will arrive on its own.
     covered = _covered_accounts(conn, plain + transfers + investments, acct_cache)
@@ -153,6 +155,24 @@ def _apply_categories(conn, categories) -> None:
         row = conn.execute("SELECT type FROM categories WHERE id=?", (cid,)).fetchone()
         if row is not None and not row["type"]:
             conn.execute("UPDATE categories SET type=? WHERE id=?", (typ, cid))
+    conn.commit()
+
+
+def _apply_tag_master(conn, tags) -> None:
+    """A QIF tag list (``(name, description)`` tuples): create what is missing
+    and give a tag its description when it has none yet.
+
+    Carried for the same reason as the category list -- a tag the user defined
+    but has not used on any transaction still exists, and the description is the
+    only place its meaning is recorded. A description already set is left alone,
+    so re-importing an older export cannot overwrite a newer one."""
+    for name, description in tags or []:
+        tid = ledger.tag_id(conn, name)
+        if tid is None or not description:
+            continue
+        row = conn.execute("SELECT description FROM tags WHERE id=?", (tid,)).fetchone()
+        if row is not None and not row["description"]:
+            conn.execute("UPDATE tags SET description=? WHERE id=?", (description, tid))
     conn.commit()
 
 
@@ -356,9 +376,11 @@ def _import_plain(conn, r, import_id, acct_cache, cat_cache, result, claimed,
         reconciled=r.reconciled,
         import_id=import_id,
     )
-    for cat, amt, memo in r.splits:
+    if r.tags:
+        ledger.set_tags(conn, txn_id, r.tags)
+    for cat, amt, memo, leg_tag in r.splits:
         _insert_split(conn, txn_id, cat, amt, memo, acct_cache, cat_cache,
-                      covered=covered, date=r.date)
+                      covered=covered, date=r.date, tag=leg_tag)
     if r.splits:
         conn.commit()
     result.added += 1
@@ -381,7 +403,7 @@ def _loan_payment_splits(conn, account_id, r):
 
     When ``account_id`` carries loan parameters (Task 50) and ``r`` is a plain,
     principal-reducing payment with no split of its own, decompose it with
-    :func:`mammon.loans.payment_split` into ``[(category, cents, memo), ...]`` --
+    :func:`mammon.loans.payment_split` into ``[(category, cents, memo, tag), ...]`` --
     the interest leg, one leg per categorized extra (escrow/PMI/HOA...), and the
     principal leg -- which reconstitute the payment TO THE CENT (their signed
     cents sum to ``r.amount_cents``). Returns ``None`` for a non-loan account, a
@@ -402,14 +424,14 @@ def _loan_payment_splits(conn, account_id, r):
     legs: list[tuple] = []
     if split.interest:
         legs.append((lp.interest_category or LOAN_INTEREST_CATEGORY,
-                     split.interest, "Interest"))
+                     split.interest, "Interest", ""))
     for ex in split.extras:
         if ex.amount:
-            legs.append((ex.category, ex.amount, ex.label or ex.category))
-    legs.append((LOAN_PRINCIPAL_CATEGORY, split.principal, "Principal"))
+            legs.append((ex.category, ex.amount, ex.label or ex.category, ""))
+    legs.append((LOAN_PRINCIPAL_CATEGORY, split.principal, "Principal", ""))
     if len(legs) < 2:                      # a single leg is just a plain category
         return None
-    if sum(amt for _cat, amt, _memo in legs) != r.amount_cents:
+    if sum(amt for _cat, amt, _memo, _tag in legs) != r.amount_cents:
         return None                        # safety: never post a mis-totalled split
     return legs
 
@@ -662,8 +684,10 @@ def _import_transfer_leg(conn, r, import_id, acct_cache, result, claimed) -> Non
          r.check_number or None, r.cleared, r.reconciled,
          category_id, counter_id, r.fitid or None, import_id),
     ).lastrowid
-    for cat, amt, memo in r.splits:
-        _insert_split(conn, txn_id, cat, amt, memo, acct_cache, {})
+    if r.tags:
+        ledger.set_tags(conn, txn_id, r.tags)
+    for cat, amt, memo, leg_tag in r.splits:
+        _insert_split(conn, txn_id, cat, amt, memo, acct_cache, {}, tag=leg_tag)
     conn.commit()
     result.added += 1
     result.transfers += 1
@@ -949,7 +973,7 @@ def _maybe_upgrade_type(conn, account_id, declared) -> None:
 
 
 def _insert_split(conn, txn_id, cat, amt, memo, acct_cache, cat_cache,
-                  covered=None, date=None) -> None:
+                  covered=None, date=None, tag="") -> None:
     """Insert one split leg. A bracketed ``[Account]`` category is a TRANSFER leg
     -- the account is resolved (get-or-create) and stored as the split row's
     ``transfer_account_id`` (category_id NULL). Its MIRROR on the counter-account
@@ -972,13 +996,16 @@ def _insert_split(conn, txn_id, cat, amt, memo, acct_cache, cat_cache,
                     conn, parent, transfer_account_id, amt)
         conn.execute(
             "INSERT INTO splits(transaction_id, category_id, transfer_account_id, amount, memo, "
-            "transfer_pair_id) VALUES (?,?,?,?,?,?)",
-            (txn_id, None, transfer_account_id, amt, memo or None, mirror_id),
+            "transfer_pair_id, tag_id) VALUES (?,?,?,?,?,?,?)",
+            (txn_id, None, transfer_account_id, amt, memo or None, mirror_id,
+             ledger.tag_id(conn, tag) if tag else None),
         )
     else:
         conn.execute(
-            "INSERT INTO splits(transaction_id, category_id, amount, memo) VALUES (?,?,?,?)",
-            (txn_id, _resolve_category(conn, cat, cat_cache), amt, memo or None),
+            "INSERT INTO splits(transaction_id, category_id, amount, memo, tag_id) "
+            "VALUES (?,?,?,?,?)",
+            (txn_id, _resolve_category(conn, cat, cat_cache), amt, memo or None,
+             ledger.tag_id(conn, tag) if tag else None),
         )
 
 

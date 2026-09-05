@@ -43,9 +43,13 @@ One SQLite database. Core tables:
   transfer_pair_id, import_id, fitid, created_at) - `tag` is a normalized,
   comma-joined CACHE of the row's first-class tags (see `tags` below), not an
   independent field.
-- splits(id, transaction_id, category_id, amount, memo) - a transaction split
-  across multiple categories.
-- tags(id, name[UNIQUE, COLLATE NOCASE]) / transaction_tags(transaction_id,
+- splits(id, transaction_id, category_id, amount, memo, tag_id) - a transaction
+  split across multiple categories. `tag_id` is the LEG's own tag (v54): Quicken
+  tags a split leg to attribute part of one payment to a project, and folding
+  those onto the parent would credit the whole payment to every tag in the
+  split. A leg carries at most one tag, which is all QIF can express.
+- tags(id, name[UNIQUE, COLLATE NOCASE], color, description) /
+  transaction_tags(transaction_id,
   tag_id, PRIMARY KEY(transaction_id, tag_id)) - first-class,
   MANY-tags-per-transaction (schema v45). The junction is the AUTHORITATIVE store;
   `transactions.tag` is kept as a normalized comma-joined cache of a row's tag

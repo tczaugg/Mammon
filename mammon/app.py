@@ -102,10 +102,14 @@ def _resolve_db(arg, root=None) -> str:
                 f"--db: {arg!r} is a directory, not a database file"
             )
         return arg
-    if root is None:
-        root = Path(__file__).resolve().parent.parent  # Mammon install root, not CWD
+    if root is not None:                      # explicit root: tests pin one
+        return str(Path(root) / "data" / "mammon.db")
     # The single, durable, CWD-independent default. Created on first run.
-    return str(Path(root) / "data" / "mammon.db")
+    # Resolved by mammon.paths, which also honours $MAMMON_DATA_DIR -- this
+    # function used to ignore it while backups and the download log obeyed it,
+    # so redirecting that variable moved everything EXCEPT the database.
+    from mammon import paths
+    return str(paths.default_db_path())
 
 
 def _open_db(db_path):

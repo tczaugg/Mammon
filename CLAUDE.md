@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Mammon is a Windows desktop personal-finance application (Python 3.12 + PyQt5) with a classic,
+Mammon is a cross-platform desktop personal-finance application (Python 3.12 + PyQt5) with a classic,
 dense account register, storing everything in one SQLite file the user owns. Its concrete goal is
 absorbing ~40 years of existing financial history and taking over ongoing transaction download
 from the user's institutions.
+
+Developed on Windows; macOS and Linux are supported in principle (no platform-specific
+code beyond one shlex branch in `webslinger.py` and the per-platform default font in
+`ui/style.py`) but are untested — do not assume a change works there without saying so.
 
 `docs/SRD.md` is the requirements document of record — read it before designing anything new; it
 states the data model, the import strategy, the download strategy, and which decisions are locked.
@@ -101,7 +105,7 @@ dropped in migration 28.
 ### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 53).
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 54).
 **Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
 databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
 
@@ -149,6 +153,25 @@ Two things here are load-bearing and easy to undo by accident:
 - **Previews must name the source column.** A wrong column still produces plausible output (a
   balance column parses as money just like an amount column), so values alone cannot tell a user
   whether the mapping is right. Both the prompt and the wizard render `Role <- source column`.
+
+### Tags, and the two places a tag can live
+
+A tag is first-class (`tags` + the `transaction_tags` junction, migration 45), and
+a transaction can carry several. A **split leg** carries its own single `tag_id`
+(migration 54) — that is not redundancy. Quicken tags a leg to attribute part of
+one payment to a project, and folding those up onto the parent credits the WHOLE
+payment to every tag in the split: measured on a real ledger, that reported 2.6x
+the money actually spent, an overstatement of the same shape as a double-counted
+transfer. `reports/_lines.py` gives a split line
+the union of the parent's tags and the leg's, so both apply and neither inflates.
+
+QIF carries tags in three places and all three are read and written: the
+`!Type:Tag` master (`N` name, `D` description — `!Type:Class` in files older than
+2010), a `/Tag` suffix on the `L` category line, and the same suffix on each `S`
+split leg. **`record.clean_category` discards the tag half**; use
+`split_category_tag` anywhere the tag matters. A split's `L` line echoes the
+first leg's category tag and all, so reading it at row level double-tags the
+transaction with one leg's project — `_build_cash` clears it deliberately.
 
 ### Learned rules (four cooperating engines)
 
@@ -221,21 +244,32 @@ longer exist).
 
 ## Paths, and why they are the way they are
 
-Every path in this app resolves from the **install root**, never the current working directory. This
-is not stylistic — each of these was a real bug:
+**`mammon/paths.py` is the only place that decides where data lives.** Never resolve a data path
+anywhere else. Three modules used to answer this separately and the copies drifted: `backup` and
+`download_log` honoured `$MAMMON_DATA_DIR`, `app._resolve_db` did not, so redirecting that variable
+moved the snapshots and the log while leaving the database in the install.
 
-- `app._resolve_db` — `--db` is authoritative and used verbatim; otherwise the default is
-  `<install root>/data/mammon.db`. Resolving relative to the CWD meant launching from a different
-  directory silently opened a *different*, empty database, and learned rules looked lost.
-- `backup.DEFAULT_BACKUP_DIR` — anchored at import from the install root, overridable via
-  `$MAMMON_DATA_DIR` and monkeypatched by tests. It was `Path("data")/"backups"`, so snapshots
-  landed wherever the process happened to start.
-- `download_log.default_data_dir()` — derived from the package location. It hardcoded one
-  developer's absolute install path.
+`paths.data_dir()` answers in this order:
 
-The last two are how a test run once reached a real ledger and migrated it. **Any new default path
-must be anchored and test-overridable**; a test that can write outside `tmp_path` will eventually
-write somewhere that matters.
+1. **`$MAMMON_DATA_DIR`** — wins outright. Tests and alternate installs use it, and it must move
+   the database with everything else.
+2. **A packaged build** (PyInstaller sets `sys.frozen`) — `~/Documents/Mammon`. An installed app
+   cannot write beside itself: `Program Files` is read-only to a standard user, and Windows does not
+   fail cleanly, it redirects the writes into a per-user VirtualStore copy, so the ledger appears to
+   save and then appears to vanish. Documents over `%LOCALAPPDATA%` is deliberate — the whole promise
+   is that the user owns the file, and a file they cannot find is not one they own.
+3. **A source checkout** — `data/` beside the package, resolved from the package location and never
+   from the CWD. Resolving relative to the CWD meant launching from a different directory silently
+   opened a *different*, empty database, and learned rules looked lost.
+
+`--db` is still authoritative and used verbatim, ahead of all of this.
+
+Nothing in `paths.py` creates directories; the callers that write do that, so importing it can never
+leave a stray folder behind. `backup.DEFAULT_BACKUP_DIR` stays a module attribute resolved at import,
+because tests monkeypatch it to redirect snapshots into a tmp dir — that seam is what keeps a test
+run from writing into a real install's data folder. A test run once reached a real ledger and
+migrated it. **Any new default path must go through `paths.py` and be test-overridable**; a test that
+can write outside `tmp_path` will eventually write somewhere that matters.
 
 ## Configuration
 

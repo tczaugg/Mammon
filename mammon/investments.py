@@ -2019,6 +2019,14 @@ def display_balance(conn, account_id: int, as_of: Optional[str] = None,
 
     Every other account type is its plain ledger balance, untouched."""
     acct = ledger.get_account(conn, account_id)
+    # A crypto wallet is investment-LIKE but its holdings live in the crypto_*
+    # tables, not investment_transactions/holdings -- so valuing it here would
+    # see zero securities and report cash alone. Hand it to the crypto domain
+    # layer, which values the coin holdings + cash sleeve. Lazy import: crypto
+    # imports investments, so a top-level import here would be circular.
+    if acct is not None and (acct["type"] or "") == "crypto":
+        from mammon import crypto
+        return crypto.display_balance(conn, account_id, as_of, prices)
     if acct is not None and acct["type"] in ledger.INVESTMENT_LIKE_TYPES:
         # No explicit date -> as of the last thing the ledger knows, transaction
         # or quote (valuation_as_of explains why a quote has to count).

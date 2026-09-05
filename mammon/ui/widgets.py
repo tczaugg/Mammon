@@ -6258,6 +6258,10 @@ class MainWindow(QMainWindow):
         menu.addAction("New Database…", self._new_database_dialog)
         menu.addAction("Open Database…", self._open_database_dialog)
         menu.addAction("Save Database As…", self._save_db_as_dialog)
+        # A file operation, not a preference: it rewrites the database file the
+        # same way Back Up and Restore do. It sat under Settings, where nothing
+        # else touches the file at all.
+        menu.addAction("Database Password…", self._database_password_dialog)
         menu.addAction("Import Quicken File (QIF)…", self._import_qif_dialog)
         menu.addAction("Export Ledger…", self._export_dialog)
         menu.addSeparator()
@@ -6305,8 +6309,6 @@ class MainWindow(QMainWindow):
         # shown only for loan/liability accounts), not here in Settings.
         settings.addAction("Reconcile to Statement…", self._reconcile_dialog)
         settings.addAction("Print Register…", self._print_register)
-        settings.addSeparator()
-        settings.addAction("Database Password…", self._database_password_dialog)
         settings.addSeparator()
         settings.addAction("Display Preferences…", self._display_preferences_dialog)
 
@@ -6618,7 +6620,7 @@ class MainWindow(QMainWindow):
         return ask_password(self, path)
 
     def _database_password_dialog(self):
-        """Settings > Database Password: set, change, or remove it.
+        """File > Database Password: set, change, or remove it.
 
         The conversion writes a NEW file and verifies it before anything is
         swapped, so a failure at any point leaves the working ledger untouched --
