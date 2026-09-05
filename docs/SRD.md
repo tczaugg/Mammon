@@ -454,9 +454,12 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   fold those into `Other`, and draw the rest individually. Rolling up *by
   combined share* rather than a per-slice cutoff keeps `Other` a real, clickable
   fraction of the pie -- never a sliver, never most of it. Any wedge still under
-  **5%** of the drawn pie loses its label: a dozen tiny slices otherwise stack
-  their labels on one arc and the picture stops carrying information, and the
-  table beside the chart still names it. **Every wedge's percentage is its share
+  **5%** of the drawn pie loses its INLINE label: a dozen tiny slices otherwise
+  stack their labels on one arc and the picture stops carrying information. No
+  wedge is anonymous, though -- an un-labelled sliver gets a **hover tooltip**
+  (`SlicesPieCanvas._on_motion`) naming the category, its share of the whole and
+  its dollar amount, and the table beside the chart still names it too. **Every
+  wedge's percentage is its share
   of the whole period total, at any drill depth** -- a category that is 3% of
   everything reads "3%" even when it is 40% of the `Other` it was drilled into
   (`SlicesPieCanvas.whole_total` is the one denominator). Clicking `Other`
@@ -474,6 +477,21 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   matching category type, transfers excluded, splits honored), so the
   threshold/rollup/drill-down/percentage logic lives in exactly one place rather
   than being re-implemented per chart.
+- **Distinct wedge colours, with `Other` pinned** (`ui/charts.wedge_colors`,
+  `_PIE_PALETTE`). The palette carries enough visually separated hues for the
+  worst realistic pie -- ~19 divisions, which happens when every real category is
+  roughly 5% of the period and the sub-10% tail rolls up into an `Other` that is
+  itself >=10%. The `Other` wedge always takes the palette's FINAL entry (a
+  neutral gray), so it stays a stable, recognizable colour no matter how many
+  real categories precede it. The old ten-colour list wrapped with `i % len`, so
+  an 11th category reused -- and became indistinguishable from -- the `Other`
+  wedge's colour.
+- **Net Worth Over Time reads against both axes** (`ui/charts.NetWorthCanvas`).
+  The cumulative curve draws BOTH horizontal and vertical grid lines, the
+  vertical ones aligned to the x-axis date ticks, at the crisp weight/opacity of
+  the app's financial calendar table grid (`_GRID_LINEWIDTH`, `_GRID_ALPHA`)
+  rather than matplotlib's washed-out default, which left the horizontals barely
+  visible and drew no verticals at all.
 - **An allocation is not only of the brokerage** (`ALLOCATION_SCOPES`,
   migration 41). Quicken allocates investment accounts and nothing else, so a
   house never appears in it; its own forums answer the question with "invent a
