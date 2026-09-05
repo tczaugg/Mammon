@@ -110,6 +110,15 @@ def period_range(period: str, year: int, *, month: Optional[int] = None,
     raise ValueError(f"unknown period {period!r}; use month|quarter|year")
 
 
+def _years_back(today: _dt.date, n: int) -> _dt.date:
+    """``today`` minus ``n`` calendar years, stepping a Feb-29 anniversary back to
+    Feb 28 in a non-leap year -- the guard the rolling-year windows share."""
+    try:
+        return today.replace(year=today.year - n)
+    except ValueError:            # today is Feb 29; step back to Feb 28
+        return today.replace(year=today.year - n, day=28)
+
+
 def preset_range(preset: str, today: _dt.date) -> tuple[str, str]:
     """Return the inclusive ``(start, end)`` ISO dates for a UI period preset,
     computed relative to ``today`` (a :class:`datetime.date`).
@@ -119,6 +128,9 @@ def preset_range(preset: str, today: _dt.date) -> tuple[str, str]:
     - ``"last_7_days"``    -- the 7 days ending today (today-6 .. today).
     - ``"last_30_days"``   -- the 30 days ending today (today-29 .. today).
     - ``"last_12_months"`` -- one year ago (same day) through today.
+    - ``"last_3_years"``   -- three years ago (same day) through today.
+    - ``"last_5_years"``   -- five years ago (same day) through today.
+    - ``"last_10_years"``  -- ten years ago (same day) through today.
     - ``"this_quarter"``   -- the calendar quarter ``today`` falls in.
     - ``"last_quarter"``   -- the previous calendar quarter (crossing years).
 
@@ -144,11 +156,13 @@ def preset_range(preset: str, today: _dt.date) -> tuple[str, str]:
     if p == "last_30_days":
         return (today - _dt.timedelta(days=29)).strftime("%Y-%m-%d"), iso
     if p == "last_12_months":
-        try:
-            start = today.replace(year=y - 1)
-        except ValueError:            # today is Feb 29; step back to Feb 28
-            start = today.replace(year=y - 1, day=28)
-        return start.strftime("%Y-%m-%d"), iso
+        return _years_back(today, 1).strftime("%Y-%m-%d"), iso
+    if p == "last_3_years":
+        return _years_back(today, 3).strftime("%Y-%m-%d"), iso
+    if p == "last_5_years":
+        return _years_back(today, 5).strftime("%Y-%m-%d"), iso
+    if p == "last_10_years":
+        return _years_back(today, 10).strftime("%Y-%m-%d"), iso
     if p == "this_quarter":
         return period_range("quarter", y, quarter=(m - 1) // 3 + 1)
     if p == "last_quarter":
@@ -168,8 +182,8 @@ def preset_range(preset: str, today: _dt.date) -> tuple[str, str]:
         return period_range("year", y)[0], iso
     raise ValueError(
         f"unknown preset {preset!r}; use last_7_days|last_30_days|"
-        "last_12_months|this_quarter|last_quarter|this_month|last_month|"
-        "this_year|last_year|ytd")
+        "last_12_months|last_3_years|last_5_years|last_10_years|this_quarter|"
+        "last_quarter|this_month|last_month|this_year|last_year|ytd")
 
 
 # ---------------------------------------------------------------------------

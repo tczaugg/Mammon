@@ -324,10 +324,37 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   transfer machinery that is already tested. See migration 28 in `mammon/db.py`.
 
 ### 5.5 Auto-categorization from history
-- When a payee recurs, Mammon learns its category (import_mappings) and
-  auto-fills/suggests the category on new and imported transactions once a
-  pattern is established (e.g. a given grocery store -> Groceries).
-- User can always override; overrides update the learned mapping.
+- When a payee recurs, Mammon learns its category and auto-fills/suggests the
+  category on new and imported transactions once a pattern is established
+  (e.g. a given grocery store -> Groceries).
+- User can always override; overrides update what is learned.
+- **The category is resolved BELOW the payee.** Payee renaming settles first
+  (`rename_tree`), then `category_tree` walks a discrimination trie rooted at
+  that payee over the row's source text, ranked by category entropy. So one
+  payee can hold several categories and still be answered exactly:
+  `COSTCO GAS ...` -> Auto:Fuel, `COSTCO WHSE ...` -> Groceries, on the single
+  token that separates them.
+- **A candidate category is never one the payee has not already carried.** This
+  is the locked requirement, and it is structural rather than a threshold: the
+  vote counts `suggest` reads are themselves keyed by payee. A first-ever payee
+  therefore proposes nothing at all -- during the learning period a blank
+  category is the correct answer, and an unrelated guess is worse than silence.
+- **When not confident, blank the category and RANK the picker.** The register's
+  category dropdown promotes the categories this payee has carried (the ones
+  matching this description first, then the rest by frequency), with the full
+  alphabetical list underneath so any category stays reachable. Measured on the
+  real ledger's first year, the promoted first entry was the right answer 67% of
+  the time on rows too uncertain to fill in.
+- Two gates decide "confident": node purity (does this description
+  discriminate?) and payee coherence (is this merchant categorizable at all?).
+  Coherence applies only at the trie root, where nothing distinguished the row
+  and the answer is the payee's bare prior -- that is the case where a catalogue
+  payee like Amazon would otherwise stamp its most common category onto every
+  unrelated purchase. Below the root a matched token has earned its answer and
+  is not overruled by the payee's overall mix.
+- Investment rows are excluded end to end: `investment_transactions` has no
+  category column, so there is nothing to predict and nothing the user could
+  correct to train on.
 
 ### 5.6 Import (see Section 6 for the strategy)
 - One-time migration of the full ~40-year Quicken 2017 history into Mammon's DB.
@@ -1001,8 +1028,9 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   tool-button. Its option set (`report_filters.PERIOD_PRESETS`) is the **UNION**
   of the two families this dropdown has ever offered — the original calendar
   ranges **This Month, Last Month, This Year, Last Year, Year-to-Date** and the
-  rolling ranges **Last 7 days, Last 30 days, Last 12 months, This quarter, Last
-  quarter, Earliest to date** — ending with **Custom**. Ordered shortest span
+  rolling ranges **Last 7 days, Last 30 days, Last 12 months, Last 3 years, Last
+  5 years, Last 10 years, This quarter, Last quarter, Earliest to date** — ending
+  with **Custom**. Ordered shortest span
   first, widening to the whole ledger. An earlier unification wrongly REPLACED the
   calendar ranges with only the rolling ones; both families must remain reachable
   so neither set of habits is broken. A preset re-ranges and refreshes at once;
@@ -1217,6 +1245,25 @@ chokepoint and the percent — not money — as signed text). The last is a pure
 over `mammon.investments`: it reuses the same `security_positions` replay the
 Holdings window and a security-filtered register read, so the three never
 disagree; `as_of` caps only the valuation price, never the share/cost replay.
+**The Gain/Loss columns are bounded to the resolved period.** Given a `start`
+(the report window always passes the filter bar's From date), each open, priced
+holding's Gain/Loss $ and % are measured over the window as `value_at(To) −
+value_at(From) − net contributions in (From, To]` — buys add capital, sells
+return it, income and reinvestments are not contributions — so `Last 3 years`,
+`Last 5 years` and `Last 10 years` report DIFFERENT gains rather than the same
+inception-to-date figure they all used to show (the start date was previously
+decorative for this report). This period path rewinds the share count to BOTH
+dates (via `investments.holding_values_at` / `net_contributions_by_symbol`),
+unlike the inception path where `as_of` caps only the price. Called with no
+`start` (the `investment_performance` MCP tool, Holdings reconciliation) it stays
+inception-to-date, byte-for-byte as before. The Portfolio **Market Value**
+headline gain is the sum of the per-holding period gains, so it reconciles with
+the line items; the separate lifetime Unrealized / Realized / Dividend / Return
+of Capital total lines are unchanged. Clicking a column header sorts the holdings
+— by period Gain/Loss, ticker, account then ticker (ticker secondary), or
+Gain/Loss % — reusing the exact `sort_key`/`sort_desc` seam the Itemize tree uses
+(`ReportSpec.sortable` names which flat columns sort); a second click toggles
+direction and the Portfolio totals never move.
 
 - **One money chokepoint feeds table, CSV, HTML and PDF.** A `ReportRow`
   carries `section`, `label`, and `amount` as **signed integer cents** (negative

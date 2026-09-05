@@ -33,10 +33,11 @@ from mammon import ledger
 # report window (§5.9b). This is the UNION of the presets this dropdown has ever
 # offered: the original calendar ranges (This/Last Month, This/Last Year,
 # Year-to-Date) AND the rolling ranges added by the report-unification work
-# (rolling 7/30-day windows, rolling 12 months, this/last quarter, earliest to
-# date). An earlier change wrongly REPLACED the calendar ranges with the rolling
-# ones; both must remain reachable, so neither set of habits is broken. Ordered
-# shortest span first, widening to the whole ledger, with ``"custom"`` last.
+# (rolling 7/30-day windows, rolling 12 months, the rolling 3/5/10-year windows,
+# this/last quarter, earliest to date). An earlier change wrongly REPLACED the
+# calendar ranges with the rolling ones; both must remain reachable, so neither
+# set of habits is broken. Ordered shortest span first, widening to the whole
+# ledger, with ``"custom"`` last.
 #
 # Keys resolve through :func:`resolve_period`: the rolling and calendar ranges
 # delegate to :func:`mammon.reports.spending.preset_range`, ``"earliest"`` spans
@@ -54,6 +55,14 @@ PERIOD_PRESETS = [
     ("This quarter", "this_quarter"),
     ("Last quarter", "last_quarter"),
     ("Last 12 months", "last_12_months"),
+    # The long rolling windows sit with the other "Last N" presets, widening the
+    # span before the calendar ranges. They earn their place on the Investment
+    # Performance report, whose Gain/Loss is period-bounded: over a 40-year ledger
+    # "how have my holdings done over the last 3 / 5 / 10 years" is the question a
+    # single calendar year cannot answer.
+    ("Last 3 years", "last_3_years"),
+    ("Last 5 years", "last_5_years"),
+    ("Last 10 years", "last_10_years"),
     ("Year-to-Date", "ytd"),
     ("This Year", "this_year"),
     ("Last Year", "last_year"),

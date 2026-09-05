@@ -287,7 +287,35 @@ def _fmt_pct(pct) -> str:
     return "" if pct is None else "%+.1f%%" % pct
 
 
-def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -> list[ReportRow]:
+# Click-to-sort keys for the flat Investment Performance report, mapping the
+# clicked column's sort key to a key function over a HoldingPerformance. Account ->
+# account then ticker; Ticker -> ticker alone; Gain/Loss $ -> the (period) gain;
+# Gain/Loss % -> the (period) percent. Unpriced holdings (no gain/percent) sort as
+# zero so they cluster at one end rather than scatter. Sorting is a pure DISPLAY
+# reshuffle of already-computed rows (no SQL, no money arithmetic -- amounts are
+# only compared, never summed), reusing the window's sort_key/sort_desc seam (the
+# same one the Itemize tree uses, see _TXN_SORT_KEYS / _on_tree_sort).
+_HOLDING_SORT_KEYS = {
+    "account": lambda h: ((h.account_name or "").lower(), (h.symbol or "").lower()),
+    "ticker":  lambda h: (h.symbol or "").lower(),
+    "gain":    lambda h: h.display_gain if h.display_gain is not None else 0,
+    "pct":     lambda h: h.display_pct if h.display_pct is not None else 0,
+}
+
+
+def _sorted_holdings(holdings, sort_key, sort_desc):
+    """Order the per-holding line items for display under the active sort, or
+    return them untouched when no sort is active. Only the security line items
+    move; the Portfolio totals are appended afterward and never reorder."""
+    keyfn = _HOLDING_SORT_KEYS.get(sort_key)
+    if keyfn is None:
+        return holdings
+    return sorted(holdings, key=keyfn, reverse=sort_desc)
+
+
+def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *,
+                                sort_key: str = None,
+                                sort_desc: bool = False) -> list[ReportRow]:
     """Project an :class:`~mammon.reports.InvestmentPerformanceReport` into flat
     rows aligned to :data:`INVESTMENT_PERFORMANCE_COLUMNS`: one line per
     currently-held security carrying its account, its ticker (with share count),
@@ -305,17 +333,25 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -
     realized gain and income still land in the Portfolio totals, which the report
     computes over every holding; the per-position detail lives in the pure report,
     the CSV/HTML export's source, and the ``capital_gains`` tool.
+
+    ``sort_key``/``sort_desc`` reorder the per-holding line items (the same seam
+    the Itemize tree uses): a clickable header re-projects with the active sort.
+    The Gain/Loss columns render the report's period-bounded gain when it was built
+    for a window (``display_gain``/``display_pct``), and the inception-to-date
+    unrealized gain otherwise -- a report opened without a start behaves exactly as
+    before.
     """
     rows: list[ReportRow] = []
-    for h in report.holdings:
-        if not h.is_open:
-            continue
+    holdings = [h for h in report.holdings if h.is_open]
+    if sort_key:
+        holdings = _sorted_holdings(holdings, sort_key, sort_desc)
+    for h in holdings:
         ticker = "%s (%s sh)" % (h.symbol, _fmt_qty(h.quantity))
-        gl = "" if h.unrealized_pl is None else fmt_cents(h.unrealized_pl)
+        gl = "" if h.display_gain is None else fmt_cents(h.display_gain)
         rows.append(ReportRow(
             h.account_name, h.symbol, h.market_value,
             cells=[h.account_name, ticker, fmt_cents(h.market_value),
-                   gl, _fmt_pct(h.pct_return)]))
+                   gl, _fmt_pct(h.display_pct)]))
 
     # Portfolio totals. The market-value line doubles as the portfolio Gain/Loss
     # summary (its unrealized dollars and percent); the remaining totals each name a
@@ -324,11 +360,15 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -
         "Portfolio", "Cost Basis", report.total_cost_basis,
         cells=["Portfolio", "Cost Basis", fmt_cents(report.total_cost_basis),
                "", ""]))
+    # The Market Value line is the headline gain: the sum of the per-holding gains
+    # shown above, so it reconciles with them -- period-bounded when the report was
+    # built for a window, lifetime otherwise. The separate lifetime breakdown lines
+    # (Unrealized / Realized / Dividend / Return of Capital) below stay as-is.
     rows.append(ReportRow(
         "Portfolio", "Market Value", report.total_market_value,
         cells=["Portfolio", "Market Value", fmt_cents(report.total_market_value),
-               fmt_cents(report.total_unrealized_pl),
-               _fmt_pct(report.pct_return)]))
+               fmt_cents(report.display_total_gain),
+               _fmt_pct(report.display_total_pct)]))
     rows.append(ReportRow(
         "Portfolio", "Unrealized Gain/Loss", report.total_unrealized_pl,
         cells=["Portfolio", "Unrealized Gain/Loss", "",
@@ -687,6 +727,12 @@ class ReportSpec:
     # Size the first (text) column to its contents so long values are not clipped
     # -- By Payee sets this so a full payee name shows without a manual drag.
     fit_first_column: bool = False
+    # Clickable-header sort for a FLAT report: ``{column_index: sort_key}`` naming
+    # which columns sort and to which key the projector understands. ``None`` (the
+    # default) leaves the header inert. The projector must accept
+    # ``sort_key``/``sort_desc`` (as ``investment_performance_rows`` does); this
+    # reuses the same instance-level sort seam the Itemize tree uses.
+    sortable: dict = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -738,9 +784,12 @@ def _run_transactions(conn, f):
 
 
 def _run_investment_performance(conn, f):
-    # A per-holding snapshot valued as of the "To" date; the account checklist
+    # A per-holding snapshot valued as of the "To" date, with Gain/Loss bounded to
+    # the resolved period [From, To] -- so 'Last 3 years' and 'Last 10 years' report
+    # different gains, not the same inception-to-date figure. The account checklist
     # filters it, and only investment accounts contribute holdings.
     return reports.investment_performance(conn, f.end_iso(),
+                                          start=f.start_iso(),
                                           account_ids=f.selected_account_ids(),
                                           include_hidden=f.include_hidden())
 
@@ -778,10 +827,15 @@ BY_PAYEE_SPEC = ReportSpec("By Payee", _run_by_payee, payee_rows,
 BY_TAG_SPEC = ReportSpec("By Tag", _run_by_tag, payee_rows)
 TRANSACTIONS_SPEC = ReportSpec("Transactions", _run_transactions, listing_rows,
                                columns=TRANSACTIONS_COLUMNS)
+# Sortable by the four orders the user asked for: Account (col 0) -> account then
+# ticker, Ticker (col 1) -> ticker alphabetical, Gain/Loss $ (col 3) -> period
+# gain, Gain/Loss % (col 4) -> period percent. Amount (col 2) is left inert.
 INVESTMENT_PERFORMANCE_SPEC = ReportSpec("Investment Performance",
                                          _run_investment_performance,
                                          investment_performance_rows,
-                                         columns=INVESTMENT_PERFORMANCE_COLUMNS)
+                                         columns=INVESTMENT_PERFORMANCE_COLUMNS,
+                                         sortable={0: "account", 1: "ticker",
+                                                   3: "gain", 4: "pct"})
 ITEMIZE_SPEC = ReportSpec("Itemize by Category", _run_itemize, itemize_tree_rows,
                           show_hidden_toggle=False, columns=TREE_COLUMNS,
                           is_tree=True)
@@ -810,9 +864,11 @@ class ReportWindow(QDialog):
         # (Itemize's Category/Amount). Table, CSV, HTML and PDF all read this.
         self.columns = list(self.spec.columns)
         self._rows: list[ReportRow] = []
-        # Itemize drill-down sort state (unused by flat reports): the clicked
-        # column key and direction, plus the last pure report object so a header
-        # click can re-project without re-querying the ledger. See _on_tree_sort.
+        # Clickable-header sort state, shared by the Itemize drill-down tree and any
+        # flat report that declares ``spec.sortable`` (Investment Performance): the
+        # clicked column's key and direction, plus the last pure report object so a
+        # header click can re-project without re-querying the ledger. See
+        # _on_tree_sort / _on_table_sort.
         self._sort_key = None
         self._sort_desc = False
         self._report = None
@@ -908,6 +964,14 @@ class ReportWindow(QDialog):
                 self.table.horizontalHeader().setSectionResizeMode(
                     0, QHeaderView.ResizeToContents)
             self.table.verticalHeader().setVisible(False)
+            if self.spec.sortable:
+                # Drive ordering by hand through the projector (Qt's own model sort
+                # stays off) so the Portfolio totals never move; the indicator is
+                # cosmetic. Same seam as the tree, see _on_table_sort.
+                header = self.table.horizontalHeader()
+                header.setSectionsClickable(True)
+                header.setSortIndicatorShown(True)
+                header.sectionClicked.connect(self._on_table_sort)
             self._body_widget = self.table
 
         self.export_button = QPushButton("Export CSV…")
@@ -959,6 +1023,12 @@ class ReportWindow(QDialog):
             self._rows = self.spec.project(report, sort_key=self._sort_key,
                                            sort_desc=self._sort_desc)
             self._populate_tree(self._rows)
+        elif self.spec.sortable:
+            # A flat report with clickable-header sort threads the active sort into
+            # its projector, just like the tree branch above.
+            self._rows = self.spec.project(report, sort_key=self._sort_key,
+                                           sort_desc=self._sort_desc)
+            self._populate(self._rows)
         else:
             self._rows = self.spec.project(report)
             self._populate(self._rows)
@@ -1055,6 +1125,29 @@ class ReportWindow(QDialog):
         self._rows = self.spec.project(self._report, sort_key=self._sort_key,
                                        sort_desc=self._sort_desc)
         self._populate_tree(self._rows, expanded_paths=expanded)
+
+    def _on_table_sort(self, col: int) -> None:
+        """Sort a flat report's rows by the clicked column, reusing the very same
+        sort_key/sort_desc mechanism as the Itemize tree (:meth:`_on_tree_sort`).
+
+        The spec's ``sortable`` map says which columns sort and to which key; a
+        column outside it is inert (Amount). A second click on the same column
+        toggles ascending/descending. Re-projects the cached report (no ledger
+        re-read) so only the display order changes; the Portfolio totals, appended
+        by the projector after the sorted line items, never move.
+        """
+        key = (self.spec.sortable or {}).get(col)
+        if key is None or self._report is None:
+            return
+        if self._sort_key == key:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_key, self._sort_desc = key, False
+        order = Qt.DescendingOrder if self._sort_desc else Qt.AscendingOrder
+        self.table.horizontalHeader().setSortIndicator(col, order)
+        self._rows = self.spec.project(self._report, sort_key=self._sort_key,
+                                       sort_desc=self._sort_desc)
+        self._populate(self._rows)
 
     # -- period preset dropdown ----------------------------------------------
     def _on_period(self, index) -> None:
