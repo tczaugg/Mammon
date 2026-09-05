@@ -862,6 +862,52 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   `crypto.display_balance`, so the app's single valuation entry point values any
   account correctly.
 
+### 5.8i Cryptocurrency import (Etherscan-style native-coin CSV)
+- A block-explorer by-address CSV export (Etherscan's per-wallet "Export CSV" is
+  the reference shape) lands as crypto events on a `type='crypto'` account. The
+  path mirrors the file-import hourglass (Section 6): a PURE parser turns text
+  into normalized records with NO database access, and one core function owns all
+  DB-facing work. `importers/crypto_csv.parse_etherscan(text) -> list[CryptoRecord]`
+  is the parser (the crypto twin of `NormalizedTxn`); `importers/crypto_core`
+  (`import_crypto_records` / `import_etherscan_file`) resolves the wallet, dedups,
+  classifies each row and writes.
+- **The importer adds NO second writer of the `crypto_*` tables.** Every write
+  funnels through `mammon.crypto`'s event writers (`record_income` for an inbound
+  RECEIVE, `record_send` for a disposal, `record_wallet_transfer` for an
+  own-wallet move) -- never a raw `INSERT`, so the SINGLE-WRITER discipline and
+  the transfer-mirror/lot invariants stay enforced in one place.
+- **Gas is the user's only when the user is the sender.** The export prints a
+  `TxnFee` on EVERY row, including inbound ones, but on-chain only the sender pays
+  gas. Gas is booked as a same-coin `fee_*` leg on the parent event ONLY when the
+  sender address is one of the user's own registered wallets; an inbound row's fee
+  belongs to the counterparty and must never debit the user's coin. This was the
+  single most consequential finding from the real 2020 ETH export (23 inbound
+  rows, 1 outbound).
+- **Sign derives from the two unsigned columns.** Value is split across
+  `Value_IN` / `Value_OUT` (exactly one non-zero per row); `Value_IN>0` acquires,
+  `Value_OUT>0` disposes.
+- **Fair-market value comes from `Historical $Price/Eth`, never `CurrentValue`.**
+  The `CurrentValue @ $<rate>/Eth` column values every row at one export-time rate
+  and is ignored; the per-transaction historical price supplies the basis /
+  proceeds / gas value, computed to signed integer cents under the wei-scale
+  high-precision decimal context (`crypto.quantity_context`).
+- **An own-wallet transfer needs a known-address registry.** A row is a
+  wallet-to-wallet transfer (mirror model, no realized gain) only when the OTHER
+  address also belongs to one of the user's Mammon crypto accounts (matched on
+  `accounts.account_number`); otherwise it stays SEND / RECEIVE for the user to
+  reclassify, since own-wallet intent is not derivable from the chain data alone.
+- **`tx_hash` is the exact-dedup key, so a re-import is a NO-OP.** The on-chain
+  hash is globally unique and immutable -- the crypto analogue of `fitid`, and
+  strictly better. Each row whose `(account_id, tx_hash)` already exists is
+  skipped before any write, so re-scraping a wallet's full history never
+  double-inserts. Failed on-chain transactions (non-empty `Status`/`ErrCode`)
+  move no value and are skipped. After a batch, `crypto.rebuild_holdings` refreshes
+  the FIFO/spec-ID lots and per-year checkpoints; a disposal books realized gain
+  against them per the account's `lot_method`.
+- Wallet addresses and tx hashes flow through only in memory to attribute gas and
+  detect own-wallet transfers; they are never written to a tracked file, and the
+  test fixtures use synthetic ANON placeholders only.
+
 ### 5.8c Backup scoping (one folder per database)
 - Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
   the Restore picker opens in the CURRENT database's folder.
@@ -2050,6 +2096,11 @@ Quicken can export its own data; we import that. Options and their limits:
 - QFX/OFX: the standard bank/CC/investment download format (SGML/XML). Direct
   parser -> normalized records. Preferred for institutions that offer it.
 - CSV: per-institution CSV (e.g. Fidelity) where QFX is unavailable.
+- Crypto CSV: a block-explorer by-address native-coin export (Etherscan shape)
+  imported onto a `type='crypto'` wallet-account via its own parser + core
+  (`importers/crypto_csv` + `importers/crypto_core`), with the on-chain `tx_hash`
+  as the exact-dedup key. See Section 5.8i for the import rules (gas attribution,
+  historical FMV, own-wallet transfer detection).
 - JSON: canonical schema for webSlinger-scraped sites (Section 7.2).
 
 ### 6.4 Normalized import record (all parsers converge here)
