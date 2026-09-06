@@ -36,8 +36,8 @@ from PyQt5.QtWidgets import (
 )
 
 from mammon import ledger, loans, loans_schedule
-from mammon.ui.models import fmt_money, parse_amount
-from mammon.ui.delegates import date_edit_iso, make_date_edit
+from mammon.ui.models import fmt_date, fmt_money, parse_amount
+from mammon.ui.delegates import date_edit_iso, make_category_combo, make_date_edit
 
 
 def _seed_date(edit, iso) -> None:
@@ -52,6 +52,8 @@ _INTERVAL_NAMES = ["weekly", "biweekly", "semimonthly", "monthly",
                    "quarterly", "semiannual", "annual"]
 # Sentinel account-combo choice meaning "create a new loan account".
 _NEW_ACCOUNT = "__new__"
+# Default "Paid from" label (id None): pre-enter the payment on the loan register.
+_FUNDING_UNSET = "(not set — pre-enter on the loan register)"
 # Common extra-amount categories offered as suggestions (editable).
 _EXTRA_SUGGESTIONS = ["Escrow", "PMI", "HOA", "Insurance", "Taxes"]
 
@@ -146,12 +148,29 @@ class LoanSetupWizard(QDialog):
         # post the whole payment there as a split (interest, escrow, a [Loan]
         # principal leg) -- the shape real payments have -- so that account's
         # download merges into them. Pre-filled from history when unset.
-        self.funding_combo = QComboBox()
-        self.funding_combo.addItem("(not set — pre-enter on the loan register)", None)
+        #
+        # Built with the register's own category/transfer input machinery
+        # (make_category_combo: editable, case-insensitive popup completer, the
+        # ':' parent-complete gesture) so it auto-completes exactly like every
+        # other picker in the app instead of only jumping to the first letter
+        # typed. The completer's choices are the fundable ACCOUNTS ONLY (no
+        # categories -- a loan is paid from an account, never a category).
+        self._funding_by_name = {}
         for acct in ledger.list_accounts(self.conn, include_closed=False,
                                          include_hidden=True):
             if (acct["type"] or "") in ("checking", "savings", "credit", "cash"):
-                self.funding_combo.addItem(acct["name"], int(acct["id"]))
+                self._funding_by_name[acct["name"]] = int(acct["id"])
+        self.funding_combo = make_category_combo(None, list(self._funding_by_name))
+        # make_category_combo seeds a blank first item; relabel it as the explicit
+        # "not set" default (id None) and carry each account's id as item data, so
+        # the existing account-name -> account-id mapping and currentData() are
+        # preserved (the Edit path still findData()s the funder) while
+        # _funding_account_id() reads back a typed-and-completed name too.
+        self.funding_combo.setItemText(0, _FUNDING_UNSET)
+        self.funding_combo.setItemData(0, None)
+        for i in range(1, self.funding_combo.count()):
+            self.funding_combo.setItemData(
+                i, self._funding_by_name.get(self.funding_combo.itemText(i)))
         form.addRow("Paid from", self.funding_combo)
         hint = QLabel("Attach these parameters to a liability account, or create "
                       "a new one. A new account opens with the loan's balance "
@@ -285,12 +304,50 @@ class LoanSetupWizard(QDialog):
     def _on_account_choice(self, *_):
         self.new_name.setEnabled(self.account_combo.currentData() == _NEW_ACCOUNT)
 
+    def _funding_account_id(self):
+        """The chosen 'Paid from' account id, or None for the unset default.
+        Resolves the combo's current text against the fundable-account map, so a
+        typed-and-completed name reads back even when no dropdown item was
+        formally selected, and falls back to the selected item's stored id."""
+        text = self.funding_combo.currentText().strip()
+        if text in self._funding_by_name:
+            return self._funding_by_name[text]
+        data = self.funding_combo.currentData()
+        return int(data) if data is not None else None
+
+    # ---- effective-date cells ---------------------------------------------
+    def _set_date_cell(self, table, r, c, iso=""):
+        """Put the app's standard date editor (typeable AND calendar-pickable, in
+        the user's chosen date format) into a table cell, seeded from an ISO date.
+        Read it back with :meth:`_date_cell_iso`. Replaces the bare ISO-text cell
+        the rates/extras effective-date columns used to carry, which ignored the
+        date-format preference; storage/domain stay ISO, only display/entry follow
+        the preference (the single chokepoint every date field goes through)."""
+        from PyQt5.QtCore import QDate
+        edit = make_date_edit(blank_ok=True)
+        d = QDate.fromString(str(iso or "").strip(), "yyyy-MM-dd")
+        # An unseeded cell stays blank (the minimum sentinel) rather than snapping
+        # to today, so a truly empty rate/extra row is still collected as empty.
+        edit.setDate(d if d.isValid() else edit.minimumDate())
+        table.setCellWidget(r, c, edit)
+        return edit
+
+    def _date_cell_iso(self, table, r, c):
+        """The ISO ``YYYY-MM-DD`` value of a date-editor cell ("" when blank),
+        falling back to a plain item's text for robustness."""
+        w = table.cellWidget(r, c)
+        if w is not None:
+            return date_edit_iso(w).strip()
+        return self._cell_text(table, r, c)
+
     # ---- row helpers ------------------------------------------------------
     def add_rate_row(self, effective_date="", annual_rate=""):
         t = self.rates_table
         r = t.rowCount()
         t.insertRow(r)
-        t.setItem(r, 0, QTableWidgetItem(str(effective_date)))
+        # The effective date is a date editor (user's format, calendar-pickable),
+        # not raw ISO text -- storage stays ISO, display/entry follow the pref.
+        self._set_date_cell(t, r, 0, effective_date)
         t.setItem(r, 1, QTableWidgetItem(str(annual_rate)))
 
     def add_extra_row(self, category="", amount="", label="", effective_date="",
@@ -306,9 +363,11 @@ class LoanSetupWizard(QDialog):
         t.setItem(r, 1, QTableWidgetItem(str(amount)))
         # New rows default to the first payment date, so a plain loan needs no
         # date typed; a mid-loan escrow change is entered with its own later date.
+        # The date is a date editor (user's format, calendar-pickable), not raw
+        # ISO text -- storage stays ISO, display/entry follow the pref.
         if not effective_date:
             effective_date = date_edit_iso(self.first_payment)
-        t.setItem(r, 2, QTableWidgetItem(str(effective_date)))
+        self._set_date_cell(t, r, 2, effective_date)
         t.setItem(r, 3, QTableWidgetItem(str(label)))
         # The whole scheduled payment moves with a dated escrow/extra change; this
         # cell captures the new TOTAL (persisted to loan_payments) and defaults to
@@ -390,7 +449,7 @@ class LoanSetupWizard(QDialog):
         for r in range(t.rowCount()):
             if self._cell_text(t, r, 4):
                 continue
-            eff = self._cell_text(t, r, 2)
+            eff = self._date_cell_iso(t, r, 2)
             cents = stored.get(eff)
             if cents is None:
                 cents = self._recomputed_total_cents(eff)
@@ -429,9 +488,8 @@ class LoanSetupWizard(QDialog):
         if t.rowCount() == 0:
             self.add_rate_row(fp, "")
         elif t.rowCount() == 1:
-            cell = t.item(0, 0)
-            if cell is not None and not cell.text().strip() and fp:
-                cell.setText(fp)
+            if fp and not self._date_cell_iso(t, 0, 0):
+                self._set_date_cell(t, 0, 0, fp)
 
     # ---- collect / validate / persist -------------------------------------
     def _collect(self):
@@ -443,7 +501,7 @@ class LoanSetupWizard(QDialog):
             new_name = ""
         rates = []
         for r in range(self.rates_table.rowCount()):
-            d = self._cell_text(self.rates_table, r, 0)
+            d = self._date_cell_iso(self.rates_table, r, 0)
             rate = self._cell_text(self.rates_table, r, 1)
             if not d and not rate:
                 continue
@@ -453,7 +511,7 @@ class LoanSetupWizard(QDialog):
         for r in range(self.extras_table.rowCount()):
             cat = self._extra_category(r)
             amt = self._cell_text(self.extras_table, r, 1)
-            eff = self._cell_text(self.extras_table, r, 2)
+            eff = self._date_cell_iso(self.extras_table, r, 2)
             label = self._cell_text(self.extras_table, r, 3)
             # A dated new total payment (persisted to loan_payments) needs a valid
             # effective date to key it; a blank/invalid cell just means "no dated
@@ -473,7 +531,6 @@ class LoanSetupWizard(QDialog):
         return {
             "account_id": account_id,
             "new_name": new_name,
-            "funding_account_id": self.funding_combo.currentData(),
             "principal_cents": int(round(self.principal.value() * 100)),
             "payment_cents": int(round(self.payment.value() * 100)),
             "first_payment": date_edit_iso(self.first_payment),
@@ -482,6 +539,7 @@ class LoanSetupWizard(QDialog):
             "rates": rates,
             "extras": extras,
             "new_totals": new_totals,
+            "funding_account_id": self._funding_account_id(),
             "interest_category": self.interest_category.currentText().strip(),
         }
 
@@ -530,21 +588,45 @@ class LoanSetupWizard(QDialog):
                                f"{eff}: use one amount per category per date.")
             seen.add((cat, eff))
             extra_rows.append(loans.ExtraLine(cat, cents, None, eff))
-        # The escrow/extras in force on the first payment (an extra dated later
-        # is not part of the first period), summed for the amortization check.
+        # Amortization sanity check, kept strictly TIME-ALIGNED: everything is
+        # measured at the SAME period (the first payment). The interest and extras
+        # in force then, and -- crucially -- the payment in force then, which is a
+        # dated New-total override when the user entered one for that date
+        # (loans._active_payment), NOT the raw step-2 amount. Pitting the step-2
+        # (initial) payment against a later-edited (current) escrow is what made a
+        # consistent escrow+payment edit in step 4 false-trip "too small".
         extras_total = sum(
             e.amount for e in loans._active_extras(extra_rows, v["first_payment"]))
-        # The payment must at least cover the first period's interest + extras,
-        # or principal never declines (the loan would not amortize).
         ppy = loans._INTERVALS[v["interval"]][0]
         rate_rows = [loans.RateRow(d, _parse_rate(rate)) for d, rate in v["rates"]]
         active = loans._active_rate(rate_rows, v["first_payment"])
         first_interest = loans._cents(
             Decimal(v["principal_cents"]) * loans._period_rate(active, ppy))
-        if v["payment_cents"] - first_interest - extras_total <= 0:
+        payment_rows = [loans.PaymentRow(eff, cents) for eff, cents in v["new_totals"]]
+        first_payment_amt = loans._active_payment(
+            payment_rows, v["payment_cents"], v["first_payment"])
+        first_principal = first_payment_amt - first_interest - extras_total
+        if first_principal < 0:
+            # The payment is SMALLER than interest + extras: it would ADD to the
+            # balance (negative amortization) rather than pay the loan down. A
+            # distinct problem from a payment that merely fails to reduce principal,
+            # and worth a distinct message (payment_split would compute principal
+            # negative, so the [Loan] leg would move money the wrong way).
+            return False, (
+                "This payment would INCREASE the loan balance. On "
+                f"{fmt_date(v['first_payment'])} the payment is "
+                f"{fmt_money(first_payment_amt)}, but the period's interest "
+                f"({fmt_money(first_interest)}) plus extra amounts "
+                f"({fmt_money(extras_total)}) total "
+                f"{fmt_money(first_interest + extras_total)} -- more than the "
+                "payment. Raise the payment or lower the extras.")
+        if first_principal == 0:
+            # Covers interest + extras exactly, leaving nothing for principal, so
+            # the balance never declines and the loan never amortizes.
             return False, ("The payment is too small: it must cover the first "
                            f"period's interest ({fmt_money(first_interest)}) plus "
-                           f"extra amounts ({fmt_money(extras_total)}).")
+                           f"extra amounts ({fmt_money(extras_total)}) and leave "
+                           "something toward principal.")
         return True, ""
 
     def persist(self):
@@ -626,7 +708,13 @@ class LoanSetupWizard(QDialog):
                       for cat, amt, eff, _l in v["extras"]]
         extras_total = sum(
             e.amount for e in loans._active_extras(extra_rows, v["first_payment"]))
-        first_principal = v["payment_cents"] - first_interest - extras_total
+        # The payment in force on the first payment (a dated New-total override
+        # wins over the step-2 amount), so the previewed split matches what the
+        # schedule will actually post -- same time-alignment as validate().
+        payment_rows = [loans.PaymentRow(eff, cents) for eff, cents in v["new_totals"]]
+        first_payment_amt = loans._active_payment(
+            payment_rows, v["payment_cents"], v["first_payment"])
+        first_principal = first_payment_amt - first_interest - extras_total
         suggested_pi = loans.standard_payment(
             v["principal_cents"], active, v["term_months"], ppy)
         if v["account_id"] is not None:
@@ -638,9 +726,9 @@ class LoanSetupWizard(QDialog):
             f"Account:            {name}",
             f"Original principal: {fmt_money(v['principal_cents'])}",
             f"Term:               {v['term_months']} months, {v['interval']} payments",
-            f"First payment:      {v['first_payment']}  (rate {active}%)",
+            f"First payment:      {fmt_date(v['first_payment'])}  (rate {active}%)",
             "",
-            f"Total payment:      {fmt_money(v['payment_cents'])}",
+            f"Total payment:      {fmt_money(first_payment_amt)}",
             f"  first interest:   {fmt_money(first_interest)}",
             f"  escrow / extras:  {fmt_money(extras_total)}",
             f"  first principal:  {fmt_money(first_principal)}",

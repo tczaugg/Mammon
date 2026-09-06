@@ -355,6 +355,12 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
 - Investment rows are excluded end to end: `investment_transactions` has no
   category column, so there is nothing to predict and nothing the user could
   correct to train on.
+- **Keyword category rules are hand-written only.** The old `keyword ->
+  category` learner minted a global rule from a single correction and is
+  removed; migration 57 deleted every row it had produced. What remains in
+  `category_rules` is what the user typed into the Rules manager, so it is
+  honoured directly when the payee tree declines -- an explicit instruction,
+  not the system guessing.
 
 ### 5.6 Import (see Section 6 for the strategy)
 - One-time migration of the full ~40-year Quicken 2017 history into Mammon's DB.
@@ -1426,6 +1432,30 @@ direction and the Portfolio totals never move.
   placeholder went on the loan with the full amount and the split there: it
   matched no real payment, the checking download could never merge into it,
   and the funding account showed nothing coming.
+- **"Paid from" auto-completes like the register.** The field is the app's shared
+  category/transfer input (`ui/delegates.make_category_combo`: editable, a
+  case-insensitive popup completer, the `:` gesture) restricted to the fundable
+  ACCOUNTS ONLY (checking, savings, credit, cash) -- never a category, since a
+  loan is paid from an account. It was a plain combo that only jumped to the
+  first item matching the typed letter; the account-name -> account-id mapping and
+  the "(not set -- pre-enter on the loan register)" default are preserved, and a
+  typed-and-completed name reads back the chosen account id.
+- **The wizard's amortization check is time-aligned, and names a growing balance
+  distinctly.** Before saving, the payment must at least cover the first period's
+  interest plus the extras (escrow/PMI) in force then, leaving something toward
+  principal. All three are measured at the SAME period: the interest at that
+  date's rate (`loans._period_rate`), the extras active then
+  (`loans._active_extras`), and -- the fix -- the payment in force then
+  (`loans._active_payment`), which is a dated New-total override when the user
+  entered one for that date, NOT the step-2 initial amount. Pitting the initial
+  payment against a later-edited (current) escrow made a consistent escrow+payment
+  edit in step 4 false-trip "too small". A payment SMALLER than interest + extras
+  (its principal would be NEGATIVE, so the payment would GROW the balance) now
+  gets its own warning -- distinct from the amortization "too small" message, and
+  a hard gate, so a negative-principal split (`loans.payment_split`) is never
+  persisted. A valid adjustment re-splits every affected payment through
+  `ledger.set_splits` and leaves no uncategorized remainder, so the register's
+  `--Split--` warning triangle (`ledger.uncategorized_split_amount`) clears.
 - **Loan rows in the Scheduled Payments manager are live, not read-only.** A
   loan row's next date is the first schedule period no register holds yet --
   pending or posted, on the funder (`loans_schedule.next_due_date`) -- the loan
@@ -1685,6 +1715,38 @@ direction and the Portfolio totals never move.
   and no total moved. The original reason for the cap survives where it bites —
   a security with no price after 1997 is still valued at its 1997 price, because
   the newest quote is taken per SYMBOL on or before that date.
+
+### 5.5h Matching a scheduled pre-entry (tolerant amounts)
+- **A pre-entry's amount is a forecast, so the matcher must not demand it be
+  right.** The finance calendar enters a recurring payment as the MEDIAN of the
+  last six months, and a loan pre-entry uses the amortization schedule's figure.
+  Both are wrong by construction the moment escrow or a rate moves: the real
+  debit arrives for a different amount, misses its placeholder, and lands as a
+  NEW row beside a pre-entry that then stands forever.
+- The signal is the visible `num` of `Sched`, not the internal `scheduled` flag
+  — the marker is what survives a QIF round trip (on a reloaded ledger 523 rows
+  carry the num and none carries the flag).
+- `import_review._find_match` therefore adds a LAST tier: a `num='Sched'` row in
+  the date window, SAME SIGN, whose amount is within
+  `SCHED_AMOUNT_TOLERANCE` (half the placeholder's own amount — the same
+  latitude the file-import path already allows for this case in
+  `importers/core._funding_pending_by_payee`). Running last means an exact match
+  always wins and this only ever rescues a row that would have been NEW.
+- **Unambiguous-only.** `core.py` can afford that tolerance because it also
+  demands the payee match; a downloaded review row has no payee at
+  classification time (`map_row` leaves it empty by design). So the safety
+  property here is different: the tolerant tier fires only when exactly ONE
+  scheduled candidate is in the window. Two are a guess, and a guess that
+  silently reconciles the wrong row is worse than leaving it NEW.
+- **Manual match opens both tolerances, and is capped at a fortnight.** The user
+  reaching for manual match has already been failed by the automatic one, so
+  candidates are offered within ±`MANUAL_WINDOW_DAYS` (15 — never more, by
+  request) at any amount within the same tolerance, ordered nearest-amount then
+  nearest-date so an exact match still heads the list. The SIGN never varies: a
+  payment is not answered by a deposit. `set_manual_match` enforces the same two
+  rules on a hand-picked id. The dialog shows a **Difference** column, because
+  once amounts may differ the value alone no longer tells the user whether they
+  are looking at the right row.
 
 ### 5.5d Accepting a review in bulk
 - **A MATCH merges into the existing line; it never overwrites a user-entered
@@ -1991,6 +2053,12 @@ money movement.
   all said `yyyy-MM-dd` — and the transaction dialog, the investment dialog and
   the loan wizard took dates as FREE TEXT that only accepted ISO, with no picker
   at all. Choosing `DD/MM/YYYY` changed the register and nothing else.
+- **Tabular date cells follow the preference too.** After the loan wizard's scalar
+  date fields adopted `make_date_edit`, its rate-history and extra-amount TABLES
+  still carried each effective date as raw ISO text in a bare `QTableWidgetItem`,
+  bypassing both chokepoints. Every effective-date cell is now a `make_date_edit`
+  editor (calendar-pickable, in the chosen format), read back through
+  `date_edit_iso`; storage and the amortization domain stay ISO.
 
 ### 5.11 Reconcile against a statement
 - Two-pane workspace (debits left, credits right) after a setup dialog that
