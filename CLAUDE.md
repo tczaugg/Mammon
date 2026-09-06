@@ -105,7 +105,7 @@ dropped in migration 28.
 ### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 54).
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 58).
 **Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
 databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
 
@@ -131,6 +131,15 @@ the checkpoint path; the full-sum version is retained as the oracle it must matc
    `MATCHING`, stores them in `review_items`, and `ui/import_review_widget.py` renders a review panel
    below the register. Nothing enters the ledger until the user accepts or saves a row, and
    `mammon/import_review.py` is the sole writer for that flow.
+
+A **scheduled pre-entry matches on tolerance, not on exact cents.** Its amount is a
+forecast (the calendar's six-month median, or the amortization figure), so escrow or a rate
+change makes it miss by construction. `_find_match` adds a last tier for `num='Sched'` rows —
+same sign, within `SCHED_AMOUNT_TOLERANCE` (half the placeholder's amount, matching
+`importers/core._funding_pending_by_payee`) — and fires it only when exactly ONE such candidate
+is in the window, because a review row has no payee yet to disambiguate with. Manual match
+opens the same amount tolerance over `MANUAL_WINDOW_DAYS` (15, a hard cap); the sign never
+varies.
 
 `NormalizedTxn` (`importers/record.py`, SRD §6.4) is the waist of the hourglass: parsers stay
 ignorant of the database, and `core.py` stays ignorant of file formats.
@@ -173,9 +182,11 @@ split leg. **`record.clean_category` discards the tag half**; use
 first leg's category tag and all, so reading it at row level double-tags the
 transaction with one leg's project — `_build_cash` clears it deliberately.
 
-### Learned rules (four cooperating engines)
+### Learned rules (five cooperating engines)
 
-Raw bank `statementDescription` text is gobbledygook, so the app learns from corrections:
+Raw bank `statementDescription` text is gobbledygook, so the app learns from corrections.
+**Payee is resolved first, then category is resolved BELOW it** — that ordering is what keeps a
+suggestion scoped to the merchant it came from:
 
 - `rename_tree.py` — payee renaming AND investment-action mapping via an online discriminative
   **trie** per domain that grows only where it must to tell two labels apart. Tokens are ranked by
@@ -185,8 +196,44 @@ Raw bank `statementDescription` text is gobbledygook, so the app learns from cor
   a gate; only a high-confidence pure rename overrides it. `RANKING_VERSION` forces a one-time
   rebuild from history when the ranking algorithm changes — a trie built under one ranking is
   unreachable under another.
+**Neither tree is seeded from history.** Both learn ONLY from what the user accepts in
+review. `rename_tree` used to bootstrap at startup, replaying every posted row's
+`memo -> payee` pair as an accepted rename — true for downloaded rows, where the memo IS the
+bank's text, and false for hand-entered and QIF-imported history, where it is a note the user
+typed. A 1998 memo of "deposit" on a Foothill Place row taught the tree that `MOBILE DEPOSIT`
+means Foothill Place, in a ledger deliberately started fresh. `ensure_bootstrapped` survives on
+both modules as callable API for an explicit seed-from-history action; nothing calls it on open.
+
+Two thresholds, and they are different questions. `import_review.RENAME_MIN_SIGHTINGS` (2) is
+whether a payee is OFFERED in the dropdown at all; `rename_tree.HIGH_CONFIDENCE_MIN_COUNT` (4)
+is whether it is APPLIED to the cell. Between them the user sees the bank's own text and a
+one-click list. A payee chosen ONCE is neither filled nor offered.
+
+- `category_tree.py` — the auto-categorizer: one discrimination trie **per payee**, over the source
+  text, ranked by category entropy. Two gates, and both are load-bearing: **node purity** asks *does
+  this description discriminate?*, **payee coherence** (`PAYEE_COHERENCE`) asks *is this merchant
+  categorizable at all?* — the second applies only at DEPTH 0, where the answer is the payee's bare
+  prior and nothing distinguished the row. A node below the root matched a token that has meant one
+  category every time, and must not be refused because the payee is bimodal overall: gating every
+  depth on the payee's mix would refuse Costco's `GAS` branch, the one answer the tree is surest of.
+  **A candidate can only ever be a category that payee has already carried**; a first-ever payee
+  proposes nothing at all. Replayed cold over the real ledger's first year (625 accepted rows) it
+  auto-fills 29% at 97% precision with zero never-seen proposals, against the old keyword table's
+  67% fire rate at 74% precision, half of whose errors were a category from an unrelated merchant.
+  Text-less evidence (a register edit, 30 years of imported Quicken rows) updates the payee TALLY
+  only and never the trie — with no tokens to walk it would all land on the root, where mismatched
+  categories accumulate and kill the confident cases.
 - `category_rules.py`, `transfer_rules.py` — `keyword -> category_id` / `keyword -> account_id`,
   sharing their tokenizer with each other via `keywords.py` so they stay in lock-step.
+  **`category_rules` no longer learns.** One correction minted a GLOBAL keyword rule, which is how
+  the town name `SPANISH` became a Utilities rule that fired on Subway, O'Reilly and the youth
+  theater. `learn_from_edit` is deleted and migration 57 purged every row it had written (all 228 on
+  the reference ledger — 67 carried multi-token keywords, which only `refine_keyword` produces and
+  the Rules manager's Add dialog cannot). Nothing writes the table automatically now, so a row in it
+  is a deliberate Rules-manager entry and `predict_fields` honours it directly, *after* the tree
+  declines. That is the one place a category outside the payee's own history can be filled in, and
+  it is there because the user typed it. `transfer_rules` still learns — it maps statement text to
+  an ACCOUNT, a far smaller and less ambiguous target.
 - `categorize.py` — payee-level `import_mappings` keyed on the *normalized* payee, with a `source`
   ranking where an explicit user choice outranks an inferred one.
 
@@ -214,7 +261,18 @@ Two independent guards keep the 1/minute auto-backup cheap, and both are load-be
 *do* happen from copying 12 MB to record a 15 KB change. Measured on the real ledger, a minute of
 work touches ~14 pages of 2,999.
 
-Four invariants:
+**Each snapshot also carries a "what changed" summary**, because the file name alone (time + tag)
+cannot tell one one-minute auto-backup from the next when picking a restore point. At snapshot time
+`build_manifest` takes a lightweight, READ-ONLY census of the staged copy — per-account transaction
+count, balance in cents, and latest row — and `summarize` diffs it against the previous snapshot
+**of the same tag** (within a tag the timestamp-before-extension name sorts chronologically; across
+tags it does not, so the diff is tag-scoped, and each tag forms its own chain). The first snapshot
+of a tag reads as `baseline / initial`. A delta stashes the manifest+summary as extra keys in its
+JSON header; a full `.bak` (a plain SQLite file with nowhere to put metadata) gets a
+`<name>.bak.meta.json` sidecar. `_describe` (CLI `list`) and the Restore confirm dialog surface the
+summary; the UI reads it through `backup.snapshot_summary` only — no SQL or money logic in `ui/`.
+
+Five invariants:
 
 - **A restore never crosses databases.** `restore_backup` refuses a snapshot whose own
   `<db-file-name>` prefix disagrees with the file being replaced (`snapshot_db_name` /
@@ -229,11 +287,16 @@ Four invariants:
 - **Deltas reference the baseline directly, never each other.** No chains — one damaged delta costs
   one restore point, not every point after it. Growth against a fixed baseline is sublinear, so this
   costs almost nothing.
-- **Retention must never orphan a baseline.** `prune_backups` and `purge_auto_backups` hold a full
-  snapshot back past its turn while any surviving delta names it. Dropping it is the one way this
-  scheme loses real data.
+- **Retention must never orphan a baseline — or a sidecar.** `prune_backups` and
+  `purge_auto_backups` hold a full snapshot back past its turn while any surviving delta names it
+  (dropping it is the one way this scheme loses real data), and both delete a full snapshot's
+  `.bak.meta.json` sidecar in lockstep with the `.bak` (as does `organize_backups` when it moves a
+  legacy snapshot into its per-db folder). A sidecar left behind names a snapshot that no longer
+  exists.
 - **A rebuilt delta is checksum-verified** against the hash taken when it was written; a mismatch
-  raises rather than handing back a plausible-looking database.
+  raises rather than handing back a plausible-looking database. The manifest/summary keys must stay
+  OUT of that hash: the `sha256` is of the reconstructed DB bytes, never of the header, so the added
+  header keys cannot corrupt a restore (regression: `test_backup_summary.py`).
 
 Anything needing a real file from either kind calls `backup.restore_backup(snapshot, out)`.
 `python -m mammon.backup list|verify|restore` does the same from a terminal, so a delta is never a

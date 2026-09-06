@@ -1019,6 +1019,29 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
 - Nothing already on disk was stranded: `list_backups` reads the per-database
   folder AND legacy flat snapshots, a delta looks for its baseline in both, and
   `python -m mammon.backup organize [--dry-run]` moves the old files into place.
+- **Each snapshot carries a "what changed" summary**, so a user choosing among a
+  hundred near-identical one-minute auto-backups can tell them apart — the file
+  name records only the moment and the manual/auto tag. At snapshot time
+  `backup.build_manifest` takes a lightweight, READ-ONLY census of the just-taken
+  copy (total transaction count, and per account: id, name, transaction count,
+  balance in cents, latest date/payee), and `backup.summarize` diffs it against
+  the previous snapshot **of the same tag** to produce one line, e.g.
+  `+3 txns: Checking +3 txns (bal 1,234.56->1,250.00); deleted Visa`. The first
+  snapshot of a tag has no predecessor and reads `baseline / initial`. The
+  manifest is read-only — it never writes the ledger (single-writer rule) — and
+  money stays integer cents, rendered without floats.
+- **The summary is stored WITHOUT changing the restorable bytes.** A delta keeps
+  the manifest+summary as extra keys in its existing JSON header (which is not
+  part of the checksummed image: the recorded `sha256` covers the reconstructed
+  database bytes, never the header, so a rebuilt delta still verifies); a full
+  `.bak` — a plain SQLite file anything can open — gets a `<name>.bak.meta.json`
+  sidecar next to it. Retention (`prune_backups`, `purge_auto_backups`) deletes a
+  sidecar in lockstep with its `.bak`, and `organize_backups` moves it along, so
+  a sidecar never outlives or is orphaned from its snapshot.
+- **Where it surfaces:** `python -m mammon.backup list` appends the summary to
+  each snapshot's line, and the Restore confirm dialog shows the chosen
+  snapshot's summary. The UI reads it through `backup.snapshot_summary` only — no
+  SQL and no money logic live in `ui/`.
 
 ### 5.8d The universal report customization bar
 - ONE control set for every report (`ui/report_filters.ReportFilterBar`, opened
@@ -1715,6 +1738,64 @@ direction and the Portfolio totals never move.
   and no total moved. The original reason for the cap survives where it bites —
   a security with no price after 1997 is still valued at its 1997 price, because
   the newest quote is taken per SYMBOL on or before that date.
+
+### 5.5j One line, one match
+- **An EXACT match outranks a tolerant one across the whole batch, not just
+  within a row.** The tolerant scheduled tier already runs last inside
+  `_find_match`, but claiming is global: a tolerant row earlier in the file took
+  the register line, and the row matching it to the cent -- later in the file --
+  found the line claimed and classified NEW. `build_review` therefore runs TWO
+  passes: pass 1 offers every row only the exact tiers, pass 2 lets what is
+  still NEW try the tolerant tier.
+- **A register line is one event, so at most one review row may hold it.**
+  `set_manual_match` releases any other row already matched to the chosen line
+  (`release_txn_matches`) before taking it. Hand-matching onto a taken line used
+  to leave both rows pointing at it, and the second then reconciled a
+  transaction already spoken for.
+- **A single match can be undone.** `unmatch_one` returns one row to pending NEW
+  and, when it had been accepted, restores that register line's prior
+  `fitid`/`cleared`/`reconciled` from the values `accept_match` recorded.
+  Previously the only undo was `undo_all_matches`, so correcting one wrong match
+  tore down every correct one with it. Reached from the review row's context
+  menu (**Unmatch**), which is now offered on an already-accepted MATCHING row
+  too. Investment rows are restored in `investment_transactions`, their own
+  table.
+
+### 5.5k Learning starts empty
+- **The rename and category trees are never seeded from register history.** They
+  learn only from rows the user accepts in review. Bootstrapping replayed every
+  posted transaction's `memo -> payee` pair as an accepted rename, which is only
+  true for downloaded rows; for hand-entered and QIF-imported history the memo is
+  a note the USER typed. One 1998 memo of "deposit" on a Foothill Place row put
+  that payee on the trie, and `MOBILE DEPOSIT` -- pure bank boilerplate -- then
+  renamed to Foothill Place in a ledger started deliberately fresh.
+  `ensure_bootstrapped` remains callable on both modules for an explicit
+  seed-from-history action, but nothing invokes it on open.
+- **Offering a name and applying it are separate gates.**
+  `import_review.RENAME_MIN_SIGHTINGS` (2) decides whether a payee appears in the
+  dropdown; `rename_tree.HIGH_CONFIDENCE_MIN_COUNT` (4) decides whether it is
+  written into the cell. Below the second the register shows the raw statement
+  description with the candidates one click away; below the first the name is not
+  shown at all. A payee chosen once is neither filled nor offered -- the gate used
+  to cover the AUTO tier only, so a contested node pre-filled its top candidate
+  from a single sighting.
+
+### 5.5i Discarding a review row removes it
+- **Discard means "not now", not "never again".** Discarding used to TOMBSTONE:
+  the row stayed with `state='discarded'` so a re-download's `INSERT OR IGNORE`
+  would collide with it and not re-add it. That inverted the gesture. The user
+  discarded a list expecting to download the range again and take another run at
+  matching it; instead 106 tombstones ate the re-download and only the 5
+  genuinely new transaction ids came back -- and with no un-discard action
+  anywhere, discard was a one-way door only a hand-written UPDATE could reopen.
+- `discard_all` and `discard_one` therefore DELETE the row. Downloading the same
+  date range offers it again. A row the user genuinely never wants is excluded by
+  choosing a different date range, which they control directly; it needs no
+  permanent per-row veto.
+- **ACCEPTED rows still persist**, and must: they became register transactions,
+  so re-offering them would duplicate work already done. The dedupe that matters
+  is `(account_id, transaction_id)` against accepted rows plus the register
+  itself.
 
 ### 5.5h Matching a scheduled pre-entry (tolerant amounts)
 - **A pre-entry's amount is a forecast, so the matcher must not demand it be

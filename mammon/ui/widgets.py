@@ -6449,9 +6449,13 @@ class MainWindow(QMainWindow):
         except backup.ForeignSnapshotError as exc:
             QMessageBox.critical(self, "Restore from Backup", str(exc))
             return
+        # Show what this snapshot changed (read through the backup module -- no
+        # SQL or money logic lives here) so the user can tell restore points apart.
+        summary = backup.snapshot_summary(path)
+        changed = f"\n\nChanges in this backup:\n{summary}" if summary else ""
         if QMessageBox.question(
                 self, "Restore from Backup",
-                f"Replace the current database with:\n{path}\n\n"
+                f"Replace the current database with:\n{path}{changed}\n\n"
                 "A backup of the current database is taken first. Continue?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No) != QMessageBox.Yes:
@@ -6602,6 +6606,13 @@ class MainWindow(QMainWindow):
         if self._find_dialog is not None:
             self._find_dialog.close()
             self._find_dialog = None
+        # NOT bootstrapped here, deliberately. Opening a database from this menu
+        # is how a NEW ledger comes into being, and a new ledger must start
+        # untrained: seeding it replays the register's memo->payee pairs as if
+        # they were accepted renames, and for hand-entered or QIF-imported
+        # history the memo is a note the USER typed, not bank text. A 1998 memo
+        # of "deposit" on a Foothill Place row is not evidence that MOBILE
+        # DEPOSIT means Foothill Place, but that is exactly what it taught.
         self._install_central(db.init_db(path, key))
         self.db_path = path
         self.db_key = key
@@ -7543,9 +7554,10 @@ class MainWindow(QMainWindow):
             entries = import_review.build_review(
                 self.conn, account_id, result.rows)
             # Persist the review so it survives a restart / account switch. A
-            # re-download of an already-actioned row does not resurrect it: it
-            # stays actioned, and whether it is VISIBLE is the toggle's business,
-            # not this path's.
+            # re-download of an already-ACCEPTED row does not resurrect it: it
+            # stays accepted, and whether it is VISIBLE is the toggle's business,
+            # not this path's. (A DISCARDED row is deleted outright, so a
+            # re-download legitimately brings it back -- that is the point.)
             batch_id = import_review.start_batch(
                 self.conn, account_id, source="download", file_count=1)
             import_review.persist_entries(
@@ -7880,16 +7892,16 @@ class MainWindow(QMainWindow):
         ``NET_WORTH_PERIOD_DEFAULT`` so its cumulative curve spans the whole
         ledger; every other caller inherits ``PERIOD_DEFAULT`` (Year-to-Date)."""
         import datetime as _dt
-        from PyQt5.QtWidgets import QHBoxLayout, QLabel, QComboBox
+        from PyQt5.QtWidgets import QHBoxLayout, QLabel
         from mammon.ui.report_filters import (customize_button, resolve_period,
-                                             PERIOD_PRESETS, PERIOD_DEFAULT)
+                                             make_period_combo, PERIOD_DEFAULT)
         if default_key is None:
             default_key = PERIOD_DEFAULT
 
-        combo = QComboBox()
-        for label, key in PERIOD_PRESETS:
-            combo.addItem(label, key)
-        combo.setCurrentIndex(combo.findData(default_key))
+        # Shared factory: same widened combo (sized for "Earliest to date") as the
+        # generalized ReportWindow uses. The currentIndexChanged connect below runs
+        # after this, so seeding the default selection fires no premature refresh.
+        combo = make_period_combo(default_key)
         # Make the initial range agree with the default selection.
         default_rng = resolve_period(default_key, self.conn, _dt.date.today())
         if default_rng:
