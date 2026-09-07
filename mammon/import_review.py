@@ -34,11 +34,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import categorize
 from . import category_rules
+from . import category_tree
 from . import ledger
 from . import rename_tree
 from . import transfer_rules
@@ -71,6 +74,8 @@ __all__ = [
     "count_pending",
     "accept_all",
     "discard_all",
+    "unmatch_one",
+    "release_txn_matches",
     "undo_all_matches",
     "manual_match_candidates",
     "set_manual_match",
@@ -86,9 +91,48 @@ LABEL_MATCHING = "MATCHING"
 DEFAULT_WINDOW_DAYS = 3
 
 # Manual-match browsing window (half-window, in days). A hand-picked match is
-# deliberately wider than the auto window -- the user is eyeballing candidates,
-# so show a month either side of the posted date at ANY amount.
-MANUAL_WINDOW_DAYS = 30
+# deliberately wider than the auto window -- the user is eyeballing candidates --
+# but never wider than a fortnight either side: past that, a "candidate" is
+# guesswork about a different month's payment. (By request; was 30.)
+MANUAL_WINDOW_DAYS = 15
+
+# The ``num`` an app-generated pre-entry carries. It is the marker that survives
+# a QIF round trip -- on a reloaded ledger 523 rows carry it while ``scheduled``
+# is 0 for every one of them -- so the matcher keys on the NUM, not the flag.
+SCHED_NUM = "Sched"
+
+# How far a pre-entry's amount may miss and still be the same payment. A
+# scheduled row's amount is a FORECAST -- the finance calendar enters the median
+# of the last six months -- so it is wrong by construction whenever escrow or a
+# rate moves, and the real debit then never met its placeholder. Same figure the
+# FILE import path already allows for exactly this case
+# (``importers/core._funding_pending_by_payee``: "the payment CHANGED (escrow /
+# rate) after it was scheduled"), so the two ingestion paths agree.
+#
+# core.py can afford 50% because it also demands the payee match. A downloaded
+# review row has no payee yet -- ``map_row`` deliberately leaves it empty, the
+# rename tree only runs later at predict time -- so the safety property here is
+# different: a tolerant match is taken ONLY when it is UNAMBIGUOUS. One
+# in-window scheduled candidate is the payment; two are a guess, and a guess
+# that silently reconciles the wrong row is worse than leaving it NEW for the
+# user to match by hand.
+SCHED_AMOUNT_TOLERANCE = 0.5
+
+# How many times a payee must have been chosen before it is even SHOWN as a
+# rename candidate. Distinct from ``rename_tree.MIN_FILL``, which governs
+# whether a rename is applied: this governs whether it is offered at all. One
+# sighting says nothing, and a name the user has never accepted is noise in the
+# dropdown, not help (by request). The tree applies it itself; the alias is
+# kept so the requirement has one name here.
+RENAME_MIN_SIGHTINGS = rename_tree.MIN_OFFER
+
+# How much the prior register rows sharing a statement text must AGREE, and how
+# many of them there must be, before their CATEGORY is back-filled (see
+# :func:`_prior_txn_for`). Identical bank text is strong evidence of identity,
+# but not when the rows carrying it disagree. Deliberately stricter than the
+# rename tree's fill floor: these rows may never have been reviewed at all.
+PRIOR_TXN_PURITY = 0.8
+PRIOR_TXN_MIN_ROWS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +144,6 @@ _MULTISPACE = re.compile(r"\s+")
 # Captures the direction and the counterparty account label (up to a ':' or
 # end-of-string).
 _TRANSFER_RE = re.compile(r"\bTRANSFER\s+(FROM|TO)\b\s*(.*?)\s*(?::|$)", re.IGNORECASE)
-
-# Tokens that should stay upper-cased when we title-case an all-caps feed line.
-_KEEP_UPPER = {"ACH", "POS", "ATM", "LLC", "US", "USA", "ID", "PPD", "CCD", "ATM"}
-
 
 def _g(row: dict, *names: str, default: str = "") -> str:
     """First non-empty value among ``names`` (as a stripped string)."""
@@ -143,27 +183,11 @@ def _signed_cents(row: dict) -> int:
     return -abs(cents) if is_debit else abs(cents)
 
 
-def _titlecase(s: str) -> str:
-    out = []
-    for tok in s.split(" "):
-        if tok.upper() in _KEEP_UPPER:
-            out.append(tok.upper())
-        else:
-            out.append(tok.capitalize())
-    return " ".join(out)
-
-
-def _clean_payee(text: str) -> str:
-    """Best-effort tidy of a raw description into a display payee."""
-    s = _MULTISPACE.sub(" ", (text or "").strip())
-    if not s:
-        return ""
-    # Bank feeds are usually ALL CAPS; title-case those for readability while
-    # leaving already mixed-case (human-formatted) descriptions alone.
-    letters = [c for c in s if c.isalpha()]
-    if letters and all(c.isupper() for c in letters):
-        s = _titlecase(s)
-    return s
+# The display default for a description with no rename: whitespace collapsed
+# and an ALL-CAPS feed line title-cased. It is the rename tree's function
+# because the tree's corpus loader has to recognise the exact string -- a row
+# whose payee IS this text was kept as-is and is not a correction.
+_clean_payee = rename_tree.tidy_text
 
 
 def _derive_payee(desc: str) -> tuple[str, bool, str]:
@@ -241,6 +265,12 @@ class MappedRow:
     # suggestion against the payee actually committed, which stays accurate even
     # after the user edits the row. A stored flag would only go stale.
     payee_candidates: list = field(default_factory=list)  # dropdown options
+    # The same idea for the CATEGORY picker: the payee-scoped category ids
+    # :func:`predict_fields` found, most likely first, so the register can
+    # promote them above the full alphabetical list. Transient; a row whose
+    # category was not confident enough to fill in still carries these, which is
+    # the whole point -- blank category, ranked choices.
+    category_candidates: list = field(default_factory=list)
 
 
 @dataclass
@@ -279,7 +309,15 @@ def map_row(row: dict) -> MappedRow:
     Raises ``ValueError`` only when a *present* date value is unparseable; a
     missing date maps to ``""`` (still reviewable, just unmatchable by date).
     """
-    desc = _g(row, "statementDescription", "description", "memo", "name")
+    # ``transactionDescription`` is not a synonym invented for tidiness: the SAME
+    # webSlinger script emitted ``statementDescription`` on one run and
+    # ``transactionDescription`` on the next, for byte-identical Wells Fargo rows.
+    # Scripts are generated, so their field NAMES drift between runs. Missing the
+    # variant is silent and expensive -- 214 review rows came through with no
+    # memo at all, which also leaves the categorizer nothing to learn from and
+    # ``_prior_txn_for`` nothing to match on.
+    desc = _g(row, "statementDescription", "transactionDescription",
+              "description", "memo", "name")
     payee, is_transfer, transfer_account = _derive_payee(desc)
     # A downloaded row carries only a statement description. Cleaning that text up
     # and calling it a Payee MANUFACTURES data the source never sent, and the
@@ -309,7 +347,8 @@ def map_row(row: dict) -> MappedRow:
 # classification
 # ---------------------------------------------------------------------------
 def _find_match(conn, account_id: int, mapped: MappedRow, window_days: int,
-                claimed_txn=frozenset(), claimed_inv=frozenset()):
+                claimed_txn=frozenset(), claimed_inv=frozenset(), *,
+                allow_scheduled: bool = True):
     """Return ``(txn_id, method)`` for the best existing match, else ``(None, "")``.
 
     Order: (1) exact ``transactionId`` == stored ``fitid`` (true dedupe), then
@@ -372,7 +411,52 @@ def _find_match(conn, account_id: int, mapped: MappedRow, window_days: int,
             if int(row[0]) not in claimed_txn:
                 return int(row[0]), "date+amount"
 
+        # (4) A SCHEDULED pre-entry, on amount TOLERANCE. Runs last, so an exact
+        # match always wins and this only ever rescues a row that would have
+        # been NEW. See SCHED_AMOUNT_TOLERANCE: the placeholder's amount is a
+        # forecast, so an escrow or rate change makes it miss by construction --
+        # the user's mortgage stopped matching for exactly this reason.
+        # Unambiguous-only: with two in-window scheduled candidates we cannot
+        # tell which payment this is, and reconciling the wrong one silently is
+        # worse than leaving the row NEW to be matched by hand.
+        if allow_scheduled:
+            sched = _scheduled_candidates(conn, account_id, mapped, lo, hi,
+                                          claimed_txn)
+            if len(sched) == 1:
+                return sched[0], "scheduled"
+
     return None, ""
+
+
+def _scheduled_candidates(conn, account_id: int, mapped: MappedRow,
+                          lo: str, hi: str, claimed_txn=frozenset()) -> list[int]:
+    """Unclaimed ``num='Sched'`` rows in the window whose amount is within
+    :data:`SCHED_AMOUNT_TOLERANCE` of the downloaded row's, SAME SIGN, nearest
+    amount first.
+
+    Same sign is not negotiable: a pre-entered payment can never be answered by
+    a deposit, however close the value. The tolerance is a share of the
+    PLACEHOLDER's own amount, so a $2,000 mortgage tolerates a bigger escrow
+    move than a $40 subscription does.
+    """
+    want = int(mapped.amount_cents)
+    if not want:
+        return []
+    rows = conn.execute(
+        "SELECT id, amount FROM transactions "
+        "WHERE account_id=? AND num=? AND date BETWEEN ? AND ? "
+        "  AND ((amount < 0 AND ? < 0) OR (amount > 0 AND ? > 0)) "
+        "ORDER BY ABS(amount - ?), ABS(julianday(date) - julianday(?)), id",
+        (account_id, SCHED_NUM, lo, hi, want, want, want, mapped.date),
+    ).fetchall()
+    out = []
+    for row in rows:
+        if int(row["id"]) in claimed_txn:
+            continue
+        expected = abs(int(row["amount"]))
+        if expected and abs(abs(want) - expected) <= expected * SCHED_AMOUNT_TOLERANCE:
+            out.append(int(row["id"]))
+    return out
 
 
 def _ticker_of(symbol) -> str:
@@ -493,7 +577,8 @@ def _shares_of(quantity):
 
 def classify_row(conn, account_id: int, mapped: MappedRow, *,
                  window_days: int = DEFAULT_WINDOW_DAYS,
-                 claimed_txn=None, claimed_inv=None) -> ReviewEntry:
+                 claimed_txn=None, claimed_inv=None,
+                 allow_scheduled: bool = True) -> ReviewEntry:
     """Classify a single mapped row against ``account_id``'s register.
 
     ``claimed_txn``/``claimed_inv`` (optional, supplied by :func:`build_review`)
@@ -503,7 +588,8 @@ def classify_row(conn, account_id: int, mapped: MappedRow, *,
     (e.g. a lone UI reclassify) it behaves exactly as a single-row classify."""
     txn_id, method = _find_match(conn, account_id, mapped, window_days,
                                  claimed_txn or frozenset(),
-                                 claimed_inv or frozenset())
+                                 claimed_inv or frozenset(),
+                                 allow_scheduled=allow_scheduled)
     if txn_id is not None:
         return ReviewEntry(mapped=mapped, label=LABEL_MATCHING,
                            matched_txn_id=txn_id, match_method=method)
@@ -539,10 +625,19 @@ def _apply_learned_transfer(mapped: MappedRow, rules) -> None:
     pre-fill the account the user last pointed that kind of transfer at (the
     user's request: transfer learning "as it does for dividends"). ``rules`` is
     the pre-loaded :func:`transfer_rules.load_rules` list, so a whole batch
-    shares one query. Non-transfer rows are left untouched.
+    shares one query.
+
+    Applies to EVERY row, not just ones the PARSER called a transfer. A learned
+    rule is the user's own statement that this description means a transfer to
+    that account, and it gets learned precisely for text the parser does not
+    recognise -- "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD" never reads as one.
+    Gating on the parser's verdict made the rule unreachable for exactly the
+    descriptions it exists to serve.
+
+    ``mapped.is_transfer`` is deliberately NOT set here: it records what the
+    SOURCE said. A row whose transfer-ness the user taught still has a payee
+    worth renaming, where a parser-derived transfer carries "Transfer from X".
     """
-    if not mapped.is_transfer:
-        return
     rule = transfer_rules.match_rule(mapped.memo, rules)
     if rule and rule.get("transfer_account_id") is not None:
         mapped.transfer_account_id = int(rule["transfer_account_id"])
@@ -553,11 +648,31 @@ def predict_transfer_account(conn, mapped: MappedRow) -> Optional[int]:
 
     Called when the register's editable pending row is created (like
     :func:`predict_fields`), so it reflects rules learned earlier in the same
-    review session. Returns ``None`` for a non-transfer row or when nothing is
-    learned yet."""
-    if not mapped.is_transfer:
-        return None
+    review session. Returns ``None`` when nothing is learned for this text.
+
+    Not gated on ``mapped.is_transfer``: a learned rule is the user's own
+    statement that this description IS a transfer, and it is learned for text the
+    parser does not recognise as one (see :func:`_apply_learned_transfer`)."""
     return transfer_rules.apply_rules(conn, mapped.memo)
+
+
+def _is_empty_row(mapped: MappedRow) -> bool:
+    """True for a mapped row that cannot be a transaction at all.
+
+    No date, no money, and no text -- there is nothing to review, nothing to
+    match, and nothing the user could ever accept. Such rows reached the review
+    list because a scrape payload was flattened across ALL its arrays, so a
+    bank's ``{"id": ..., "shortName": "Checking"}`` lookup table arrived as
+    eleven blank lines at the top of the list (:func:`mammon.webslinger._rows_from`
+    now declines to gather those; this is the backstop, because the review list
+    must never show a row the user cannot act on whatever the source did).
+
+    Deliberately narrow: a zero-amount row that carries a date or a description
+    is a real, reviewable transaction and is KEPT. All three must be missing.
+    """
+    return not (mapped.date or mapped.amount_cents or mapped.memo
+                or mapped.payee or mapped.check_number
+                or mapped.is_investment or mapped.symbol)
 
 
 def build_review(conn, account_id: int, rows, *,
@@ -579,13 +694,38 @@ def build_review(conn, account_id: int, rows, *,
     entries: list[ReviewEntry] = []
     claimed_txn: set[int] = set()
     claimed_inv: set[int] = set()
+    mapped_rows: list[MappedRow] = []
     for row in rows:
         mapped = map_row(row)
+        if _is_empty_row(mapped):
+            continue
         _apply_learned_transfer(mapped, trules)
+        mapped_rows.append(mapped)
+
+    # TWO PASSES, and the order is the point. Pass 1 offers every row only the
+    # EXACT tiers (id, transfer leg, same-cent amount); pass 2 then lets what is
+    # still NEW try the tolerant scheduled tier. Within one row the tolerant tier
+    # already ran last, but that is not enough across a BATCH: a tolerant row
+    # processed early claimed the register line, and the row that matched it to
+    # the cent -- arriving later in the file -- found the line taken and
+    # classified NEW. The user hit exactly that, hand-matched the exact row onto
+    # the line, and then found a second review row auto-matched to the same line.
+    # Claiming is global, so precedence has to be global too.
+    for mapped in mapped_rows:
         entry = classify_row(conn, account_id, mapped, window_days=window_days,
-                             claimed_txn=claimed_txn, claimed_inv=claimed_inv)
+                             claimed_txn=claimed_txn, claimed_inv=claimed_inv,
+                             allow_scheduled=False)
         _claim_match(entry, claimed_txn, claimed_inv)
         entries.append(entry)
+    for i, entry in enumerate(entries):
+        if not entry.is_new:
+            continue
+        retry = classify_row(conn, account_id, entry.mapped,
+                             window_days=window_days, claimed_txn=claimed_txn,
+                             claimed_inv=claimed_inv, allow_scheduled=True)
+        if retry.is_matching:
+            _claim_match(retry, claimed_txn, claimed_inv)
+            entries[i] = retry
     return entries
 
 
@@ -660,29 +800,70 @@ def build_review_from_records(conn, account_id: int, records, *,
 
 
 def _prior_txn_for(conn, mapped: MappedRow) -> Optional[dict]:
-    """Most recent prior register transaction with the same statement text.
+    """The payee/category prior register rows with this exact statement text
+    AGREE on, or ``None``. Feeds the CATEGORY back-fill only.
 
     Matched on exact ``memo`` (the raw ``statementDescription`` that
     :func:`save_new` preserves) and the same amount sign, ignoring transfers.
-    Returns ``{"payee", "category_id"}`` or ``None``. This is what surfaces the
-    payee/category the user assigned to earlier look-alikes -- INCLUDING ones
-    accepted earlier in the same review session, since each accept writes exactly
-    such a register row.
+
+    It used to take the single most RECENT row, with no corroboration at all --
+    the one path in the whole predictor with no threshold. On the real ledger
+    five rows share the text "AUTOMATIC DEPOSIT, PAYPAL TRANSFER PPD" carrying
+    FOUR different payees, and the newest of them was filled in as though it
+    were established fact. Identical text is strong evidence, but only when the
+    rows carrying it agree: the dominant payee must hold :data:`PRIOR_TXN_PURITY`
+    of at least :data:`PRIOR_TXN_MIN_ROWS` rows.
+
+    It no longer fills the PAYEE. Register rows that never went through review
+    -- QIF history, hand entries -- carry memos the user typed, and matching a
+    downloaded description against those is how a 1998 note of "deposit" once
+    renamed MOBILE DEPOSIT. Every rename the user has actually made lives in the
+    rename tree's own corpus (live-labelled, so a register edit counts), which
+    is the only source the payee cell is filled from now.
     """
     memo = (mapped.memo or "").strip()
     if not memo:
         return None
     sign = 1 if mapped.amount_cents >= 0 else -1
-    row = conn.execute(
+    rows = conn.execute(
         "SELECT payee, category_id FROM transactions "
         "WHERE memo=? AND transfer_account_id IS NULL "
         "  AND ((amount >= 0 AND ?=1) OR (amount < 0 AND ?=-1)) "
-        "ORDER BY id DESC LIMIT 1",
+        "ORDER BY id DESC",
         (memo, sign, sign),
-    ).fetchone()
+    ).fetchall()
+    if not rows:
+        return None
+    row = _dominant_prior(rows)
     if row is None:
         return None
     return {"payee": row["payee"], "category_id": row["category_id"]}
+
+
+def _dominant_prior(rows):
+    """The prior row whose PAYEE the others agree on, or ``None``.
+
+    Counts payees across every row sharing the statement text; the winner must
+    hold :data:`PRIOR_TXN_PURITY` of them and clear the rename corroboration
+    floor. Rows with no payee do not vote. The returned row is the newest
+    carrying that payee, so its category comes along.
+    """
+    votes = Counter()
+    for r in rows:
+        name = (r["payee"] or "").strip()
+        if name:
+            votes[name] += 1
+    if not votes:
+        return None
+    top, n = votes.most_common(1)[0]
+    if n < PRIOR_TXN_MIN_ROWS:
+        return None
+    if n / sum(votes.values()) < PRIOR_TXN_PURITY:
+        return None
+    for r in rows:                       # rows are newest-first
+        if (r["payee"] or "").strip() == top:
+            return r
+    return None
 
 
 def predict_action(conn, mapped: MappedRow) -> str:
@@ -712,89 +893,135 @@ def predict_action(conn, mapped: MappedRow) -> str:
     return action
 
 
-def predict_fields(conn, mapped: MappedRow) -> tuple[str, Optional[int]]:
+def predict_fields(conn, mapped: MappedRow, *,
+                   account_id: Optional[int] = None) -> tuple[str, Optional[int]]:
     """Predict ``(payee, category_id)`` for a NEW mapped row from live history.
 
     Called AT THE MOMENT the register's editable pending row is created (not once
     at download time), so it reflects every rename and accept made since --
-    notably learning from earlier rows of the SAME review session. Sources, in
-    priority order:
+    notably learning from earlier rows of the SAME review session.
 
-      1. the learned rename tree (:mod:`rename_tree`) for the payee and learned
-         category rules (:mod:`category_rules`) -- re-queried fresh, so in-session
-         learning applies immediately. The tree's top candidate is pre-filled for
-         both an AUTO and a DROPDOWN suggestion (the UI still offers the dropdown);
-      2. the most recent prior register transaction with the same statement text
-         (:func:`_prior_txn_for`) -- fills whichever of payee/category the tree /
-         rules did not supply.
+    PAYEE (the user's rule): the cell shows the source's own payee field when
+    the record carried one, else the bank's description, until the rename tree
+    (:mod:`rename_tree`) has seen the same text renamed at least twice and its
+    matched leaf names ONE payee -- then that payee is filled in. A contested or
+    unsure match leaves the raw text in the cell and puts the candidates in the
+    payee dropdown (``mapped.payee_candidates``). The tree reads the source's
+    payee field as evidence alongside the description (sometimes it is all the
+    source sends), so a supplied payee is renamed exactly when a description
+    would be: by a matched, corroborated, single-payee leaf.
+
+    CATEGORY: resolved after the payee and scoped to it (:mod:`category_tree`),
+    then a hand-written keyword rule, then -- for a payee that is SETTLED, i.e.
+    filled by the tree or supplied by the source -- what the register's own
+    QuickFill would pre-enter for that payee typed by hand
+    (:func:`categorize.quickfill`, this ``account_id``'s row preferred), then
+    the category prior register rows with the same statement text agree on
+    (:func:`_prior_txn_for`). The last two fill the category only, never the
+    payee.
 
     Transfer rows keep their derived ``TRANSFER FROM/TO`` payee and get NO plain
     payee/category prediction: the transfer mapping wins (requirement 4).
 
-    A row whose payee was SUPPLIED verbatim by the source record
-    (``mapped.payee_supplied`` -- an OFX NAME, QIF payee, or a tabular importer's
-    explicit payee column such as a Venmo From/To) keeps that payee unchanged: the
-    description-driven rename tree is NOT run over it (by request). Category
-    auto-assignment still runs; when nothing matches confidently the category is
-    left blank rather than guessed.
+    An INVESTMENT row gets neither. ``investment_transactions`` has no
+    ``category_id`` column, so a category here would be a value the user cannot
+    correct and nothing can learn from. The bulk path
+    (:func:`_accept_one_predicted`) already skips this function for such rows;
+    the guard is repeated here so the interactive path cannot depend on which
+    widget happens to own the row.
     """
+    if mapped.is_investment:
+        return mapped.payee, None
     if mapped.is_transfer:
         return mapped.payee, None
-    payee = mapped.payee
     category_id: Optional[int] = None
-    # A payee that arrived on the record itself (an OFX NAME, a Venmo From/To
-    # column) is the DEFAULT, not a gate. The first design skipped the tree
-    # entirely for such rows, which stopped renaming even when the field carried
-    # extractable junk ("Dividend Earned For Period O" -- a truncation of the
-    # description); using it verbatim-always was the opposite failure. Now the
-    # field's tokens JOIN the description as ranking evidence, the tree runs
-    # over the union, and only a HIGH-confidence learned rename -- the domain's
-    # min_count corroborating corrections -- overrides the supplied text. Silent
-    # or unsure, the supplied payee stands verbatim.
-    payee_supplied = bool(getattr(mapped, "payee_supplied", False)) and bool(payee)
-    extra = payee if payee_supplied else ""
-    payee_from_tree = False
+    # The source's own payee field (an OFX NAME, a Venmo From/To column, the
+    # Costco card's only text) is the DEFAULT and is EVIDENCE: its tokens join
+    # the description's in the tree's query, so a feed that sends nothing but a
+    # payee field still trains and matches. It stands verbatim unless the tree
+    # fills -- which takes a matched, single-payee leaf behind at least
+    # rename_tree.MIN_FILL corrections, the same bar a description clears.
+    payee_supplied = bool(getattr(mapped, "payee_supplied", False)) and bool(mapped.payee)
+    extra = mapped.payee if payee_supplied else ""
     sugg = rename_tree.suggest(conn, mapped.memo, extra=extra)
-    # Refresh the dropdown candidates on the row so the register's payee editor
-    # can offer them (they are transient and lost when a review row is reloaded).
+    # The dropdown candidates ride on the row so the register's payee editor can
+    # offer them (transient; lost when a review row is reloaded). The tree has
+    # already applied RENAME_MIN_SIGHTINGS: a payee chosen once is neither
+    # filled nor offered.
     mapped.payee_candidates = list(sugg.payees)
-    if payee_supplied:
-        if sugg.action == rename_tree.ACTION_AUTO and sugg.high_confidence:
-            payee = sugg.payee
-            payee_from_tree = True
+    if sugg.action == rename_tree.ACTION_AUTO:
+        payee = sugg.payee
+    elif payee_supplied:
+        payee = mapped.payee
     else:
-        payee_from_tree = (sugg.action in (rename_tree.ACTION_AUTO,
-                                           rename_tree.ACTION_DROPDOWN) and bool(sugg.payee))
-        if sugg.action == rename_tree.ACTION_AUTO and not sugg.high_confidence:
-            # Low-confidence single example: display the raw statement description
-            # rather than silently renaming on one prior sighting. Treat it as
-            # resolved so the prior-transaction fallback does not override it, but
-            # the candidate stays available in the payee dropdown.
-            payee = mapped.memo
-            payee_from_tree = True
-        elif payee_from_tree:
-            payee = sugg.payee
-    crule = category_rules.match_rule(mapped.memo, category_rules.load_rules(conn))
-    if crule and crule.get("category_id") is not None:
-        category_id = int(crule["category_id"])
-    # Prior-transaction fallback fills whatever is still missing. A supplied payee
-    # is authoritative, so only the CATEGORY is ever back-filled for it -- the
-    # payee itself is never overridden by history.
-    need_payee = (not payee_supplied) and (not payee_from_tree)
-    if need_payee or category_id is None:
-        prior = _prior_txn_for(conn, mapped)
-        if prior is not None:
-            if need_payee and prior.get("payee"):
-                payee = prior["payee"]
-            if category_id is None and prior.get("category_id") is not None:
-                category_id = int(prior["category_id"])
-    # Last resort, for the REGISTER only: with nothing learned and no prior
-    # transaction to copy, show a tidied form of the bank text rather than a
-    # blank Payee. map_row no longer does this, because in the stored REVIEW row
-    # it would be manufactured data; here it is an editable suggestion sitting in
-    # an editable row, which the user can accept or overwrite.
-    if not payee:
+        # Nothing confident: the bank's own text, tidied for reading (an
+        # ALL-CAPS line title-cased). Accepting it as-is is not a rename and
+        # teaches the tree nothing -- the tree recognises this exact string.
         payee = _clean_payee(mapped.memo)
+    # CATEGORY -- resolved after the payee and SCOPED TO IT. The tree hangs
+    # below the payee just settled above, so every candidate is a category that
+    # payee has actually carried (:mod:`mammon.category_tree`). The ranked
+    # candidates ride on the row so the register's picker can promote them even
+    # when nothing is confident enough to fill in.
+    src = category_tree.source_text(
+        mapped.memo, mapped.payee,
+        bool(getattr(mapped, "payee_supplied", False)))
+    csugg = category_tree.suggest(conn, payee, src)
+    mapped.category_candidates = list(csugg.category_ids)
+    allowed = set(mapped.category_candidates)
+    if csugg.action == category_tree.ACTION_AUTO:
+        category_id = csugg.category_id
+    else:
+        # Then a keyword rule. Every one of these is now something the user typed
+        # into the Rules manager: migration 57 purged the rows the old learner
+        # had minted, and nothing writes the table any more. That is what makes
+        # it safe to honour without the payee filter the learned tree lives
+        # under -- an explicit instruction is not the system guessing an
+        # unrelated category at someone, which is the thing being prevented.
+        crule = category_rules.match_rule(
+            mapped.memo, category_rules.load_rules(conn))
+        if crule and crule.get("category_id") is not None:
+            category_id = int(crule["category_id"])
+    # QUICKFILL -- the register's own answer for a payee it knows. The tree
+    # withholds until four review votes corroborate a category and never reads
+    # the register, so an Enbridge Gas the ledger has categorized for years
+    # sat blank when the tree filled the payee -- while TYPING the same payee
+    # pre-entered the category at once, because the register's blank row asks
+    # QuickFill. An auto-filled payee must not do worse than a typed one, so
+    # the same question is asked here, for the same payee, from the same
+    # source (the payee's most recent posted row, this account's preferred).
+    # Only for a SETTLED payee: the raw bank text in the cell is not a payee
+    # the register can be asked about. Withheld when review history has
+    # already shown the payee to be a catalogue -- coherence below the tree's
+    # gate on at least MIN_COUNT votes -- because there the tree's refusal is
+    # measured and the last row's category is a coin toss.
+    payee_settled = sugg.action == rename_tree.ACTION_AUTO or payee_supplied
+    if category_id is None and payee_settled and payee:
+        known = category_tree.known_categories(conn, payee)
+        votes = sum(n for _, n in known)
+        catalogue = (votes >= category_tree.MIN_COUNT
+                     and known[0][1] / votes < category_tree.PAYEE_COHERENCE)
+        if not catalogue:
+            path = (categorize.quickfill(conn, payee, account_id).get("category") or "")
+            if path and not path.startswith("["):
+                category_id = category_id_for_name(conn, path)
+    # Prior-transaction fallback back-fills the CATEGORY only (never the payee:
+    # see _prior_txn_for).
+    if category_id is None:
+        prior = _prior_txn_for(conn, mapped)
+        if prior is not None and prior.get("category_id") is not None:
+            # A prior row matched on EXACT statement text. When it also
+            # carries the same payee, its category has demonstrably been
+            # seen for this payee -- on a byte-identical description -- so
+            # it satisfies the never-a-new-category rule directly and does
+            # not need to be in the tree's tally as well. It often will not
+            # be: the tally is seeded from the register at bootstrap and
+            # grown by review accepts and register edits, so a row that
+            # arrived by plain file import has not voted yet.
+            same_payee = (category_tree.normalized_key(prior.get("payee"))
+                          == category_tree.normalized_key(payee))
+            if same_payee or int(prior["category_id"]) in allowed:
+                category_id = int(prior["category_id"])
     return payee, category_id
 
 
@@ -1039,21 +1266,50 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
     # Learn renaming/category rules from the correction LAST so their self-commit
     # finalises the register write too, and never opens a dup-review window before
     # the review row is stamped accepted. Transfers keep their derived payee and
-    # learn nothing (requirement 4). Payee learns when the saved payee differs
-    # from the provisional; category learns when the saved category differs from
-    # the predicted one (``mapped.category_id``, set by :func:`predict_fields`).
+    # learn nothing (requirement 4). The category tree learns EVERY accepted
+    # row, not just corrections -- an accepted prediction is a confirmation, and
+    # the counts are what the confidence and coherence gates read.
+    #
+    # The rename tree keeps an EXAMPLE LOG rather than learning online: the row
+    # is recorded with the id of the transaction it created, and the label is
+    # read from that transaction at prediction time, so an edit in the register
+    # or an undo here is honoured. A bulk accept (``learn=False``) records only
+    # a row whose payee was actually RENAMED -- an auto-fill that was applied --
+    # never one that kept the bank's text: a prediction nobody looked at is not
+    # evidence, and a kept default is not a correction anyway.
+    if not mapped.is_transfer and not learn:
+        _record_applied_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id)
     if learn:
-        if mapped.is_transfer:
-            # Transfers keep their derived payee; learn the ACCOUNT the user
-            # pointed this statement text at so future imports pre-fill it
-            # (by request). Learns only when an account was actually chosen.
+        # Learn the transfer TARGET whenever the user pointed this row at an
+        # account -- not only when the bank's text happened to parse as a
+        # transfer. Keying on ``mapped.is_transfer`` meant a row the PARSER never
+        # recognised could be sent to the same account forever without teaching
+        # anything: "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD" does not read as a
+        # transfer, so five accepts onto [Venmo] learned nothing and the sixth
+        # still arrived blank. What the user DID is the correction to learn from,
+        # not what the parser guessed.
+        if transfer_account_id is not None or mapped.is_transfer:
             transfer_rules.learn_from_edit(
                 conn, mapped.memo, transfer_account_id,
                 provisional=mapped.transfer_account_id)
-        else:
-            _learn_payee_rename(conn, mapped, p)
-            category_rules.learn_from_edit(
-                conn, mapped.memo, category_id, provisional=mapped.category_id)
+        if not mapped.is_transfer:
+            # A parser-detected transfer keeps its DERIVED payee, so there is no
+            # rename to learn. A row the USER turned into a transfer has a payee
+            # they chose, which is worth learning like any other.
+            _learn_payee_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id)
+            # The payee-scoped tree replaces category_rules.learn_from_edit as
+            # the learner. That call minted a GLOBAL keyword rule from a single
+            # correction, which is how a town name became a Utilities rule; the
+            # tree records a vote under this payee instead, where it can only
+            # ever affect this payee. The keyword table is left alone -- still
+            # readable, still editable in the Rules manager, no longer grown
+            # behind the user's back.
+            category_tree.learn(
+                conn, p,
+                category_tree.source_text(
+                    mapped.memo, mapped.payee,
+                    bool(getattr(mapped, "payee_supplied", False))),
+                category_id)
     return txn_id
 
 
@@ -1114,7 +1370,8 @@ def _save_investment(conn, account_id: int, mapped: MappedRow, *,
             raw = (mapped.action or "").strip()
             rename_tree.learn(
                 conn, (m or mapped.memo or ""), use_action, kind="action",
-                extra="" if investments.is_known_action(raw) else raw)
+                extra="" if investments.is_known_action(raw) else raw,
+                txn_id=txn_id, review_id=review_id)
         except Exception:
             pass
     if review_id is not None:
@@ -1123,58 +1380,59 @@ def _save_investment(conn, account_id: int, mapped: MappedRow, *,
     return txn_id
 
 
-def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str]) -> None:
-    """Update the rename tree + applied/overridden tallies from a saved payee.
+def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
+                        txn_id: Optional[int] = None,
+                        review_id: Optional[int] = None) -> None:
+    """Record an individually accepted row in the rename tree's example log
+    and update the applied/overridden tallies.
 
     ``final_payee`` is the payee actually committed. It is compared to what the
-    tree would suggest for this statement text (:func:`rename_tree.suggest`):
+    tree suggested for this text (:func:`rename_tree.suggest`, the same call
+    :func:`predict_fields` made) for the management tallies only:
 
-      * AUTO suggestion kept  -> tally it applied (the auto-rename stuck);
-      * AUTO suggestion changed -> tally the suggested payee overridden, and learn
-        the correction;
-      * DROPDOWN candidate picked -> tally applied and reinforce it;
-      * DROPDOWN default ignored for a new name -> tally the default overridden and
-        learn the new name;
-      * LEAVE and the payee differs from the raw provisional -> learn it (the first
-        rename taught for this text). A plain accept that changes nothing learns
-        nothing.
+      * AUTO suggestion kept    -> tally it applied;
+      * AUTO suggestion changed -> tally the suggested payee overridden;
+      * DROPDOWN candidate picked -> tally it applied.
+
+    The example itself is recorded whatever was shown. Whether it COUNTS is the
+    corpus loader's call: a payee equal to the text the row was shown with (the
+    description, its tidied form, the supplied field) is a kept default, not a
+    rename, and is skipped there -- but it is still logged against ``txn_id``,
+    so that if the user later fixes the payee in the register the row becomes a
+    correction without anyone re-teaching it.
     """
     final = (final_payee or "").strip()
     if not final:
         return
-    # The same evidence the prediction used, so learn and suggest agree about
-    # ranking (a supplied payee's tokens are part of the description's pool).
+    # The same evidence the prediction used (a supplied payee's tokens are part
+    # of the description's pool), so the tally reflects what was actually shown.
     extra = (mapped.payee or "") if getattr(mapped, "payee_supplied", False) else ""
     sugg = rename_tree.suggest(conn, mapped.memo, extra=extra)
     if sugg.action == rename_tree.ACTION_AUTO:
         if final == sugg.payee:
             rename_tree.note_applied(conn, final)
-            if not sugg.high_confidence:
-                # A low-confidence suggestion is shown as raw text; the user
-                # confirming it by name reinforces it so it can graduate to high
-                # confidence (>=2 counts) next time.
-                rename_tree.learn(conn, mapped.memo, final, extra=extra)
-        elif not sugg.high_confidence and final == (mapped.memo or "").strip():
-            # The low-confidence raw statement text we displayed was kept as-is:
-            # that is not an override of the suggestion, and learning the raw text
-            # as a payee would self-map the statement -- so do neither.
-            pass
         else:
             rename_tree.note_overridden(conn, sugg.payee)
-            rename_tree.learn(conn, mapped.memo, final, extra=extra)
+    elif sugg.action == rename_tree.ACTION_DROPDOWN and final in sugg.payees:
+        rename_tree.note_applied(conn, final)
+    rename_tree.learn(conn, mapped.memo, final, extra=extra,
+                      txn_id=txn_id, review_id=review_id)
+
+
+def _record_applied_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
+                           txn_id: Optional[int] = None,
+                           review_id: Optional[int] = None) -> None:
+    """The bulk-accept half of :func:`_learn_payee_rename`: log the row only
+    when its payee is a RENAME of what it was shown with. A kept default from a
+    row nobody read is not evidence and is not logged; an applied auto-fill is
+    a real rename in the register and is, so that a later register edit of it
+    is honoured like any other."""
+    final = (final_payee or "").strip()
+    extra = (mapped.payee or "") if getattr(mapped, "payee_supplied", False) else ""
+    if not rename_tree.is_correction(final, mapped.memo, extra):
         return
-    if sugg.action == rename_tree.ACTION_DROPDOWN:
-        if final in sugg.payees:
-            rename_tree.note_applied(conn, final)
-            rename_tree.learn(conn, mapped.memo, final, extra=extra)
-        else:
-            if sugg.payee:
-                rename_tree.note_overridden(conn, sugg.payee)
-            rename_tree.learn(conn, mapped.memo, final, extra=extra)
-        return
-    # LEAVE: learn only a genuine correction to the raw provisional payee.
-    if final != (mapped.payee or "").strip():
-        rename_tree.learn(conn, mapped.memo, final, extra=extra)
+    rename_tree.learn(conn, mapped.memo, final, extra=extra,
+                      txn_id=txn_id, review_id=review_id)
 
 
 def accept_match(conn, entry: ReviewEntry) -> dict:
@@ -1216,11 +1474,13 @@ def accept_match(conn, entry: ReviewEntry) -> dict:
         conn.commit()
         return prior
     cur = conn.execute(
-        "SELECT fitid, cleared, reconciled FROM transactions WHERE id=?", (txn_id,)
+        "SELECT fitid, cleared, reconciled, amount FROM transactions WHERE id=?",
+        (txn_id,)
     ).fetchone()
     if cur is None:
         raise KeyError("no transaction %s" % txn_id)
-    prior = {"fitid": cur[0], "cleared": cur[1], "reconciled": cur[2]}
+    prior = {"fitid": cur[0], "cleared": cur[1], "reconciled": cur[2],
+             "amount": cur[3]}
     new_fitid = cur[0] if cur[0] not in (None, "") else (entry.mapped.transaction_id or None)
     # A match means this register line IS the incoming row, so it is at least
     # CLEARED (Quicken's "accept" gesture -> cleared=1). Additionally carry the
@@ -1232,12 +1492,28 @@ def accept_match(conn, entry: ReviewEntry) -> dict:
     # row back down when a plain download (reconciled=0) merely matches it.
     incoming_reconciled = int(getattr(entry.mapped, "reconciled", 0) or 0)
     new_reconciled = 1 if (incoming_reconciled or int(cur[2] or 0)) else 0
+    # THE AMOUNT COMES FROM THE BANK. A match means this register line IS the
+    # downloaded row, and the bank's figure is what actually left the account.
+    # The line's own amount may be a FORECAST -- a scheduled pre-entry carries
+    # the finance calendar's median, a loan pre-entry an amortization figure
+    # whose escrow has since moved -- which is the very reason it needed a
+    # tolerant or hand-made match in the first place. Leaving it stale meant the
+    # register kept a number that never happened.
+    #
+    # PAYEE, CATEGORY and SPLIT are NOT touched: those are the user's, and
+    # keeping them is the whole point of pre-entering (the file-import path says
+    # the same -- "the payee is the pre-entry's own, not the bank's descriptor").
+    # A split whose lines no longer sum to the new amount is allowed and stays
+    # visible; that sum invariant was deliberately removed so a row with a
+    # discrepancy can still be edited. (By request.)
     conn.execute(
-        "UPDATE transactions SET fitid=?, cleared=1, reconciled=? WHERE id=?",
-        (new_fitid, new_reconciled, txn_id))
+        "UPDATE transactions SET fitid=?, cleared=1, reconciled=?, amount=? "
+        "WHERE id=?",
+        (new_fitid, new_reconciled, int(entry.mapped.amount_cents), txn_id))
     _set_state(conn, entry.review_id, "accepted", accepted_txn_id=txn_id,
                prior_fitid=prior["fitid"], prior_cleared=prior["cleared"],
-               prior_reconciled=prior["reconciled"])
+               prior_reconciled=prior["reconciled"],
+               prior_amount=prior["amount"])
     conn.commit()
     return prior
 
@@ -1313,17 +1589,48 @@ def revert_match(conn, entry: ReviewEntry, prior: dict) -> None:
         _set_state(conn, entry.review_id, "pending", accepted_txn_id=None)
         conn.commit()
         return
-    conn.execute(
-        "UPDATE transactions SET fitid=?, cleared=?, reconciled=? WHERE id=?",
-        (prior.get("fitid"), prior.get("cleared", 0),
-         prior.get("reconciled", 0), txn_id))
+    if prior.get("amount") is None:
+        conn.execute(
+            "UPDATE transactions SET fitid=?, cleared=?, reconciled=? WHERE id=?",
+            (prior.get("fitid"), prior.get("cleared", 0),
+             prior.get("reconciled", 0), txn_id))
+    else:
+        # accept_match adopted the bank's amount -- put the line's own back.
+        conn.execute(
+            "UPDATE transactions SET fitid=?, cleared=?, reconciled=?, amount=? "
+            "WHERE id=?",
+            (prior.get("fitid"), prior.get("cleared", 0),
+             prior.get("reconciled", 0), int(prior["amount"]), txn_id))
     _set_state(conn, entry.review_id, "pending", accepted_txn_id=None)
     conn.commit()
 
 
 def delete_saved(conn, txn_id: int, review_id: Optional[int] = None) -> None:
     """Undo a :func:`save_new`: remove the register row it created. When
-    ``review_id`` is given, return its persisted row to pending."""
+    ``review_id`` is given, return its persisted row to pending.
+
+    The category vote that accept recorded is withdrawn too. Without this an
+    accept the user immediately undoes still counts toward the payee's tally and
+    its trie node forever -- and those counts ARE the confidence gate, so a
+    mis-accepted row would keep pushing a category the user explicitly rejected.
+    Read from the register row BEFORE it is deleted; the review row supplies the
+    source text, which is the only place it survives for a supplied-payee source.
+    The rename example logged against the transaction goes with it -- otherwise
+    an undone accept would keep teaching the tree a payee the user took back.
+    """
+    rename_tree.forget_examples(conn, txn_id=txn_id, commit=False)
+    txn = ledger.get_transaction(conn, txn_id)
+    if (txn is not None and txn["category_id"] is not None
+            and txn["transfer_account_id"] is None):
+        text = ""
+        if review_id is not None:
+            row = conn.execute(
+                "SELECT memo, payee, payee_supplied, is_investment "
+                "FROM review_items WHERE id=?", (review_id,)).fetchone()
+            if row is not None and not row["is_investment"]:
+                text = category_tree.source_text(
+                    row["memo"], row["payee"], bool(row["payee_supplied"] or 0))
+        category_tree.unlearn(conn, txn["payee"], text, txn["category_id"])
     ledger.delete_transaction(conn, txn_id)
     if review_id is not None:
         _set_state(conn, review_id, "pending", accepted_txn_id=None)
@@ -1735,7 +2042,7 @@ def _accept_one_predicted(conn, account_id: int, entry: ReviewEntry) -> int:
     if m.is_investment:
         return save_new(conn, account_id, m, review_id=entry.review_id,
                         learn=False, action=predict_action(conn, m))
-    payee, category_id = predict_fields(conn, m)
+    payee, category_id = predict_fields(conn, m, account_id=account_id)
     m.predicted_payee = payee
     m.category_id = category_id
     transfer_account_id = None
@@ -1752,13 +2059,26 @@ def _accept_one_predicted(conn, account_id: int, entry: ReviewEntry) -> int:
 
 
 def discard_all(conn, account_id: int) -> int:
-    """Discard every pending row for ``account_id`` (no register writes).
+    """Discard every pending row for ``account_id`` -- DELETE them (no register
+    writes). Returns the number of rows removed.
 
-    Discarded rows STAY in the table so a re-download's ``INSERT OR IGNORE`` will
-    not re-add them. Returns the number of rows discarded."""
+    Discarding used to TOMBSTONE: the row stayed with ``state='discarded'`` so a
+    re-download's ``INSERT OR IGNORE`` would not re-add it. That inverted the
+    gesture's meaning. Discarding a review row is "I am not dealing with this
+    now", and the user's next move is to download the range again and take
+    another run at matching it -- but the tombstone silently ate the re-download:
+    106 discarded rows suppressed everything but the 5 genuinely new ids, and
+    with no un-discard anywhere, discard was a one-way door.
+
+    A row the user genuinely never wants is excluded by choosing a different
+    date range, which they control directly; it does not need a permanent
+    per-row veto that only a hand-written UPDATE could lift. (By request.)
+
+    ACCEPTED rows still stay: those became register transactions, and re-offering
+    them would be a duplicate.
+    """
     cur = conn.execute(
-        "UPDATE review_items SET state='discarded' "
-        "WHERE account_id=? AND state='pending'",
+        "DELETE FROM review_items WHERE account_id=? AND state='pending'",
         (account_id,),
     )
     conn.commit()
@@ -1766,20 +2086,108 @@ def discard_all(conn, account_id: int) -> int:
 
 
 def discard_one(conn, review_id: Optional[int]) -> None:
-    """Discard a SINGLE pending row (e.g. a stray blank-line import) without
-    touching the register.
+    """Discard a SINGLE pending row without touching the register.
 
-    Marks just that ``review_items`` row ``discarded`` -- like :func:`discard_all`
-    but for one id -- so a re-download's ``INSERT OR IGNORE`` will not re-add it.
-    A ``None`` id (an unpersisted in-memory entry) is a no-op at the DB layer;
-    the caller still drops it from the in-memory list."""
+    DELETES it, exactly as :func:`discard_all` does and for the same reason: a
+    discarded row must come back on the next download of that range, because
+    "discard" means "not now", not "never again". A ``None`` id (an unpersisted
+    in-memory entry) is a no-op at the DB layer; the caller still drops it from
+    the in-memory list."""
     if review_id is None:
         return
     conn.execute(
-        "UPDATE review_items SET state='discarded' WHERE id=? AND state='pending'",
+        "DELETE FROM review_items WHERE id=? AND state='pending'",
         (review_id,),
     )
     conn.commit()
+
+
+def _restore_matched_line(conn, row) -> None:
+    """Put back the register line an accepted match stamped.
+
+    Shared by :func:`unmatch_one` and :func:`undo_all_matches` so the two cannot
+    drift: both restore ``fitid``/``cleared``/``reconciled``, both put back the
+    amount when accepting adopted the bank's, and both restore an INVESTMENT row
+    in ``investment_transactions``. That last point is not cosmetic -- an
+    investment row's ``accepted_txn_id`` is an id in its own table and means
+    something entirely different in ``transactions``.
+    """
+    txn_id = row["accepted_txn_id"]
+    if txn_id is None:
+        return
+    if row["is_investment"]:
+        conn.execute("UPDATE investment_transactions SET fitid=? WHERE id=?",
+                     (row["prior_fitid"], int(txn_id)))
+        return
+    if row["prior_amount"] is None:
+        conn.execute(
+            "UPDATE transactions SET fitid=?, cleared=?, reconciled=? WHERE id=?",
+            (row["prior_fitid"], row["prior_cleared"] or 0,
+             row["prior_reconciled"] or 0, int(txn_id)))
+    else:
+        conn.execute(
+            "UPDATE transactions SET fitid=?, cleared=?, reconciled=?, amount=? "
+            "WHERE id=?",
+            (row["prior_fitid"], row["prior_cleared"] or 0,
+             row["prior_reconciled"] or 0, int(row["prior_amount"]), int(txn_id)))
+
+
+def unmatch_one(conn, review_id: Optional[int]) -> bool:
+    """Break the match on ONE review row and return it to pending NEW.
+
+    The single-row companion to :func:`undo_all_matches`, which was the only way
+    to undo a match at all -- so correcting one wrong match meant tearing down
+    every right one too (by request).
+
+    Handles both states. A row still PENDING has touched nothing, so only the
+    review row is cleared. A row already ACCEPTED stamped the register line it
+    matched, so its prior ``fitid``/``cleared``/``reconciled`` are put back
+    first -- from the values ``accept_match`` recorded for exactly this purpose.
+    Investment rows are restored in their OWN table: their ids come from
+    ``investment_transactions`` and mean nothing in ``transactions``.
+
+    Returns True when a match was broken.
+    """
+    if review_id is None:
+        return False
+    row = conn.execute(
+        "SELECT id, label, state, matched_txn_id, accepted_txn_id, prior_fitid, "
+        "       prior_cleared, prior_reconciled, prior_amount, is_investment "
+        "FROM review_items WHERE id=?", (int(review_id),)).fetchone()
+    if row is None or row["label"] != LABEL_MATCHING:
+        return False
+    if row["state"] == "accepted":
+        _restore_matched_line(conn, row)
+    conn.execute(
+        "UPDATE review_items SET state='pending', label=?, matched_txn_id=NULL, "
+        "match_method='', accepted_txn_id=NULL, prior_fitid=NULL, "
+        "prior_cleared=NULL, prior_reconciled=NULL, prior_amount=NULL "
+        "WHERE id=?",
+        (LABEL_NEW, int(review_id)))
+    conn.commit()
+    return True
+
+
+def release_txn_matches(conn, account_id: int, txn_id: int,
+                        except_review_id: Optional[int] = None) -> int:
+    """Unmatch every review row in ``account_id`` claiming ``txn_id``.
+
+    One register line is one event, so at most one review row may be matched to
+    it. The user hand-matched an exact row onto a line another row had already
+    taken, and ended with two review rows pointing at the same transaction --
+    the second silently reconciling a line that was already spoken for.
+    Returns how many were released."""
+    rows = conn.execute(
+        "SELECT id FROM review_items WHERE account_id=? AND label=? "
+        "  AND (matched_txn_id=? OR accepted_txn_id=?)",
+        (account_id, LABEL_MATCHING, int(txn_id), int(txn_id))).fetchall()
+    n = 0
+    for r in rows:
+        if except_review_id is not None and int(r["id"]) == int(except_review_id):
+            continue
+        if unmatch_one(conn, int(r["id"])):
+            n += 1
+    return n
 
 
 def undo_all_matches(conn, account_id: int) -> int:
@@ -1789,20 +2197,21 @@ def undo_all_matches(conn, account_id: int) -> int:
     values and returns its review row to pending. Returns the number of rows
     reverted."""
     rows = conn.execute(
-        "SELECT id, accepted_txn_id, prior_fitid, prior_cleared, prior_reconciled "
-        "FROM review_items "
-        "WHERE account_id=? AND state='accepted' AND label=?",
+        "SELECT id, accepted_txn_id, prior_fitid, prior_cleared, "
+        "       prior_reconciled, prior_amount, is_investment "
+        "FROM review_items WHERE account_id=? AND state='accepted' AND label=?",
         (account_id, LABEL_MATCHING),
     ).fetchall()
     count = 0
     for row in rows:
-        txn_id = row["accepted_txn_id"]
-        if txn_id is not None:
-            conn.execute(
-                "UPDATE transactions SET fitid=?, cleared=?, reconciled=? WHERE id=?",
-                (row["prior_fitid"], row["prior_cleared"] or 0,
-                 row["prior_reconciled"] or 0, txn_id))
-        _set_state(conn, int(row["id"]), "pending", accepted_txn_id=None)
+        # Restores through the SHARED helper, so the bulk undo cannot drift from
+        # the single-row one -- and so an investment row is no longer restored by
+        # writing its ``investment_transactions`` id into ``transactions``.
+        # The rows stay MATCHING: this un-ACCEPTS them, it does not unmatch them
+        # (that is Unmatch, :func:`unmatch_one`).
+        _restore_matched_line(conn, row)
+        _set_state(conn, int(row["id"]), "pending", accepted_txn_id=None,
+                   prior_amount=None)
         count += 1
     conn.commit()
     return count
@@ -1816,27 +2225,39 @@ def manual_match_candidates(conn, account_id: int, mapped: MappedRow, *,
                             window_days: int = MANUAL_WINDOW_DAYS) -> list[dict]:
     """Existing register transactions in ``account_id`` matching ``mapped``.
 
-    A wide (+/- ``window_days``) date window, but only rows whose SIGNED amount
-    equals ``mapped.amount_cents`` to the cent -- the date tolerance widens the
-    date search alone and NEVER loosens the amount requirement (a checking
-    payment must not offer an opposite-signed Venmo row of a different value as a
-    candidate). Ordered by date proximity then id, for the user to eyeball.
-    Falls back to the whole account (still amount-exact) when the mapped row
-    carries no date. Each dict is ``{id, date, payee, amount}``."""
+    The user has already been failed by the automatic matcher and is looking for
+    the row themselves, so BOTH tolerances open up: +/- ``window_days`` (capped
+    at :data:`MANUAL_WINDOW_DAYS`, a fortnight -- past that a "candidate" is
+    guesswork about a different month) and any amount within
+    :data:`SCHED_AMOUNT_TOLERANCE`, not just the exact cents. That second half is
+    the point: a scheduled payment whose escrow moved is precisely the row the
+    exact-amount filter hid, and it is the row the user is hunting for.
+
+    The SIGN still cannot vary -- a payment is never answered by a deposit, and
+    offering one would be noise, not tolerance. Ordered nearest-amount first
+    (so an exact match still heads the list) then nearest date, for the user to
+    eyeball. Falls back to the whole account when the mapped row carries no
+    date. Each dict is ``{id, date, payee, amount}``."""
+    want = int(mapped.amount_cents)
+    span = min(int(window_days), MANUAL_WINDOW_DAYS)
+    tol = abs(want) * SCHED_AMOUNT_TOLERANCE
+    sign_ok = ("((amount < 0 AND ? < 0) OR (amount > 0 AND ? > 0)) "
+               "AND ABS(ABS(amount) - ABS(?)) <= ? ")
     if mapped.date:
-        lo = record.iso_shift(mapped.date, -window_days)
-        hi = record.iso_shift(mapped.date, window_days)
+        lo = record.iso_shift(mapped.date, -span)
+        hi = record.iso_shift(mapped.date, span)
         rows = conn.execute(
             "SELECT id, date, payee, amount FROM transactions "
-            "WHERE account_id=? AND amount=? AND date BETWEEN ? AND ? "
-            "ORDER BY ABS(julianday(date) - julianday(?)), id",
-            (account_id, mapped.amount_cents, lo, hi, mapped.date),
+            "WHERE account_id=? AND date BETWEEN ? AND ? AND " + sign_ok +
+            "ORDER BY ABS(amount - ?), ABS(julianday(date) - julianday(?)), id",
+            (account_id, lo, hi, want, want, want, tol, want, mapped.date),
         ).fetchall()
     else:
         rows = conn.execute(
             "SELECT id, date, payee, amount FROM transactions "
-            "WHERE account_id=? AND amount=? ORDER BY date, id",
-            (account_id, mapped.amount_cents),
+            "WHERE account_id=? AND " + sign_ok +
+            "ORDER BY ABS(amount - ?), date, id",
+            (account_id, want, want, want, tol, want),
         ).fetchall()
     return [{"id": int(r["id"]), "date": r["date"], "payee": r["payee"],
              "amount": r["amount"]} for r in rows]
@@ -1848,26 +2269,48 @@ def set_manual_match(conn, entry: ReviewEntry, matched_txn_id: int) -> None:
     Mutates the in-memory entry and, when persisted, its ``review_items`` row so
     the choice survives (still pending -- the user still accepts it).
 
-    STRICT: the chosen register line's SIGNED amount must equal
-    ``entry.mapped.amount_cents`` to the cent. A same-account match means "this
-    download IS that register line", so an opposite-sign or different-value row
-    can never be it -- reject the selection (raise ``ValueError``) rather than
-    fabricate a bogus match, even if the caller hand-picked it past the
-    candidate list. This is the last gate for the manual path; the auto matcher
-    already filters on ``amount=?``.  (Cross-account transfer-leg *pairing* is a
-    separate path in ``importers/core.py`` and is intentionally unaffected.)"""
+    The chosen line must be the SAME SIGN and within
+    :data:`SCHED_AMOUNT_TOLERANCE` of the downloaded amount; anything else is
+    rejected (``ValueError``) rather than turned into a bogus match, even when
+    hand-picked past the candidate list. This is the last gate for the manual
+    path.
+
+    Any OTHER review row already matched to that line is unmatched first
+    (:func:`release_txn_matches`) -- one register line is one event.
+
+    It used to demand the cents match exactly, which made the manual path
+    useless for the case that most needs it: a scheduled payment whose escrow
+    changed after it was pre-entered never equals the real debit, so the user
+    could neither auto-match it nor hand-match it. The SIGN gate is what the
+    strictness was really protecting -- a payment is never the same event as a
+    deposit -- and that still holds absolutely. (Cross-account transfer-leg
+    *pairing* is a separate path in ``importers/core.py`` and is intentionally
+    unaffected.)"""
     table = ("investment_transactions" if entry.mapped.is_investment
              else "transactions")
     cur = conn.execute(
-        f"SELECT amount FROM {table} WHERE id=?", (int(matched_txn_id),)
+        f"SELECT amount, account_id FROM {table} WHERE id=?",
+        (int(matched_txn_id),)
     ).fetchone()
     if cur is None:
         raise KeyError("no transaction %s" % matched_txn_id)
-    if int(cur[0]) != int(entry.mapped.amount_cents):
+    got, want = int(cur["amount"]), int(entry.mapped.amount_cents)
+    if (got < 0) != (want < 0):
         raise ValueError(
-            "manual match rejected: candidate amount %s != downloaded amount %s "
-            "(signed cents); the date tolerance never loosens the amount match"
-            % (int(cur[0]), int(entry.mapped.amount_cents)))
+            "manual match rejected: candidate amount %s is the opposite sign to "
+            "the downloaded amount %s (signed cents); a payment is never the "
+            "same event as a deposit" % (got, want))
+    if abs(abs(got) - abs(want)) > abs(want) * SCHED_AMOUNT_TOLERANCE:
+        raise ValueError(
+            "manual match rejected: candidate amount %s is more than %d%% from "
+            "the downloaded amount %s (signed cents)"
+            % (got, round(SCHED_AMOUNT_TOLERANCE * 100), want))
+    # One register line is one event: a line another review row already claims
+    # is RELEASED first. Hand-matching onto a taken line used to leave both rows
+    # pointing at it, and the second then reconciled a transaction that was
+    # already spoken for.
+    release_txn_matches(conn, int(cur["account_id"]), int(matched_txn_id),
+                        except_review_id=entry.review_id)
     entry.label = LABEL_MATCHING
     entry.matched_txn_id = int(matched_txn_id)
     entry.match_method = "manual"

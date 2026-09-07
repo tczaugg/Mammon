@@ -105,7 +105,7 @@ dropped in migration 28.
 ### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 58).
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 60).
 **Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
 databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
 
@@ -188,14 +188,23 @@ Raw bank `statementDescription` text is gobbledygook, so the app learns from cor
 **Payee is resolved first, then category is resolved BELOW it** — that ordering is what keeps a
 suggestion scoped to the merchant it came from:
 
-- `rename_tree.py` — payee renaming AND investment-action mapping via an online discriminative
-  **trie** per domain that grows only where it must to tell two labels apart. Tokens are ranked by
-  **label entropy** (purest first — measured, not assumed: frequency was the wrong axis), and
-  pure-numeric, very-short, and unseen mixed letter+digit tokens (ISINs, auth codes) are dropped
-  during normalization (the overfitting guards). A supplied payee field is ranking *evidence*, not
-  a gate; only a high-confidence pure rename overrides it. `RANKING_VERSION` forces a one-time
-  rebuild from history when the ranking algorithm changes — a trie built under one ranking is
-  unreachable under another.
+- `rename_tree.py` — payee renaming AND investment-action mapping as a **decision tree rebuilt
+  from the accepted corrections at every prediction** (webSlinger's `selector_tree` with tokens
+  for features, branching one). Nothing is learned online: the corpus is the `rename_examples`
+  log (one row per accepted review row, label read LIVE through the transaction it created, so
+  a register edit or an undo changes the next answer), and review retention never touches it.
+  Per query: candidates = examples sharing a *distinctive* token (carried by ≤ 5 payees) or the
+  exact token set; a binary presence tree by information gain over them; then the leaf's
+  leading label is GENERALIZED like webSlinger's array selector (features = each token, the
+  token before, the token after, the same over the payee field, plus "no field": agreed value
+  kept, varying slot binarized, feature missing from any example dropped) and the row must FIT
+  that pattern — `June rent` + `July rent` fit `August rent` but not a bare `rent`; identical
+  rows stay exact. The label fills at ≥ `MIN_FILL` (2) fitting examples and ≥ `FILL_PURITY`
+  (0.9) of the leaf, anything else is a dropdown. Only CORRECTIONS train the payee domain — a
+  row kept as its shown text (description, title-cased default, supplied payee) is skipped — so
+  the title-cased bank text can never become a "payee".
+  The old trie reset its counts on every split, split on tokens both sides shared, and hid a
+  parent's labels behind a weak child; the module docstring records the measurements.
 **Neither tree is seeded from history.** Both learn ONLY from what the user accepts in
 review. `rename_tree` used to bootstrap at startup, replaying every posted row's
 `memo -> payee` pair as an accepted rename — true for downloaded rows, where the memo IS the
@@ -203,11 +212,14 @@ bank's text, and false for hand-entered and QIF-imported history, where it is a 
 typed. A 1998 memo of "deposit" on a Foothill Place row taught the tree that `MOBILE DEPOSIT`
 means Foothill Place, in a ledger deliberately started fresh. `ensure_bootstrapped` survives on
 both modules as callable API for an explicit seed-from-history action; nothing calls it on open.
+For the same reason `_prior_txn_for` no longer fills the PAYEE from register rows sharing the
+statement text (category only).
 
 Two thresholds, and they are different questions. `import_review.RENAME_MIN_SIGHTINGS` (2) is
-whether a payee is OFFERED in the dropdown at all; `rename_tree.HIGH_CONFIDENCE_MIN_COUNT` (4)
-is whether it is APPLIED to the cell. Between them the user sees the bank's own text and a
-one-click list. A payee chosen ONCE is neither filled nor offered.
+whether a payee is OFFERED in the dropdown at all; `rename_tree.MIN_FILL` (2) is whether it is
+APPLIED to the cell, and it counts the matched leaf — the same text renamed twice — not the
+payee overall. Between them the user sees the bank's own text and a one-click list. A payee
+chosen ONCE is neither filled nor offered.
 
 - `category_tree.py` — the auto-categorizer: one discrimination trie **per payee**, over the source
   text, ranked by category entropy. Two gates, and both are load-bearing: **node purity** asks *does
@@ -222,11 +234,14 @@ one-click list. A payee chosen ONCE is neither filled nor offered.
   67% fire rate at 74% precision, half of whose errors were a category from an unrelated merchant.
   Text-less evidence (a register edit, 30 years of imported Quicken rows) updates the payee TALLY
   only and never the trie — with no tokens to walk it would all land on the root, where mismatched
-  categories accumulate and kill the confident cases.
+  categories accumulate and kill the confident cases. `MIN_COUNT` is 2 (by request, same as a
+  rename); below it, for a SETTLED payee, `predict_fields` asks the register's QuickFill what it
+  would pre-enter for that payee typed by hand — an auto-filled payee must not do worse than a
+  typed one — unless review history already shows the payee to be a catalogue.
 - `category_rules.py`, `transfer_rules.py` — `keyword -> category_id` / `keyword -> account_id`,
   sharing their tokenizer with each other via `keywords.py` so they stay in lock-step.
   **`category_rules` no longer learns.** One correction minted a GLOBAL keyword rule, which is how
-  the town name `SPANISH` became a Utilities rule that fired on Subway, O'Reilly and the youth
+  the town name `ANYTOWN` became a Utilities rule that fired on Subway, O'Reilly and the youth
   theater. `learn_from_edit` is deleted and migration 57 purged every row it had written (all 228 on
   the reference ledger — 67 carried multi-token keywords, which only `refine_keyword` produces and
   the Rules manager's Add dialog cannot). Nothing writes the table automatically now, so a row in it

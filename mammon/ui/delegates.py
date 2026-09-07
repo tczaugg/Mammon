@@ -167,6 +167,23 @@ def refresh_date_format(root) -> int:
     return len(edits)
 
 
+def _choices_for(model, row=None):
+    """Category picker choices from ``model``, ranked for ``row`` when it can be.
+
+    Older/other models expose a no-argument ``category_choices``; asking them for
+    a ranked list must not break the editor, so the row argument is dropped on a
+    TypeError rather than guarded by isinstance checks.
+    """
+    if not hasattr(model, "category_choices"):
+        return []
+    if row is None:
+        return model.category_choices()
+    try:
+        return model.category_choices(row)
+    except TypeError:
+        return model.category_choices()
+
+
 def make_category_combo(parent, choices):
     """Build the register's editable category combo, shared by the one-line
     :class:`CategoryDelegate` and the two-line :class:`PayeeTwoLineDelegate`.
@@ -483,7 +500,9 @@ class CategoryDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         model = index.model()
-        choices = model.category_choices() if hasattr(model, "category_choices") else []
+        # Pass the row so the model can promote this payee's own categories to
+        # the top of the list (see RegisterModel.category_choices).
+        choices = _choices_for(model, index.row())
         return make_category_combo(parent, choices)
 
     def setEditorData(self, editor, index):
@@ -740,7 +759,7 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
             if self._classification_locked(index):
                 return None            # transfers/splits are not inline-recategorized
             model = index.model()
-            choices = model.category_choices() if hasattr(model, "category_choices") else []
+            choices = _choices_for(model, index.row())
             return make_category_combo(parent, choices)
         if field in ("memo", "tag"):
             return QLineEdit(parent)

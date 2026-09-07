@@ -27,9 +27,7 @@ EXPECTED_TABLES = {
     "investment_transactions",
     "reconciliations",
     "review_items",
-    "rename_nodes",
-    "rename_node_payees",
-    "rename_token_freq",
+    "rename_examples",
     "rename_stats",
     "rename_meta",
     "scheduled_payments",
@@ -101,32 +99,21 @@ def test_review_items_table_and_dedupe_index(tmp_path):
         "SELECT COUNT(*) FROM review_items WHERE transaction_id IS NULL").fetchone()[0] == 2
 
 
-def test_rename_tree_tables_and_uniqueness(tmp_path):
-    """Migration 15 adds the rename-tree tables (and drops the old payee_rules).
-
-    A sibling node under one parent may not repeat a token, and a node may not
-    list the same payee twice -- both are UNIQUE so the online-learning walk can
-    rely on them."""
+def test_rename_example_log_replaces_the_tries(tmp_path):
+    """Migration 15 added the online rename tries; migration 60 replaced them
+    with the example log the decision tree is rebuilt from (see
+    :mod:`mammon.rename_tree`). The tries' tables are gone, the tallies and
+    meta stay, and ``payee_rules`` (retired in 15) stays gone. The seed of the
+    log from existing accepted review rows is pinned in test_rename_tree."""
     conn = db.init_db(tmp_path / "mammon.db")
     names = db.table_names(conn)
-    assert {"rename_nodes", "rename_node_payees", "rename_token_freq",
-            "rename_stats", "rename_meta"} <= names
-    assert "payee_rules" not in names
-
-    conn.execute("INSERT INTO rename_nodes(id, parent_id, token, depth) "
-                 "VALUES (1, NULL, 'AMAZON', 1)")
-    conn.commit()
-    # Same token at the same (root) level -> rejected by the edge unique index.
-    with pytest.raises(sqldriver.IntegrityError):
-        conn.execute("INSERT INTO rename_nodes(parent_id, token, depth) "
-                     "VALUES (NULL, 'AMAZON', 1)")
-    conn.rollback()
-    conn.execute("INSERT INTO rename_node_payees(node_id, payee, count) "
-                 "VALUES (1, 'Amazon', 1)")
-    conn.commit()
-    with pytest.raises(sqldriver.IntegrityError):
-        conn.execute("INSERT INTO rename_node_payees(node_id, payee, count) "
-                     "VALUES (1, 'Amazon', 1)")
+    assert {"rename_examples", "rename_stats", "rename_meta"} <= names
+    for gone in ("rename_nodes", "rename_node_payees", "rename_token_freq",
+                 "action_nodes", "action_node_labels", "action_token_freq",
+                 "payee_rules"):
+        assert gone not in names
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(rename_examples)")}
+    assert {"kind", "txn_id", "review_id", "text", "extra", "label", "created_at"} <= cols
 
 
 def test_v19_backfills_dated_total_payment_for_legacy_loan(tmp_path):

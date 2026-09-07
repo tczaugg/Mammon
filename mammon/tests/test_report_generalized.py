@@ -462,6 +462,7 @@ def test_customization_controls_live_behind_the_gear(qapp, tmp_path):
 
 PERIOD_LABELS = ["Last 7 days", "Last 30 days", "This Month", "Last Month",
                  "This quarter", "Last quarter", "Last 12 months",
+                 "Last 3 years", "Last 5 years", "Last 10 years",
                  "Year-to-Date", "This Year", "Last Year",
                  "Earliest to date", "Custom"]
 

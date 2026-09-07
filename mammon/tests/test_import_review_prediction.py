@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from mammon import category_rules, db, import_review, ledger, rename_tree
+from mammon import category_rules, category_tree, db, import_review, ledger, rename_tree
 from mammon.importers.record import NormalizedTxn
 
 
@@ -71,7 +71,11 @@ def test_predict_applies_existing_payee_and_category_rules(conn, account, cats):
     # single example is low confidence (see test_predict_low_confidence_shows_raw).
     for _ in range(4):
         rename_tree.learn(conn, "POS DEBIT NETFLIX.COM 8888", "Netflix")
-    category_rules.upsert_rule(conn, "NETFLIX", cats["dining"])
+    # The category is learned UNDER THE PAYEE now (mammon.category_tree), not as
+    # a global keyword rule -- that is the whole point of the rewrite.
+    for _ in range(4):
+        category_tree.learn(conn, "Netflix", "POS DEBIT NETFLIX.COM 8888",
+                            cats["dining"])
     m = import_review.map_row(_row("POS DEBIT NETFLIX.COM 8888"))
     payee, cat = import_review.predict_fields(conn, m)
     assert payee == "Netflix"
@@ -79,31 +83,121 @@ def test_predict_applies_existing_payee_and_category_rules(conn, account, cats):
 
 
 def test_predict_low_confidence_shows_raw(conn, account, cats):
-    # A payee learned from ONE example is low confidence: predict shows the raw
-    # statement description rather than silently renaming; the category rule
-    # (independent of the tree) still applies.
+    # A payee learned from ONE example is not enough: predict shows the bank's
+    # own text (tidied for reading) rather than silently renaming; the category
+    # tree, keyed on that text, still applies.
     rename_tree.learn(conn, "POS DEBIT NETFLIX.COM 8888", "Netflix")
-    category_rules.upsert_rule(conn, "NETFLIX", cats["dining"])
+    # The displayed payee stays the bank text here, and the category follows
+    # whatever payee is resolved -- so it is that text that has to carry the
+    # history.
+    for _ in range(4):
+        category_tree.learn(conn, "POS DEBIT NETFLIX.COM 8888",
+                            "POS DEBIT NETFLIX.COM 8888", cats["dining"])
     m = import_review.map_row(_row("POS DEBIT NETFLIX.COM 8888"))
     payee, cat = import_review.predict_fields(conn, m)
-    assert payee == m.memo == "POS DEBIT NETFLIX.COM 8888"   # raw, not "Netflix"
+    assert payee == import_review._clean_payee(m.memo)      # the text, not "Netflix"
     assert cat == cats["dining"]
-    assert "Netflix" in m.payee_candidates                   # still in the dropdown
+    # ...and ONE sighting is not offered in the dropdown either (see
+    # RENAME_MIN_SIGHTINGS).
+    assert m.payee_candidates == []
 
 
-def test_predict_falls_back_to_prior_register_transaction(conn, account, cats):
-    # No rules at all; a prior register row with the same statement text is the
-    # source (learn=False so nothing but the register row exists).
-    first = import_review.map_row(_row("SQ *GYM MEMBERSHIP", tid="G1"))
-    import_review.save_new(conn, account, first, payee="City Gym",
-                           category_id=cats["fitness"], learn=False)
-    assert rename_tree.list_nodes(conn) == []
+def test_prior_register_rows_never_fill_the_payee(conn, account, cats):
+    """Register rows sharing the statement text used to supply the PAYEE. They
+    no longer do: rows that never went through review carry memos the user
+    typed, and matching a download against those is how a 1998 note of
+    "deposit" once renamed MOBILE DEPOSIT. Their CATEGORY is still back-filled
+    when the resolved payee is theirs.
+
+    Three rows saved WITHOUT learning (a bulk path) carry the payee here, and
+    that is exactly what does count: a bulk accept whose payee is a RENAME of
+    the bank text is logged for the tree, so the tree -- not the register scan
+    -- is what fills the fourth.
+    """
+    for i in range(3):
+        row = import_review.map_row(_row("SQ *GYM MEMBERSHIP", tid=f"G{i}",
+                                         amount="20.%02d" % i))
+        import_review.save_new(conn, account, row, payee="City Gym",
+                               category_id=cats["fitness"], learn=False)
+    assert len(rename_tree.examples(conn)) == 3
     assert category_rules.list_rules(conn) == []
 
-    second = import_review.map_row(_row("SQ *GYM MEMBERSHIP", tid="G2"))
-    payee, cat = import_review.predict_fields(conn, second)
+    nxt = import_review.map_row(_row("SQ *GYM MEMBERSHIP", tid="G-next"))
+    payee, cat = import_review.predict_fields(conn, nxt)
     assert payee == "City Gym"
     assert cat == cats["fitness"]
+
+    # The same three rows with the payee KEPT as the bank text teach nothing,
+    # and the register scan supplies no payee for the next one.
+    for i in range(3):
+        row = import_review.map_row(_row("SQ *YOGA STUDIO", tid=f"Y{i}",
+                                         amount="30.%02d" % i))
+        import_review.save_new(conn, account, row,
+                               payee=import_review._clean_payee(row.memo),
+                               category_id=cats["fitness"], learn=False)
+    assert len(rename_tree.examples(conn)) == 3
+    nxt = import_review.map_row(_row("SQ *YOGA STUDIO", tid="Y-next"))
+    payee, cat = import_review.predict_fields(conn, nxt)
+    assert payee == import_review._clean_payee(nxt.memo)
+    assert cat == cats["fitness"]                 # same payee -> category still back-fills
+
+
+def test_prior_register_rows_that_disagree_supply_nothing(conn, account, cats):
+    """the user's bug: "it already knows Paypal?" -- on a ledger started fresh.
+
+    It did not know it. Five register rows shared the text "AUTOMATIC DEPOSIT,
+    PAYPAL TRANSFER PPD" carrying FOUR different payees, and the newest was
+    filled in as established fact. Identical bank text is strong evidence of
+    identity, but only when the rows carrying it agree.
+    """
+    for i, name in enumerate(("PAYPAL", "Alex", "Transferto", "Alex")):
+        row = import_review.map_row(_row("AUTOMATIC DEPOSIT, PAYPAL TRANSFER PPD",
+                                         tid=f"PP{i}"))
+        import_review.save_new(conn, account, row, payee=name,
+                               category_id=cats["shopping"], learn=False)
+
+    nxt = import_review.map_row(_row("AUTOMATIC DEPOSIT, PAYPAL TRANSFER PPD",
+                                     tid="PP-next"))
+    assert import_review._prior_txn_for(conn, nxt) is None
+    payee, _cat = import_review.predict_fields(conn, nxt)
+    assert payee not in {"PAYPAL", "Alex", "Transferto"}
+
+
+def test_auto_filled_payee_gets_the_registers_category_like_a_typed_one(conn, account, cats):
+    """the user's report: Enbridge Gas has always been one category in the
+    register, the tree filled the payee on the third download, and the
+    category sat blank -- while TYPING the payee on the second had pre-entered
+    it, because the blank row asks QuickFill. The category tree needs four
+    review votes and never reads the register; an auto-filled payee now asks
+    QuickFill exactly as a typed one does."""
+    for i in range(3):
+        ledger.add_transaction(conn, account, "2026-0%d-18" % (i + 1), -80_00,
+                               payee="Enbridge Gas", category_id=cats["cloud"])
+    memo = "AUTOMATIC WITHDRAWAL, ENBRIDGE GAS QGC PPD"
+    for _ in range(2):
+        rename_tree.learn(conn, memo, "Enbridge Gas")
+    m = import_review.map_row(_row(memo, tid="E3"))
+    payee, cat = import_review.predict_fields(conn, m, account_id=account)
+    assert payee == "Enbridge Gas"
+    assert cat == cats["cloud"]
+
+    # An UNSETTLED payee -- the bank text in the cell -- asks nothing.
+    m = import_review.map_row(_row("AUTOMATIC WITHDRAWAL, NEW UTILITY PPD", tid="N1"))
+    payee, cat = import_review.predict_fields(conn, m, account_id=account)
+    assert payee == import_review._clean_payee(m.memo) and cat is None
+
+    # A payee review history has shown to be a catalogue is left to the
+    # picker: the tree's refusal is measured, the last row's category a toss.
+    for i, key in enumerate(("dining", "shopping", "cloud", "fitness")):
+        category_tree.learn(conn, "Amazon", "AMZN MKTP US %d" % i, cats[key])
+    ledger.add_transaction(conn, account, "2026-05-01", -10_00,
+                           payee="Amazon", category_id=cats["dining"])
+    for _ in range(2):
+        rename_tree.learn(conn, "AMZN MKTP US", "Amazon")
+    m = import_review.map_row(_row("AMZN MKTP US", tid="A3"))
+    payee, cat = import_review.predict_fields(conn, m, account_id=account)
+    assert payee == "Amazon" and cat is None
+    assert set(m.category_candidates) == {cats[k] for k in ("dining", "shopping", "cloud", "fitness")}
 
 
 def test_predict_falls_back_to_tidied_bank_text_when_nothing_known(conn, account):
@@ -138,15 +232,17 @@ def test_mapped_from_record_flags_supplied_payee(conn):
 
 
 def test_predict_keeps_supplied_payee_and_skips_rename(conn, account, cats):
-    # A rename rule BELOW the high-confidence floor must not rewrite a payee the
-    # record already supplied -- the Venmo case: the description names the
-    # intermediary, the From column names the real counterparty. (Only a rename
-    # corroborated min_count times over a PURE node may override a supplied
-    # payee; that case is pinned in test_rename_tree.) Category auto-assign
-    # still runs.
+    # A rename learned from the DESCRIPTION alone must not rewrite a payee the
+    # record supplied -- the Venmo case: the description names the
+    # intermediary, the From column names the real counterparty. The absence
+    # of a payee field is a feature of the learned pattern, so a row that
+    # carries one does not fit it. (A supplied payee renamed twice IS
+    # overridden; pinned in test_rename_tree.) Category auto-assign still runs.
     for _ in range(2):
         rename_tree.learn(conn, "POS DEBIT VENMO 8888", "Rename Rule Payee")
-    category_rules.upsert_rule(conn, "VENMO", cats["dining"])
+    for _ in range(4):
+        category_tree.learn(conn, "Jane Doe", "POS DEBIT VENMO 8888",
+                            cats["dining"])
     m = import_review.mapped_from_record(
         _rec(payee="Jane Doe", memo="POS DEBIT VENMO 8888"))
     payee, cat = import_review.predict_fields(conn, m)
@@ -173,7 +269,12 @@ def test_predict_supplied_payee_prior_fills_category_not_payee(conn, account, ca
     m = import_review.mapped_from_record(_rec(payee="My Own Payee", memo="SQ *GYM"))
     payee, cat = import_review.predict_fields(conn, m)
     assert payee == "My Own Payee"        # supplied payee wins over prior "City Gym"
-    assert cat == cats["fitness"]         # category still back-filled from history
+    # ...and the category does NOT come across. The prior row carried the same
+    # statement text but a DIFFERENT payee ("City Gym"), and Fitness has never
+    # been seen for "My Own Payee" -- the locked rule is that a category is only
+    # ever proposed for a payee that has carried it. Back-filling from a prior
+    # row is kept for the SAME payee (test_predict_falls_back_to_prior_...).
+    assert cat is None
 
 
 def test_predict_absent_payee_still_runs_rename_rules(conn, account, cats):
@@ -181,7 +282,9 @@ def test_predict_absent_payee_still_runs_rename_rules(conn, account, cats):
     # the description -- a record with NO supplied payee still gets renamed.
     for _ in range(4):
         rename_tree.learn(conn, "POS DEBIT NETFLIX.COM 8888", "Netflix")
-    category_rules.upsert_rule(conn, "NETFLIX", cats["dining"])
+    for _ in range(4):
+        category_tree.learn(conn, "Netflix", "POS DEBIT NETFLIX.COM 8888",
+                            cats["dining"])
     m = import_review.mapped_from_record(
         _rec(payee="", memo="POS DEBIT NETFLIX.COM 8888"))
     assert m.payee_supplied is False
@@ -200,12 +303,14 @@ def test_supplied_payee_flag_survives_persist_reload(conn, account, cats):
     #
     # A learned-but-below-the-floor rename for the statement text is the
     # discriminator: if the flag were lost, predict would treat the row as
-    # unsupplied and return the RAW description (the low-confidence display
-    # rule) instead of the supplied name.
-    for _ in range(2):
-        rename_tree.learn(conn, "PAYMENT FROM JAMIE CHEN JUNE RENT",
-                          "Rename Rule Payee")
-    category_rules.upsert_rule(conn, "JAMIE", cats["dining"])
+    # unsupplied and return the bank's description (the no-rename display
+    # rule) instead of the supplied name. ONE example, so the tree cannot fill
+    # either way (two would be a legitimate rename of this exact text).
+    rename_tree.learn(conn, "PAYMENT FROM JAMIE CHEN JUNE RENT",
+                      "Rename Rule Payee")
+    for _ in range(4):
+        category_tree.learn(conn, "Jamie Chen",
+                            "PAYMENT FROM JAMIE CHEN JUNE RENT", cats["dining"])
     # Venmo-shaped record: payee came from the 'From' column (no 'Payee' header),
     # memo is the raw note the renamer would otherwise fire on.
     rec = _rec(payee="Jamie Chen",
@@ -269,11 +374,19 @@ def test_in_session_learning_payee_and_category(conn, account, cats):
 # ---------------------------------------------------------------------------
 # category learning is symmetric with payee learning through save_new
 # ---------------------------------------------------------------------------
-def test_save_new_learns_category_rule_on_user_choice(conn, account, cats):
+def test_save_new_learns_the_category_under_the_payee(conn, account, cats):
+    """Accepting a row teaches the PAYEE-scoped tree, not a global keyword rule.
+
+    The old learner minted ``keyword -> category`` from a single correction and
+    matched it against every merchant; this records a vote under "Whole Foods",
+    where it can only ever affect "Whole Foods".
+    """
     m = import_review.map_row(_row("WHOLE FOODS MKT 123", tid="W1"))
     import_review.save_new(conn, account, m, payee="Whole Foods",
                            category_id=cats["shopping"])
-    assert category_rules.apply_rules(conn, "WHOLE FOODS MARKET 999") == cats["shopping"]
+    assert category_tree.known_categories(conn, "Whole Foods") == [
+        (cats["shopping"], 1)]
+    assert category_rules.list_rules(conn) == []      # no global rule minted
 
 
 def test_save_new_does_not_learn_category_when_unchanged(conn, account, cats):
@@ -320,37 +433,46 @@ def test_transfer_row_keeps_transfer_payee_no_category_no_learning(conn, account
     assert cat is None
 
     # Saving an edited transfer must learn neither a payee (tree) nor a category.
-    before_nodes = rename_tree.list_nodes(conn)
+    before_examples = rename_tree.examples(conn)
     before_c = category_rules.list_rules(conn)
     import_review.save_new(conn, account, m, payee="My Savings",
                            category_id=cats["dining"])
-    assert rename_tree.list_nodes(conn) == before_nodes
+    assert rename_tree.examples(conn) == before_examples
     assert category_rules.list_rules(conn) == before_c
 
 
 # ---------------------------------------------------------------------------
 # persistence across restart
 # ---------------------------------------------------------------------------
-def test_category_rules_survive_restart(tmp_path):
+def test_learned_categories_survive_restart(tmp_path):
     path = tmp_path / "persist.db"
     c1 = db.init_db(path)
     acct = ledger.create_account(c1, "Checking", "checking")
     cid = ledger.resolve_category(c1, "Dining")
-    # Save four Hulu rows so the learned payee is CONFIDENT (the
-    # high-confidence floor) and still prefills after the restart; category
-    # learning is one-shot.
+    # Save four Hulu rows: enough for the learned payee to be CONFIDENT (the
+    # rename tree's high-confidence floor) AND for the category tree's own
+    # MIN_COUNT, so both halves still prefill after the restart.
     for tid in ("H1", "H1b", "H1c", "H1d"):
         m = import_review.map_row(_row("HULU 877-8244 SANTA MONICA", tid=tid))
         import_review.save_new(c1, acct, m, payee="Hulu", category_id=cid)
-    assert category_rules.apply_rules(c1, "HULU BILLING") == cid
+    assert category_tree.known_categories(c1, "Hulu")[0][0] == cid
     c1.close()
 
     c2 = db.init_db(path)
     # a fresh connection to the same file still predicts the learned category.
-    m2 = import_review.map_row(_row("HULU LOS GATOS CA", tid="H2"))
+    m2 = import_review.map_row(_row("HULU 877-9999 SANTA MONICA", tid="H2"))
     payee, cat = import_review.predict_fields(c2, m2)
     assert payee == "Hulu"
     assert cat == cid
+    # A charge from a city the rename has never seen is offered, not applied
+    # (the pattern learned from identical rows requires SANTA MONICA), and the
+    # category then hangs off the raw text -- which is what keeps a wrong fill
+    # from dragging a category along.
+    m3 = import_review.map_row(_row("HULU LOS GATOS CA", tid="H3"))
+    payee, cat = import_review.predict_fields(c2, m3)
+    assert payee == import_review._clean_payee(m3.memo)
+    assert m3.payee_candidates == ["Hulu"]
+    assert cat is None
     c2.close()
 
 
@@ -363,7 +485,8 @@ def test_set_pending_prefills_payee_and_category_cells(qapp, conn, account, cats
 
     for _ in range(4):   # the high-confidence floor -> a payee that prefills
         rename_tree.learn(conn, "POS NETFLIX.COM 88", "Netflix")
-    category_rules.upsert_rule(conn, "NETFLIX", cats["dining"])
+    for _ in range(4):
+        category_tree.learn(conn, "Netflix", "POS NETFLIX.COM 88", cats["dining"])
     entries = import_review.build_review(
         conn, account, [_row("POS NETFLIX.COM 88", tid="N1")])
 
@@ -385,8 +508,11 @@ def test_pending_payee_editor_is_typeable_dropdown(qapp, conn, account):
     from mammon.ui.models import RegisterModel as M
     from mammon.ui.delegates import PayeeTwoLineDelegate
 
-    rename_tree.learn(conn, "SQ MARKETPLACE", "Vendor A")
-    rename_tree.learn(conn, "SQ MARKETPLACE", "Vendor B")
+    # Twice each: a payee seen once is not offered at all (RENAME_MIN_SIGHTINGS),
+    # and this test is about the EDITOR being a typeable dropdown of candidates.
+    for _ in range(2):
+        rename_tree.learn(conn, "SQ MARKETPLACE", "Vendor A")
+        rename_tree.learn(conn, "SQ MARKETPLACE", "Vendor B")
     entries = import_review.build_review(
         conn, account, [_row("SQ MARKETPLACE 7", tid="M1")])
     # The candidates are attached when the REGISTER opens the row (set_pending ->
@@ -402,3 +528,56 @@ def test_pending_payee_editor_is_typeable_dropdown(qapp, conn, account):
     editor = delegate._payee_combo(None, model.index(row, M.PAYEE))
     assert isinstance(editor, QComboBox) and editor.isEditable()
     assert {editor.itemText(i) for i in range(editor.count())} == {"Vendor A", "Vendor B"}
+
+
+def test_boilerplate_overlap_never_renames(conn, account, cats):
+    """the user's bug: a ledger started fresh renamed MOBILE DEPOSIT to "Foothill
+    Place", a payee never seen in any review.
+
+    One 1998 transaction whose memo the user had TYPED as "deposit" put that
+    payee on the old trie's DEPOSIT node, and "MOBILE DEPOSIT" -- nothing but
+    bank boilerplate -- walked into it. Boilerplate is not evidence: a row whose
+    only shared token is DEPOSIT has no candidates at all, so even three
+    examples of "deposit" propose nothing for it.
+    """
+    for _ in range(2):
+        rename_tree.learn(conn, "deposit", "Foothill Place")
+        rename_tree.learn(conn, "deposit", "Greg Smith")
+        rename_tree.learn(conn, "Deposit", "U-Haul")
+
+    m = import_review.map_row(_row("MOBILE DEPOSIT", tid="MD-1"))
+    payee, _cat = import_review.predict_fields(conn, m)
+    assert payee == import_review._clean_payee("MOBILE DEPOSIT")   # the text, not a guess
+    assert m.payee_candidates == []
+    # The exact text "DEPOSIT" does find its own history -- and it is contested.
+    m = import_review.map_row(_row("DEPOSIT", tid="MD-2"))
+    payee, _cat = import_review.predict_fields(conn, m)
+    assert payee == "Deposit"
+    assert set(m.payee_candidates) == {"Foothill Place", "Greg Smith", "U-Haul"}
+
+
+def test_a_corroborated_rename_still_prefills(conn, account, cats):
+    """The gate must not swallow the case it exists to serve."""
+    for _ in range(rename_tree.HIGH_CONFIDENCE_MIN_COUNT):
+        rename_tree.learn(conn, "POS DEBIT NETFLIX.COM 8888", "Netflix")
+    m = import_review.map_row(_row("POS DEBIT NETFLIX.COM 8888", tid="NF-1"))
+    payee, _cat = import_review.predict_fields(conn, m)
+    assert payee == "Netflix"
+
+
+def test_offering_and_filling_are_separate_gates(conn, account, cats):
+    """RENAME_MIN_SIGHTINGS decides whether a name is OFFERED at all;
+    rename_tree.MIN_FILL decides whether it is APPLIED to the cell. A payee
+    renamed twice for the same text clears both; a payee with two sightings
+    on OTHER text is offered for a new variant but not applied to it -- the
+    user gets a one-click dropdown and the bank's own text in the cell.
+    """
+    for _ in range(2):
+        rename_tree.learn(conn, "SQ *BLUE BOTTLE 4471 OAKLAND", "Blue Bottle")
+    m = import_review.map_row(_row("SQ *BLUE BOTTLE 4471 OAKLAND", tid="BB-1"))
+    payee, _cat = import_review.predict_fields(conn, m)
+    assert payee == "Blue Bottle"                 # the same text, corrected twice
+    m = import_review.map_row(_row("SQ *BLUE BOTTLE 9 SAN FRANCISCO", tid="BB-2"))
+    payee, _cat = import_review.predict_fields(conn, m)
+    assert payee == import_review._clean_payee(m.memo)   # a new variant: not applied
+    assert m.payee_candidates == ["Blue Bottle"]         # ...but offered

@@ -1,67 +1,137 @@
-"""Online-learning discriminative tree for payee renaming (the user's design).
+"""Payee renaming and investment-action mapping as a DECISION TREE rebuilt from the
+user's accepted corrections (the user's design; modelled on webSlinger's
+``selector_tree`` with features replaced by tokens and branching fixed at one).
 
-Replaces the old flat ``keyword -> payee`` rules table with a discriminative
-*trie* that learns from the user's renames and grows only where it must to tell
-two merchants apart.
-
-The same machinery runs TWO domains (see ``_DOMAINS``): ``payee`` -- statement
-description -> payee rename -- and ``action`` -- a source's raw activity text
-("Credit Interest", "RECORDKEEPING FEE") -> Quicken investment action. Both are
-the identical problem: an importer's vocabulary guess that only the user's own
+Two domains share the engine (see ``_DOMAINS``): ``payee`` -- a bank's statement
+text (and/or the source's own payee field) -> the payee the user chose -- and
+``action`` -- a broker's raw activity text -> the Quicken investment action the
+user kept. Both are importer vocabulary guesses that only the user's own
 corrections can make right.
 
-Pipeline for a raw statement description (+ optional ``extra`` evidence -- the
-source's own Payee field, which is EVIDENCE, not a gate):
+Why the previous design was replaced
+------------------------------------
+The old engine was an ONLINE trie: every accept walked the description's tokens
+(ranked by an entropy snapshot) and either bumped a count on an existing node or
+split to a child on the next-ranked token. Measured on the user's fresh ledger it
+had four defects, and each is structural rather than a threshold:
 
-1. NORMALIZE -- uppercase, strip punctuation into tokens, then DROP pure-numeric
-   tokens and very-short noise (:func:`normalize_tokens`), plus mixed
-   letter+digit tokens the snapshot has not seen twice (ISINs, auth codes,
-   masked ids -- 87% of them occur exactly once in the reference corpus and
-   would otherwise root unreachable paths).
-2. RANK the surviving tokens by LABEL ENTROPY -- purest first, support as
-   tiebreak (:func:`ranked_tokens`). Frequency was the wrong axis: "IAT"
-   appears 373 times mapping to 3 payees (highly discriminating) while "VENMO"
-   appears 282 times mapping to 73 (discriminates nothing). Measured online
-   over the ledger's 8,096 renames, entropy ranking + the dominance gate cut
-   wrong auto-renames from 4.2% to 1.8% at identical coverage and shrank
-   silence from 38% to 23%. The stats snapshot is built by :func:`bootstrap` /
-   :func:`snapshot_stats`; ``learn`` deliberately does NOT mutate it, so the
-   ranking a description gets is stable session-to-session (drift is tolerated
-   because queries walk by token *presence*, not exact rank -- and a RANKING
-   ALGORITHM change rebuilds the trees outright, see ``RANKING_VERSION``).
+* **Splits reset the count.** A payee corrected three times could sit at a child
+  node with count 1, because the examples learned BEFORE the split stayed on
+  the parent. That is why the third correction still showed the bank's text.
+* **The split token did not discriminate.** A differing payee descended on the
+  next-ranked token of the NEW description, not on a token that told the two
+  descriptions apart -- the Venmo tree split on ``AUTOMATIC``, present in both.
+* **The deepest node hid its ancestors.** ``MOBILE DEPOSIT`` had been renamed
+  to the same person twice, but the walk stopped on a one-off child, scored
+  below the confidence floor, and the register offered nothing at all.
+* **State could not follow the ledger.** A learned label lived on forever even
+  when the transaction behind it was undone or its payee edited in the register;
+  a title-cased copy of the bank text once learned as a "payee" is exactly the
+  "name I never entered" the user saw.
 
-Learning from a user rename (:func:`learn`): walk the ranked tokens from the
-root; for each token --
-  * node ABSENT   -> create it, store the payee with count 1 (done);
-  * node PRESENT and payee MATCHES one already there -> increment its count (done);
-  * node PRESENT and payee DIFFERS -> SPLIT: descend into it and try the next
-    (lower-frequency) token, which is precisely the lowest-frequency token that
-    differentiates this description from the payees already sitting at the node.
-Tokens exhausted -> add the payee to the node's list (several payees now share it).
+The engine is now a pure function of the CURRENT accepted corrections. Nothing
+accumulates online; a register edit or an undo changes the next answer.
 
-Suggesting for a NEW description (:func:`suggest`): traverse the same way to the
-deepest matching node and read its payees. The matched node's payee CARDINALITY
-decides -- a single payee auto-renames, several payees offer a typeable dropdown
-(most-frequent first) -- while CONFIDENCE only gates whether we act at all: a node
-too deep / too few hits (below :data:`_SUGGEST_FLOOR`) is left unchanged whatever
-its cardinality, as is a description that matched nothing. CONFIDENCE is
-``f(hit count, depth)`` -- shallow + many hits is high, deep + few is low
-(:func:`confidence`).
+Corpus: the rename example log
+------------------------------
+``rename_examples`` (schema v60) records one row per accepted review row -- the
+source text, the source's own payee field (``extra``), the label the user chose,
+and the id of the transaction the accept created. The label is read LIVE through
+that id at query time (a payee edited in the register is the correction of a
+correction), falling back to the stored label only when the transaction is gone.
+Review retention (:func:`mammon.import_review.purge_old_batches`) never touches
+this table, so a rename taught a year ago -- an annual bill -- survives the
+review rows it came from. The table is seeded from the review rows that existed
+at migration.
 
-The tree is BOOTSTRAPPED from register history (:func:`bootstrap`): every posted
-non-transfer transaction pairs a raw ``memo`` with a chosen ``payee``, which is
-exactly one accepted rename to replay. Per-payee ``applied`` / ``overridden``
-tallies (``rename_stats``) drive the management table.
+**Only corrections train the payee domain.** An example whose label is the
+text it was shown with -- the description, its title-cased form, or the
+supplied payee -- is a row the user (or a bulk accept) kept as-is, not a
+rename, and is skipped when the corpus is loaded. The action domain keeps every
+accept: an importer's guessed action that the user kept is a confirmation
+worth counting, where a kept description is not.
 
-Persistence (schema v15): ``rename_nodes`` (self-referencing token trie),
-``rename_node_payees`` (payee + hit count per node), ``rename_token_freq`` (the
-frequency snapshot), ``rename_stats`` (applied/overridden per payee), and
-``rename_meta`` (bootstrap flag). Every mutator self-commits
-unless ``commit=False`` (used to batch a bootstrap into one transaction).
+Tokens
+------
+Upper-cased alphanumeric runs, minus pure numbers, tokens under three
+characters, and mixed letter+digit tokens that fewer than two examples carry
+(auth codes, ISINs, masked ids -- per-transaction noise that would otherwise be
+the most "specific" feature of every row). ``extra`` -- the source's payee field
+-- is tokenized into the same pool, so a feed that puts its description in the
+payee column (the Costco card) trains and queries the same way as one that
+sends a ``statementDescription``. Bank boilerplate (``keywords._NOISE``) is a
+token like any other for the tree, but it is never *evidence* on its own.
+
+Answering a query (:func:`suggest`)
+----------------------------------
+1. **Candidates.** The examples that could possibly be this row: those sharing
+   a DISTINCTIVE token with it -- a non-boilerplate token that fewer than
+   :data:`MAX_LABELS_PER_TOKEN` payees have carried -- plus any example whose
+   whole token set equals the query's (how an all-boilerplate text like
+   ``MOBILE DEPOSIT`` finds its own history). A town name shared by fifty
+   merchants is not evidence of any one of them; ``WALMART`` is.
+2. **The tree.** Over those candidates, a binary decision tree on token
+   PRESENCE, grown greedily by information gain over the labels (ties: prefer a
+   non-boilerplate token, then the one more examples carry). A node whose
+   examples all share one label is a leaf; so is one no token can split, which
+   only happens when the examples' token sets are identical -- the same text
+   renamed two ways. Building it per query over the candidates is the same
+   tree the whole corpus would grow on the branch this row takes, at a
+   fraction of the cost: a corpus-wide tree over token presence is a decision
+   LIST as deep as the number of payees.
+3. **The leaf's pattern must fit the row.** A leaf is reached through ABSENT
+   edges as readily as present ones, so landing on it proves nothing by
+   itself. The leaf's examples are generalized the way webSlinger generalizes
+   an array selector over its fields (the user's design): every example is a
+   set of FEATURES -- each token, the token before it, the token after it, and
+   the same over the source's payee field -- and the pattern keeps a feature
+   only when every example has it: with its value when they all agree, as a
+   bare "something is here" slot when they differ, and not at all when any
+   example lacks it. The row fits when it has every feature the pattern kept,
+   with the agreed value where there is one. So two rows renamed Tenant --
+   ``June rent`` and ``July rent`` -- generalize to "a token, then RENT", which
+   ``August rent`` fits and a bare ``rent`` does not; once the user names
+   ``rent`` too, the slot before RENT is dropped and anything carrying RENT
+   fits. A pattern learned from one shape stays exact, so ``VENMO PAYMENT``
+   cannot inherit the ``VENMO CASHOUT`` leaf and a youth theater in Anytown
+   cannot inherit Walmart's exact rows on the town's tokens alone.
+   Generalization is earned by observed variation, never assumed. (A label
+   whose examples share no merchant token at all -- Amazon's several formats
+   -- is first split by shape, so a row is fitted against the format it
+   resembles rather than against a pattern too loose to mean anything.)
+4. **Fill or offer.** The leaf's leading label is filled when the row fits its
+   pattern, at least :data:`MIN_FILL` of its examples back it ("corrected at
+   least twice", by request), and it holds at least :data:`FILL_PURITY` of the
+   leaf -- a contested leaf fills only once one payee outvotes the rest by
+   that ratio, else the raw text stays and the payees go in the dropdown.
+   Anything else is a dropdown: the leaf's labels first, then every other
+   candidate label, each needing :data:`MIN_OFFER` sightings to be offered at
+   all. A payee chosen once is neither filled nor offered.
+
+Replayed cold over the user's fresh ledger (42 corrections) this fills 20 rows,
+all correctly, with the first fill arriving on the third sighting of every
+recurring payee; the online trie filled 15, one of them wrong, on the fourth.
+Over the older ledger's 679 accepted rows it fills 369 at 98.6% -- the five
+misses are two payees the user spelled two ways, one genuinely ambiguous
+deposit, and two first sightings (a Comcast line that is a subset of an
+Xfinity one, and a youth theater fitted to Walmart because Walmart's own
+token varied across its rows and the town's slot had generalized) -- against
+the trie's 255 at 96.9%; on the rows it leaves blank the dropdown holds the
+right name 71 times in 138. (The earlier bag-of-tokens guard, which refused
+any row carrying a token the leaf had never seen, reached 262 fills at 98.5%:
+the pattern rule buys back the rows whose only novelty sits in a slot the
+examples had already shown to vary.)
+
+Management (``rename_stats``: applied / overridden per payee, and
+:func:`forget_payee`) is unchanged in shape. :func:`bootstrap` and friends still
+exist as an explicit seed-from-history action; nothing calls them on open (see
+CLAUDE.md: hand-typed memos taught the old tree payees never chosen in review).
 """
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -69,15 +139,24 @@ from . import keywords
 
 __all__ = [
     "normalize_tokens",
-    "ranked_tokens",
+    "tidy_text",
     "confidence",
-    "confidence_tier",
     "CONFIDENCE_HIGH",
     "CONFIDENCE_LOW",
     "HIGH_CONFIDENCE_MIN_COUNT",
+    "MIN_FILL",
+    "MIN_OFFER",
+    "FILL_PURITY",
+    "MAX_LABELS_PER_TOKEN",
     "learn",
     "suggest",
     "Suggestion",
+    "Node",
+    "Example",
+    "make_example",
+    "build_tree",
+    "generalize",
+    "fits",
     "ACTION_AUTO",
     "ACTION_DROPDOWN",
     "ACTION_LEAVE",
@@ -85,92 +164,86 @@ __all__ = [
     "note_overridden",
     "rename_stats",
     "forget_payee",
+    "forget_examples",
+    "examples",
+    "sources_for",
     "bootstrap",
     "bootstrap_actions",
     "ensure_bootstrapped",
-    "snapshot_frequencies",
-    "snapshot_stats",
-    "AUTO_PURITY",
-    "set_frequencies",
-    "children",
-    "node_payees",
-    "list_nodes",
     "clear",
 ]
 
 # Split a description into UPPER-CASED alphanumeric tokens.
 _TOKEN_SPLIT = re.compile(r"[^A-Z0-9]+")
 
-# Tokens shorter than this are dropped as noise (single letters, "SQ", etc.).
+# Tokens shorter than this are dropped as noise (single letters, "SQ", "WM").
 MIN_TOKEN_LEN = 3
 
-ACTION_AUTO = "auto"          # node dominated by one payee -> auto-rename
-ACTION_DROPDOWN = "dropdown"  # contested node -> typeable, most-frequent-first dropdown
-ACTION_LEAVE = "leave"        # nothing / too weak to trust -> leave the row unchanged
+ACTION_AUTO = "auto"          # one label, matched, corroborated -> fill it in
+ACTION_DROPDOWN = "dropdown"  # contested or unsure -> typeable dropdown, raw text stays
+ACTION_LEAVE = "leave"        # nothing shares evidence with this row
 
-# A node AUTO-renames when its top label holds at least this share of the node's
-# hits. Cardinality alone was the old rule (exactly one payee -> auto), which a
-# single stray learn at a busy node could permanently demote to a dropdown; a
-# dominance threshold recovers once the stray is outvoted.
-AUTO_PURITY = 0.9
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_LOW = "low"
 
-# The two learned domains. Everything about the tree is identical between them --
-# same walk, same SQL shape (the label column is named `payee` in both) -- only
-# the tables, the training corpus, and the auto-apply floor differ. `min_count`
-# is how many corroborating examples the top label needs before a suggestion is
-# HIGH confidence (auto-applied): replayed over the real ledger, payees at 4
-# halved wrong auto-renames (4.2% -> 1.8%) at identical coverage, while actions
-# -- a finite label set, and a lower-stakes prefill sitting in an editable
-# pending row -- are reliable at 2.
+# How many examples the matched leaf needs before its single label is written
+# into the cell. TWO, by request: "show the raw payee ... until the user has
+# corrected it at least twice". The old engine's 3-4 was compensating for
+# counts that reset on every split; the leaf of a rebuilt tree holds every
+# example that reaches it, so the count is the real number of sightings.
+MIN_FILL = 2
+
+# How many sightings a payee needs before it is OFFERED in the dropdown at all.
+# One sighting is not evidence, and a name the user has picked once is noise
+# in the list rather than help (by request).
+MIN_OFFER = 2
+
+# A contested leaf -- the same text renamed more than one way -- fills its
+# leading payee only when that payee holds at least this share of the leaf's
+# examples (the user's rule). Nine Citibank rows outvote one "Citi Bank" typo;
+# a mobile deposit split five to one between two people stays a dropdown.
+FILL_PURITY = 0.9
+
+# A token that this many or fewer payees have carried is DISTINCTIVE -- sharing
+# it with an example makes that example a candidate. Above this the token is a
+# town, a bank's word for "purchase", or a marketplace's name, and sharing it
+# says nothing about which payee this is. Five keeps ``COSTCO`` (Costco, Costco
+# Gas) and a household's handful of Venmo counterparties; a card feed's town
+# name passes it within the first month.
+MAX_LABELS_PER_TOKEN = 5
+
+# Back-compat alias: callers and tests that ask "how many corroborating examples
+# before a rename is applied" get the fill floor.
+HIGH_CONFIDENCE_MIN_COUNT = MIN_FILL
+
+# The two learned domains. ``live`` names where the label is read at query time
+# (the transaction the accept created, so a later register edit or undo is
+# honoured); ``corrections_only`` is whether a kept default counts as an
+# example.
 _DOMAINS = {
     "payee": {
-        "nodes": "rename_nodes", "labels": "rename_node_payees",
-        "freq": "rename_token_freq", "meta_key": "bootstrapped",
-        "min_count": 4,
+        "live_table": "transactions", "live_col": "payee",
+        "meta_key": "bootstrapped", "corrections_only": True,
     },
     "action": {
-        "nodes": "action_nodes", "labels": "action_node_labels",
-        "freq": "action_token_freq", "meta_key": "action_bootstrapped",
-        "min_count": 2,
+        "live_table": "investment_transactions", "live_col": "action",
+        "meta_key": "action_bootstrapped", "corrections_only": False,
     },
 }
 
-# Below this confidence a matched node is too weak to trust (too deep / too few
-# hits) -> leave the row unchanged, whatever its payee cardinality. A lone hit at
-# depth 2 (1/3 = 0.33) is the canonical "too weak" case.
-_SUGGEST_FLOOR = 0.34
-
-# Confidence TIERS (distinct from the raw confidence float). A payee is only
-# 'high' confidence once at least this many renames corroborate it at the matched
-# node -- a single example is never high, so callers show the raw statement
-# description rather than silently renaming on one prior sighting (by request).
-# Raised from 2 to 4 on measurement: replaying the ledger's 8,096 renames online,
-# 4 cut wrong auto-renames from 5.7% to 1.8% while entropy ranking kept auto
-# coverage identical (the extra examples come from generalizing better, not from
-# acting less). The ACTION domain stays at 2 (see _DOMAINS). 'high' additionally
-# requires clearing the suggest floor and AUTO_PURITY.
-CONFIDENCE_HIGH = "high"
-CONFIDENCE_LOW = "low"
-HIGH_CONFIDENCE_MIN_COUNT = 4
-
-# Known bank boilerplate (POS, DEBIT, ACH, ...) is the least discriminating text
-# there is -- it appears on nearly every statement. Inverse-frequency ranking
-# demotes it once a snapshot exists, but at COLD START the snapshot is empty and
-# boilerplate would otherwise lead (it prints first). Treat these tokens as if
-# maximally frequent so they always sort last, so a real merchant token wins.
-_NOISE_FLOOR = 10 ** 9
+_NOISE = keywords._NOISE
 
 
 # ---------------------------------------------------------------------------
-# normalization + ranking
+# text normalization
 # ---------------------------------------------------------------------------
 def normalize_tokens(desc: str) -> list[str]:
     """UPPER-CASED tokens of ``desc`` with numeric/short noise dropped.
 
     Splits on non-alphanumerics, then discards pure-numeric tokens (auth codes,
     store/check numbers) and tokens shorter than :data:`MIN_TOKEN_LEN`, so a
-    per-transaction number can never overfit into its own tree node. Duplicates
-    are collapsed, first occurrence order preserved.
+    per-transaction number can never become a feature. Duplicates are
+    collapsed, first occurrence order preserved.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -186,81 +259,55 @@ def normalize_tokens(desc: str) -> list[str]:
     return out
 
 
-def _stats_map(conn, toks: list[str], kind: str) -> dict:
-    """{token: (freq, entropy)} from the domain's snapshot; absent -> missing."""
-    if not toks:
-        return {}
-    dom = _DOMAINS[kind]
-    placeholders = ",".join("?" * len(toks))
-    rows = conn.execute(
-        "SELECT token, freq, entropy FROM %s WHERE token IN (%s)"
-        % (dom["freq"], placeholders),
-        toks,
-    ).fetchall()
-    return {r["token"]: (int(r["freq"]),
-                         None if r["entropy"] is None else float(r["entropy"]))
-            for r in rows}
-
-
 def _is_mixed(tok: str) -> bool:
     """A token mixing letters and digits (ISIN, auth code, masked id)."""
     return any(ch.isdigit() for ch in tok) and any(ch.isalpha() for ch in tok)
 
 
-def ranked_tokens(conn, desc: str, *, kind: str = "payee", extra: str = "") -> list[str]:
-    """Evidence tokens of ``desc`` (and ``extra``) ordered most-discriminating
-    first.
+_MULTISPACE = re.compile(r"\s+")
 
-    ``extra`` is additional evidence text -- typically the source's own Payee
-    field -- tokenized into the same pool. It is evidence, not a gate: the
-    earlier design used a supplied payee verbatim and skipped the tree entirely,
-    which stopped renaming even when the field carried extractable junk.
+# Tokens that stay upper-cased when an all-caps feed line is title-cased.
+_KEEP_UPPER = {"ACH", "POS", "ATM", "LLC", "US", "USA", "ID", "PPD", "CCD"}
 
-    Two measured corrections to the old inverse-global-frequency ranking:
 
-    * SHAPE FILTER -- mixed letter+digit tokens not seen at least twice in the
-      snapshot are dropped. In the real corpus 87% of them occur exactly once
-      (ISINs, auth codes, masked ids like ``x*****99``); being rare, the old
-      ranking put them FIRST, so learned paths were rooted in tokens that never
-      recur and were unreachable for every later row.
-    * ENTROPY RANK -- tokens sort by conditional label entropy (purest first,
-      support as tiebreak), not by rarity. Frequency is the wrong axis: ``IAT``
-      appears 373 times mapping to 3 payees (keep it early), ``VENMO`` 282
-      times mapping to 73 payees (it discriminates nothing). An unseen token
-      ranks with the pure ones but after supported ones -- it may be a brand-new
-      merchant name. Known boilerplate still sorts last.
-    """
-    toks = normalize_tokens(desc)
-    if extra:
-        seen = set(toks)
-        for tok in normalize_tokens(extra):
-            if tok not in seen:
-                seen.add(tok)
-                toks.append(tok)
-    if not toks:
-        return []
-    stats = _stats_map(conn, toks, kind)
-    toks = [tk for tk in toks
-            if not (_is_mixed(tk) and stats.get(tk, (0, None))[0] < 2)]
-    order = {tk: i for i, tk in enumerate(toks)}
+def tidy_text(text: str) -> str:
+    """The display default for a description with no rename: whitespace
+    collapsed and, when the feed shouts in ALL CAPS, title-cased for
+    readability. Mixed-case (human-formatted) text is left alone.
 
-    def rank(tk: str):
-        freq, ent = stats.get(tk, (0, None))
-        h = 0.0 if ent is None else ent
-        if tk in keywords._NOISE:
-            h = max(h, float(_NOISE_FLOOR))   # boilerplate always sorts last
-        return (h, -min(freq, 50), order[tk])
+    Lives here, not in the review module, because the corpus loader has to
+    recognise this exact string: a row whose payee IS its tidied description
+    was kept as-is, and is not a correction (see the module docstring)."""
+    s = _MULTISPACE.sub(" ", (text or "").strip())
+    if not s:
+        return ""
+    letters = [c for c in s if c.isalpha()]
+    if letters and all(c.isupper() for c in letters):
+        s = " ".join(tok.upper() if tok.upper() in _KEEP_UPPER else tok.capitalize()
+                     for tok in s.split(" "))
+    return s
 
-    return sorted(toks, key=rank)
+
+def _norm(s: Optional[str]) -> str:
+    """Case- and whitespace-insensitive comparison key."""
+    return _MULTISPACE.sub(" ", (s or "").strip()).lower()
+
+
+def is_correction(label: Optional[str], text: Optional[str],
+                  extra: Optional[str] = "") -> bool:
+    """Whether ``label`` is a RENAME of the row it was accepted with, rather
+    than the default the row was shown with (the description, its tidied form,
+    or the supplied payee field)."""
+    key = _norm(label)
+    if not key:
+        return False
+    return key not in {_norm(text), _norm(tidy_text(text or "")), _norm(extra)}
 
 
 def confidence(hit_count: int, depth: int) -> float:
-    """Confidence of a payee suggestion from its hit count and node depth.
-
-    ``f(hits, depth) = hits / (hits + depth)``: rises with corroborating hits,
-    falls with depth, so a shallow node backed by many renames scores high while
-    a deep node reached through many splits with a single hit scores low.
-    """
+    """``hits / (hits + depth)``: rises with corroborating examples, falls with
+    the number of splits it took to isolate them. Kept as a descriptive score
+    (and for :mod:`mammon.category_tree`); it gates nothing here."""
     hc = max(0, int(hit_count))
     if hc <= 0:
         return 0.0
@@ -268,125 +315,271 @@ def confidence(hit_count: int, depth: int) -> float:
     return hc / (hc + d)
 
 
-def confidence_tier(hit_count: int, depth: int, *, floor: Optional[float] = None) -> str:
-    """Classify a suggestion as :data:`CONFIDENCE_HIGH` or :data:`CONFIDENCE_LOW`.
-
-    A suggestion is only 'high' when it is corroborated by at least
-    :data:`HIGH_CONFIDENCE_MIN_COUNT` renames at the matched node AND its
-    :func:`confidence` clears ``floor`` (default :data:`_SUGGEST_FLOOR`). A lone
-    example (count 1) is therefore never high, however shallow the node -- so a
-    single prior rename does not auto-apply; the raw statement description is
-    shown instead."""
-    fl = _SUGGEST_FLOOR if floor is None else float(floor)
-    if int(hit_count) >= HIGH_CONFIDENCE_MIN_COUNT and confidence(hit_count, depth) >= fl:
-        return CONFIDENCE_HIGH
-    return CONFIDENCE_LOW
-
-
 # ---------------------------------------------------------------------------
-# node helpers
+# the corpus: accepted examples with live labels
 # ---------------------------------------------------------------------------
-def _find_child(conn, parent_id: Optional[int], token: str, kind: str = "payee"):
-    return conn.execute(
-        "SELECT id, depth FROM %s "
-        "WHERE token=? AND IFNULL(parent_id,-1)=IFNULL(?,-1)" % _DOMAINS[kind]["nodes"],
-        (token, parent_id),
-    ).fetchone()
+# The value a pattern slot takes when the examples disagree: "some token is
+# here" (webSlinger's binarized feature).
+ANY = "*"
+
+# The feature a row carries when its source sent NO payee field. Absence is a
+# value, not a gap: rows learned from a description-only feed must not fit a
+# row whose source names a counterparty in its own column (the Venmo case),
+# and rows learned from a payee-column feed must not fit a bare description.
+_NO_FIELD = "f:none"
 
 
-def children(conn, parent_id: Optional[int], *, kind: str = "payee") -> list[dict]:
-    """Child nodes of ``parent_id`` (pass ``None`` for the root level)."""
-    rows = conn.execute(
-        "SELECT id, parent_id, token, depth FROM %s "
-        "WHERE IFNULL(parent_id,-1)=IFNULL(?,-1) ORDER BY token"
-        % _DOMAINS[kind]["nodes"],
-        (parent_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+@dataclass(frozen=True)
+class Example:
+    """One accepted correction, tokenized.
 
-
-def node_payees(conn, node_id: int, *, kind: str = "payee") -> list[dict]:
-    """Labels stored at ``node_id`` with their hit counts, most-hit first."""
-    rows = conn.execute(
-        "SELECT payee, count FROM %s WHERE node_id=? "
-        "ORDER BY count DESC, payee ASC" % _DOMAINS[kind]["labels"],
-        (node_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def list_nodes(conn, *, kind: str = "payee") -> list[dict]:
-    """Every node (shallowest first) -- inspection/debugging helper."""
-    rows = conn.execute(
-        "SELECT id, parent_id, token, depth FROM %s ORDER BY depth, id"
-        % _DOMAINS[kind]["nodes"]
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# learning
-# ---------------------------------------------------------------------------
-def learn(conn, desc: str, payee: str, *, kind: str = "payee",
-          extra: str = "", commit: bool = True) -> bool:
-    """Teach the ``kind`` tree that ``desc`` (+ ``extra`` evidence) maps to
-    ``payee`` -- one accepted correction. For the action domain the label is the
-    Quicken ACTION; the parameter keeps its name so both domains share one shape.
-
-    Returns ``True`` when something was recorded, ``False`` when the label is
-    blank or the evidence yields no usable tokens (nothing to learn). See the
-    module docstring for the absent / matches / differs walk.
+    ``seq`` is the usable tokens of the text in order, ``fseq`` those of the
+    supplied payee field; ``tokens`` is their union (the tree's features);
+    ``features`` is the pattern vocabulary of step 3 (see :func:`features`).
     """
-    dom = _DOMAINS[kind]
-    picked = (payee or "").strip()
-    if not picked:
-        return False
-    toks = ranked_tokens(conn, desc, kind=kind, extra=extra)
-    if not toks:
-        return False
-    parent_id: Optional[int] = None
-    for depth, tok in enumerate(toks, start=1):
-        node = _find_child(conn, parent_id, tok, kind)
-        if node is None:
-            # ABSENT: create the node, store this label with count 1.
-            cur = conn.execute(
-                "INSERT INTO %s(parent_id, token, depth) VALUES (?,?,?)"
-                % dom["nodes"],
-                (parent_id, tok, depth),
-            )
-            conn.execute(
-                "INSERT INTO %s(node_id, payee, count) VALUES (?,?,1)"
-                % dom["labels"],
-                (int(cur.lastrowid), picked),
-            )
-            if commit:
-                conn.commit()
-            return True
-        node_id = int(node["id"])
-        hit = conn.execute(
-            "SELECT id FROM %s WHERE node_id=? AND payee=?" % dom["labels"],
-            (node_id, picked),
-        ).fetchone()
-        if hit is not None:
-            # PRESENT and label MATCHES: reinforce.
-            conn.execute(
-                "UPDATE %s SET count=count+1 WHERE id=?" % dom["labels"],
-                (int(hit["id"]),),
-            )
-            if commit:
-                conn.commit()
-            return True
-        # PRESENT but label DIFFERS: split on the next-ranked token.
-        parent_id = node_id
-    # Tokens exhausted with no match -> this node now serves several labels.
-    conn.execute(
-        "INSERT INTO %s(node_id, payee, count) VALUES (?,?,1) "
-        "ON CONFLICT(node_id, payee) DO UPDATE SET count=count+1" % dom["labels"],
-        (parent_id, picked),
-    )
-    if commit:
-        conn.commit()
+    id: int
+    seq: tuple
+    fseq: tuple
+    label: str
+    text: str = ""
+    extra: str = ""
+
+    @property
+    def tokens(self) -> frozenset:
+        return frozenset(self.seq) | frozenset(self.fseq)
+
+    @property
+    def features(self) -> dict:
+        return features(self.seq, self.fseq)
+
+
+def features(seq, fseq=()) -> dict:
+    """The feature set of one row: for each token of the description, the token
+    itself (``has:T``), the token before it (``prev:T``) and after it
+    (``next:T``); the same over the payee field under an ``f:`` prefix; and
+    :data:`_NO_FIELD` when there is no field. ``prev``/``next`` exist only where
+    a neighbour exists, so a first or last token has none -- that absence is
+    what lets a pattern learned from ``June rent`` reject a bare ``rent``."""
+    out: dict = {}
+    for prefix, toks in (("", tuple(seq)), ("f:", tuple(fseq))):
+        for i, t in enumerate(toks):
+            out[prefix + "has:" + t] = t
+            if i > 0:
+                out[prefix + "prev:" + t] = toks[i - 1]
+            if i + 1 < len(toks):
+                out[prefix + "next:" + t] = toks[i + 1]
+    if not fseq:
+        out[_NO_FIELD] = _NO_FIELD
+    return out
+
+
+def generalize(examples) -> dict:
+    """The pattern shared by ``examples``: every feature all of them carry,
+    with its value when they agree and :data:`ANY` when they differ. A feature
+    any example lacks is dropped (the user's array-selector rule)."""
+    if not examples:
+        return {}
+    feats = [e.features for e in examples]
+    names = set(feats[0]).intersection(*(set(f) for f in feats[1:]))
+    pattern: dict = {}
+    for name in names:
+        values = {f[name] for f in feats}
+        pattern[name] = values.pop() if len(values) == 1 else ANY
+    return pattern
+
+
+def fits(pattern: dict, row_features: dict) -> bool:
+    """Whether a row carries every feature of ``pattern`` with the agreed
+    value where the pattern has one."""
+    for name, value in pattern.items():
+        got = row_features.get(name)
+        if got is None or (value is not ANY and got != value):
+            return False
     return True
+
+
+def _raw_tokens(text: str, extra: str) -> set:
+    toks = set(normalize_tokens(text))
+    if extra:
+        toks |= set(normalize_tokens(extra))
+    return toks
+
+
+def make_example(id_: int, text: str, label: str, extra: str = "") -> Example:
+    """An :class:`Example` outside any corpus (tests, inspection): every token
+    is kept, mixed letter+digit ones included."""
+    return Example(id_, tuple(normalize_tokens(text)), tuple(normalize_tokens(extra)),
+                   label, text, extra)
+
+
+class _Corpus:
+    """The examples of one domain plus the indexes :func:`suggest` reads."""
+
+    def __init__(self, rows):
+        # rows: (id, text, extra, label). Mixed letter+digit tokens count only
+        # once at least two examples carry them (see the module docstring).
+        freq: Counter = Counter()
+        staged = []
+        for rid, text, extra, label in rows:
+            staged.append((rid, text, extra, label))
+            freq.update(_raw_tokens(text, extra))
+        self._freq = freq
+        self.examples: list[Example] = []
+        self.by_token: dict = defaultdict(set)
+        self.labels_of: dict = defaultdict(set)
+        self.by_set: dict = defaultdict(set)
+        self.sightings: Counter = Counter()
+        for rid, text, extra, label in staged:
+            seq, fseq = self.sequences(text, extra)
+            toks = frozenset(seq) | frozenset(fseq)
+            if not toks:
+                continue
+            i = len(self.examples)
+            self.examples.append(Example(rid, seq, fseq, label, text, extra))
+            for t in toks:
+                self.by_token[t].add(i)
+                self.labels_of[t].add(label)
+            self.by_set[toks].add(i)
+            self.sightings[label] += 1
+
+    def usable(self, tok: str) -> bool:
+        return (not _is_mixed(tok)) or self._freq.get(tok, 0) >= 2
+
+    def sequences(self, text: str, extra: str = "") -> tuple:
+        """``(description tokens, payee-field tokens)`` in order, usable ones only."""
+        return (tuple(t for t in normalize_tokens(text) if self.usable(t)),
+                tuple(t for t in normalize_tokens(extra or "") if self.usable(t)))
+
+    def tokens(self, text: str, extra: str = "") -> frozenset:
+        seq, fseq = self.sequences(text, extra)
+        return frozenset(seq) | frozenset(fseq)
+
+
+_CACHE: dict = {}   # kind -> (fingerprint, _Corpus)
+
+
+def _corpus_rows(conn, kind: str) -> list[tuple]:
+    """``(id, text, extra, label)`` for every usable example of ``kind``, with
+    the label read LIVE from the transaction the accept created."""
+    dom = _DOMAINS[kind]
+    rows = conn.execute(
+        f"SELECT e.id AS id, e.text AS text, e.extra AS extra, e.label AS label, "
+        f"       live.id AS live_id, live.{dom['live_col']} AS live_label "
+        f"FROM rename_examples e "
+        f"LEFT JOIN {dom['live_table']} live ON live.id = e.txn_id "
+        f"WHERE e.kind=? ORDER BY e.id", (kind,)).fetchall()
+    known_action = None
+    if kind == "action":
+        from . import investments
+        known_action = investments.is_known_action
+    out = []
+    for r in rows:
+        if r["live_id"] is not None:
+            label = (r["live_label"] or "").strip()   # the row still exists: its
+            if not label:                             # current value is the truth
+                continue
+        else:
+            label = (r["label"] or "").strip()
+        if not label:
+            continue
+        text = r["text"] or ""
+        extra = r["extra"] or ""
+        if known_action is not None and extra and known_action(extra):
+            extra = ""      # a canonical action is the answer, not evidence
+        if dom["corrections_only"] and not is_correction(label, text, extra):
+            continue
+        out.append((int(r["id"]), text, extra, label))
+    return out
+
+
+def _corpus(conn, kind: str) -> _Corpus:
+    """The domain's corpus, rebuilt whenever the underlying rows change.
+
+    The rows are cheap to read (one indexed SELECT over the example log); the
+    tokenizing and indexing are what the fingerprint saves. Keyed by content,
+    so two connections to the same file share, and a register edit that changes
+    a live label invalidates it without any bookkeeping."""
+    rows = _corpus_rows(conn, kind)
+    fp = hash(tuple(rows))
+    hit = _CACHE.get(kind)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    corpus = _Corpus(rows)
+    _CACHE[kind] = (fp, corpus)
+    return corpus
+
+
+# ---------------------------------------------------------------------------
+# the decision tree
+# ---------------------------------------------------------------------------
+@dataclass
+class Node:
+    """A tree node. ``token`` is the split feature (``None`` for a leaf);
+    ``present`` / ``absent`` are the children for rows that carry / lack it."""
+    examples: list
+    token: Optional[str] = None
+    present: Optional["Node"] = None
+    absent: Optional["Node"] = None
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.token is None
+
+    @property
+    def labels(self) -> Counter:
+        return Counter(e.label for e in self.examples)
+
+
+def _entropy(counts: Counter, n: int) -> float:
+    return -sum((c / n) * math.log2(c / n) for c in counts.values() if c)
+
+
+def build_tree(examples: list) -> Node:
+    """Grow the decision tree over ``examples`` (branching one: a single token
+    per node, present vs. absent).
+
+    At each node the split token is the one that minimises the label entropy of
+    the two children (maximum information gain). A token every example carries
+    splits nothing and is skipped; a node with one label, or one no token can
+    split, is a leaf. Ties break toward a non-boilerplate token, then the token
+    more of the node's examples carry, then alphabetically -- deterministic, so
+    the same corpus always yields the same tree.
+    """
+    labels = Counter(e.label for e in examples)
+    if len(labels) <= 1:
+        return Node(examples)
+    n = len(examples)
+    tok_labels: dict = defaultdict(Counter)
+    tok_n: Counter = Counter()
+    for e in examples:
+        for t in e.tokens:
+            tok_labels[t][e.label] += 1
+            tok_n[t] += 1
+    best = None
+    for t, present in tok_labels.items():
+        n_p = tok_n[t]
+        if n_p == n:
+            continue                           # in every example: no split
+        n_a = n - n_p
+        absent = labels - present
+        remaining = (n_p / n) * _entropy(present, n_p) + (n_a / n) * _entropy(absent, n_a)
+        key = (remaining, t in _NOISE, -n_p, t)
+        if best is None or key < best[0]:
+            best = (key, t)
+    if best is None:
+        return Node(examples)                  # identical token sets: contested
+    tok = best[1]
+    return Node(examples, tok,
+                build_tree([e for e in examples if tok in e.tokens]),
+                build_tree([e for e in examples if tok not in e.tokens]))
+
+
+def _walk(node: Node, toks: frozenset) -> tuple[Node, int]:
+    depth = 0
+    while not node.is_leaf:
+        node = node.present if node.token in toks else node.absent
+        depth += 1
+    return node, depth
 
 
 # ---------------------------------------------------------------------------
@@ -394,13 +587,14 @@ def learn(conn, desc: str, payee: str, *, kind: str = "payee",
 # ---------------------------------------------------------------------------
 @dataclass
 class Suggestion:
-    """A rename decision for one description.
+    """A rename decision for one row.
 
-    ``action`` is one of :data:`ACTION_AUTO`, :data:`ACTION_DROPDOWN`,
-    :data:`ACTION_LEAVE`. ``payee`` is the top candidate (the auto payee, or the
-    default pre-fill for a dropdown). ``candidates`` is ``[(payee, count), ...]``
-    most-hit first (empty for LEAVE). ``confidence`` and ``depth`` describe the
-    matched node.
+    ``action`` is :data:`ACTION_AUTO`, :data:`ACTION_DROPDOWN` or
+    :data:`ACTION_LEAVE`; ``payee`` the label to fill (AUTO) or the dropdown's
+    first entry; ``candidates`` is ``[(label, count), ...]`` -- the matched
+    leaf's labels by leaf count, then other candidate labels by sightings, all
+    at or above :data:`MIN_OFFER`. ``high_confidence`` is true exactly for AUTO.
+    ``confidence`` is the fitted group's size against the depth walked.
     """
 
     action: str
@@ -408,77 +602,174 @@ class Suggestion:
     candidates: list = field(default_factory=list)
     confidence: float = 0.0
     depth: int = 0
-    high_confidence: bool = False   # >=2 corroborating hits (see confidence_tier)
+    high_confidence: bool = False
 
     @property
     def payees(self) -> list:
-        """Just the candidate payee names, most-hit first."""
+        """Just the candidate names, best first."""
         return [p for p, _ in self.candidates]
 
     @property
     def tier(self) -> str:
-        """:data:`CONFIDENCE_HIGH` or :data:`CONFIDENCE_LOW` for this suggestion."""
         return CONFIDENCE_HIGH if self.high_confidence else CONFIDENCE_LOW
 
 
-def _walk(conn, toks: list[str], kind: str = "payee") -> tuple[Optional[int], int]:
-    """Deepest node reached by following ``toks`` from the root by presence."""
-    parent_id: Optional[int] = None
-    depth = 0
-    reached: Optional[int] = None
-    for tok in toks:
-        node = _find_child(conn, parent_id, tok, kind)
-        if node is None:
-            break
-        parent_id = int(node["id"])
-        depth += 1
-        reached = parent_id
-    return reached, depth
+def _candidates(corpus: _Corpus, toks: frozenset) -> list:
+    """Indexes of the examples that could be this row (module docstring, step 1)."""
+    found: set = set()
+    for t in toks:
+        if t in _NOISE:
+            continue
+        if len(corpus.labels_of.get(t, ())) > MAX_LABELS_PER_TOKEN:
+            continue
+        found |= corpus.by_token.get(t, set())
+    found |= corpus.by_set.get(toks, set())
+    return sorted(found)
 
 
-def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "",
-            floor: Optional[float] = None) -> Suggestion:
-    """Decide how to map ``desc`` (+ ``extra`` evidence) by NODE DOMINANCE.
+def _anchored(pattern: dict) -> bool:
+    """Whether a pattern pins at least one real (non-boilerplate) token."""
+    return any(name.split("has:", 1)[1] not in _NOISE
+               for name, value in pattern.items()
+               if "has:" in name and value is not ANY)
 
-    Walk the trie to the deepest matching node and read its labels:
 
-      * top label holds >= :data:`AUTO_PURITY` of the node's hits -> ACTION_AUTO.
-        (A lone label is purity 1.0, so the old cardinality rule is a special
-        case -- but a busy node with one stray learn can now recover once the
-        stray is outvoted, instead of being demoted to a dropdown forever.)
-      * contested node -> ACTION_DROPDOWN (typeable, most-frequent first).
+def _shape_group(examples: list, toks: frozenset) -> list:
+    """The examples of one label that share the row's SHAPE.
 
-    Confidence gates whether we act at all: a node too weak to trust -- too deep
-    and/or too few hits, confidence below ``floor`` (default
-    :data:`_SUGGEST_FLOOR`) -- is left unchanged, as is a description that
-    matched no node. ``high_confidence`` additionally demands the domain's
-    ``min_count`` corroborating examples AND dominance; auto-appliers gate on it.
+    A label learned from several unrelated formats (Amazon's marketplace,
+    royalty and web-services lines) generalizes to a pattern that pins no
+    merchant token at all, which would fit anything. While that is so, split
+    the examples on the real token most of them carry and keep the side the
+    row is on, so the row is fitted against the format it resembles. A label
+    whose examples already share a token, or whose text is nothing but
+    boilerplate (``MOBILE DEPOSIT``), is returned whole.
     """
-    dom = _DOMAINS[kind]
-    fl = _SUGGEST_FLOOR if floor is None else float(floor)
-    toks = ranked_tokens(conn, desc, kind=kind, extra=extra)
-    node_id, depth = _walk(conn, toks, kind)
-    if node_id is None:
+    while len(examples) > 1 and not _anchored(generalize(examples)):
+        n = len(examples)
+        presence: Counter = Counter()
+        for e in examples:
+            for t in e.tokens:
+                if t not in _NOISE:
+                    presence[t] += 1
+        splits = [(c, t) for t, c in presence.items() if c < n]
+        if not splits:
+            break
+        _, tok = max(splits, key=lambda ct: (ct[0], ct[1]))
+        examples = [e for e in examples if (tok in e.tokens) == (tok in toks)]
+    return examples
+
+
+def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "") -> Suggestion:
+    """Decide how to map ``desc`` (+ ``extra``, the source's own payee field)
+    for the ``kind`` domain. See the module docstring for the four steps."""
+    corpus = _corpus(conn, kind)
+    seq, fseq = corpus.sequences(desc, extra)
+    toks = frozenset(seq) | frozenset(fseq)
+    if not toks or not corpus.examples:
         return Suggestion(ACTION_LEAVE)
-    cands = [(r["payee"], int(r["count"]))
-             for r in node_payees(conn, node_id, kind=kind)]
-    if not cands:
-        return Suggestion(ACTION_LEAVE, depth=depth)
-    top_payee, top_count = cands[0]
-    total = sum(n for _, n in cands)
-    purity = top_count / total if total else 0.0
-    conf = confidence(top_count, depth)
-    high = (top_count >= dom["min_count"] and purity >= AUTO_PURITY
-            and conf >= fl)
-    # Too weak to act on at all -> leave unchanged (deep node / too few hits).
-    if conf < fl:
-        return Suggestion(ACTION_LEAVE, payee=top_payee, candidates=cands,
-                          confidence=conf, depth=depth, high_confidence=high)
-    if purity >= AUTO_PURITY:
-        return Suggestion(ACTION_AUTO, payee=top_payee, candidates=cands,
-                          confidence=conf, depth=depth, high_confidence=high)
-    return Suggestion(ACTION_DROPDOWN, payee=top_payee, candidates=cands,
-                      confidence=conf, depth=depth, high_confidence=high)
+    idx = _candidates(corpus, toks)
+    if not idx:
+        return Suggestion(ACTION_LEAVE)
+    cands = [corpus.examples[i] for i in idx]
+    leaf, depth = _walk(build_tree(cands), toks)
+    counts = leaf.labels
+    top, n_top = counts.most_common(1)[0]
+    ratio = n_top / len(leaf.examples)
+    # Step 3: the leading label's pattern must fit the row.
+    group = _shape_group([e for e in leaf.examples if e.label == top], toks)
+    fit = fits(generalize(group), features(seq, fseq))
+    # Step 4: fill, or offer.
+    leaf_labels = [(lab, c) for lab, c in counts.most_common()
+                   if fit and corpus.sightings[lab] >= MIN_OFFER]
+    shown = {lab for lab, _ in leaf_labels}
+    others = Counter(e.label for e in cands if e.label not in shown)
+    offered = leaf_labels + [(lab, corpus.sightings[lab]) for lab, _ in others.most_common()
+                             if corpus.sightings[lab] >= MIN_OFFER]
+    conf = confidence(len(group), depth)
+    if fit and len(group) >= MIN_FILL and ratio >= FILL_PURITY:
+        return Suggestion(ACTION_AUTO, payee=top, candidates=offered,
+                          confidence=conf, depth=depth, high_confidence=True)
+    if offered:
+        return Suggestion(ACTION_DROPDOWN, payee=offered[0][0], candidates=offered,
+                          confidence=conf, depth=depth)
+    return Suggestion(ACTION_LEAVE, depth=depth)
+
+
+# ---------------------------------------------------------------------------
+# learning: the example log
+# ---------------------------------------------------------------------------
+def learn(conn, desc: str, payee: str, *, kind: str = "payee", extra: str = "",
+          txn_id: Optional[int] = None, review_id: Optional[int] = None,
+          commit: bool = True) -> bool:
+    """Record one accepted example: ``desc`` (+ ``extra``) was labelled
+    ``payee`` (the action, in the action domain).
+
+    ``txn_id`` is the register row the accept created; when given, the label
+    is read from that row at query time, so an edit or undo there is honoured.
+    Returns ``False`` for a blank label or text with no usable tokens (nothing
+    to learn). Whether a kept default counts is decided when the corpus is
+    loaded, not here (``_DOMAINS[kind]['corrections_only']``).
+    """
+    label = (payee or "").strip()
+    if not label:
+        return False
+    if not _raw_tokens(desc or "", extra or ""):
+        return False
+    conn.execute(
+        "INSERT INTO rename_examples(kind, txn_id, review_id, text, extra, label) "
+        "VALUES (?,?,?,?,?,?)",
+        (kind, txn_id, review_id, (desc or "").strip(), (extra or "").strip(), label))
+    if commit:
+        conn.commit()
+    return True
+
+
+def forget_examples(conn, *, txn_id: int, kind: str = "payee",
+                    commit: bool = True) -> int:
+    """Drop the example(s) recorded for a transaction (an accept being undone).
+    Returns the number removed."""
+    cur = conn.execute("DELETE FROM rename_examples WHERE kind=? AND txn_id=?",
+                       (kind, int(txn_id)))
+    if commit:
+        conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def examples(conn, *, kind: str = "payee") -> list[dict]:
+    """The live corpus as ``{id, text, extra, label, tokens}`` rows -- what the
+    tree is built from, after the live-label and corrections-only filters.
+    Inspection and tests."""
+    corpus = _corpus(conn, kind)
+    return [{"id": e.id, "text": e.text, "extra": e.extra, "label": e.label,
+             "tokens": sorted(e.tokens)} for e in corpus.examples]
+
+
+def pattern_for(conn, payee: str, *, kind: str = "payee") -> dict:
+    """The generalized pattern of every live example labelled ``payee`` --
+    what a row has to carry to be filled with it (inspection; the decision
+    path fits against the leaf's shape group, which is this or a subset)."""
+    corpus = _corpus(conn, kind)
+    return generalize([e for e in corpus.examples if e.label == payee])
+
+
+def sources_for(conn, payee: str, *, kind: str = "payee", limit: int = 40) -> list:
+    """The raw source texts that resolve to ``payee``, most recent first --
+    the bank's own words for it, which anything wanting them (the
+    automatic-payment hint in :mod:`mammon.predictions`) asks here for."""
+    corpus = _corpus(conn, kind)
+    out: list = []
+    seen: set = set()
+    for e in reversed(corpus.examples):
+        if e.label != payee:
+            continue
+        text = " ".join(s for s in (e.text, e.extra) if s)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+            if len(out) >= limit:
+                break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -513,253 +804,117 @@ def note_overridden(conn, payee: str, *, commit: bool = True) -> None:
 
 
 def rename_stats(conn) -> list[dict]:
-    """One row per known payee for the management table.
-
-    Each row: ``payee``, ``examples`` (total learned hits across the tree),
-    ``nodes`` (how many tree nodes it appears at), ``applied`` and ``overridden``
-    tallies. Sorted by payee name.
-    """
-    learned: dict = {}
-    for r in conn.execute(
-        "SELECT payee, SUM(count) AS c, COUNT(*) AS n "
-        "FROM rename_node_payees GROUP BY payee"
-    ):
-        learned[r["payee"]] = (int(r["c"] or 0), int(r["n"] or 0))
+    """One row per known payee for the management table: ``payee``,
+    ``examples`` (live corrections that resolve to it), ``applied`` and
+    ``overridden`` tallies. Sorted by payee name."""
+    corpus = _corpus(conn, "payee")
     stats: dict = {}
     for r in conn.execute(
         "SELECT payee, applied_count, overridden_count FROM rename_stats"
     ):
         stats[r["payee"]] = (int(r["applied_count"] or 0), int(r["overridden_count"] or 0))
     out = []
-    for p in sorted(set(learned) | set(stats)):
-        examples, nodes = learned.get(p, (0, 0))
+    for p in sorted(set(corpus.sightings) | set(stats)):
         applied, overridden = stats.get(p, (0, 0))
         out.append({
             "payee": p,
-            "examples": examples,
-            "nodes": nodes,
+            "examples": int(corpus.sightings.get(p, 0)),
             "applied": applied,
             "overridden": overridden,
         })
     return out
 
 
-def forget_payee(conn, payee: str, *, commit: bool = True) -> int:
-    """Delete a payee from the whole tree and drop its stats (management delete).
-
-    Removes the payee from every node, prunes nodes left empty, and clears its
-    applied/overridden tally. Returns the number of node entries removed.
-    """
+def forget_payee(conn, payee: str, *, kind: str = "payee", commit: bool = True) -> int:
+    """Forget every example that resolves to ``payee`` -- by its live label or
+    its stored one -- and drop its tally (management delete). Returns the
+    number of examples removed."""
     p = (payee or "").strip()
     if not p:
         return 0
-    removed = conn.execute(
-        "DELETE FROM rename_node_payees WHERE payee=?", (p,)
-    ).rowcount
-    _prune_empty(conn)
-    conn.execute("DELETE FROM rename_stats WHERE payee=?", (p,))
+    dom = _DOMAINS[kind]
+    cur = conn.execute(
+        f"DELETE FROM rename_examples WHERE kind=? AND (label=? OR txn_id IN "
+        f"(SELECT id FROM {dom['live_table']} WHERE {dom['live_col']}=?))",
+        (kind, p, p))
+    if kind == "payee":
+        conn.execute("DELETE FROM rename_stats WHERE payee=?", (p,))
     if commit:
         conn.commit()
-    return int(removed or 0)
-
-
-def _prune_empty(conn) -> None:
-    """Delete leaf nodes that have no payees and no children, repeatedly."""
-    while True:
-        cur = conn.execute(
-            "DELETE FROM rename_nodes WHERE id IN ("
-            "  SELECT n.id FROM rename_nodes n "
-            "  LEFT JOIN rename_node_payees p ON p.node_id=n.id "
-            "  LEFT JOIN rename_nodes c ON c.parent_id=n.id "
-            "  WHERE p.id IS NULL AND c.id IS NULL)"
-        )
-        if not cur.rowcount:
-            break
-
-
-def sources_for(conn, payee: str, *, kind: str = "payee", limit: int = 40) -> list:
-    """The token paths that resolve to ``payee`` -- the raw statement
-    vocabulary it was learned from, each as a space-joined string.
-
-    The tree is the only place that knows what a payee was renamed FROM, so
-    anything wanting the bank's own words for a payee (the automatic-payment
-    hint in :mod:`mammon.predictions`, say) asks here rather than guessing
-    from the payee's own name.
-    """
-    d = _DOMAINS[kind]
-    rows = conn.execute(
-        f"SELECT l.node_id FROM {d['labels']} l WHERE l.payee=? "
-        f"ORDER BY l.count DESC LIMIT ?", (payee, int(limit))).fetchall()
-    out: list = []
-    for r in rows:
-        tokens: list = []
-        node_id = r["node_id"]
-        guard = 0
-        while node_id is not None and guard < 32:
-            n = conn.execute(f"SELECT token, parent_id FROM {d['nodes']} WHERE id=?",
-                             (node_id,)).fetchone()
-            if n is None:
-                break
-            tokens.append(n["token"])
-            node_id = n["parent_id"]
-            guard += 1
-        if tokens:
-            out.append(" ".join(reversed(tokens)))
-    return out
+    return int(cur.rowcount or 0)
 
 
 def clear(conn, *, kind: str = "payee", commit: bool = True) -> None:
-    """Wipe one learned tree, its stats, and its snapshot (reset)."""
+    """Wipe one domain's examples (and, for payees, the tallies) and its
+    bootstrap flag."""
     dom = _DOMAINS[kind]
-    conn.execute("DELETE FROM %s" % dom["labels"])
-    conn.execute("DELETE FROM %s" % dom["nodes"])
+    conn.execute("DELETE FROM rename_examples WHERE kind=?", (kind,))
     if kind == "payee":
         conn.execute("DELETE FROM rename_stats")
-    conn.execute("DELETE FROM %s" % dom["freq"])
     conn.execute("DELETE FROM rename_meta WHERE key=?", (dom["meta_key"],))
     if commit:
         conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# frequency snapshot
+# bootstrap from register history (an EXPLICIT action; nothing calls it on open)
 # ---------------------------------------------------------------------------
-def set_frequencies(conn, mapping, *, kind: str = "payee",
-                    commit: bool = True) -> None:
-    """Overwrite the token snapshot from ``{token: freq}`` (explicit; tests).
-
-    Entropy is left NULL -- unknown -- so ranking treats every token as pure and
-    falls back to support + first-position, which keeps hand-built fixtures
-    deterministic."""
-    dom = _DOMAINS[kind]
-    conn.execute("DELETE FROM %s" % dom["freq"])
-    conn.executemany(
-        "INSERT INTO %s(token, freq) VALUES(?,?)" % dom["freq"],
-        [(str(t).upper(), int(f)) for t, f in dict(mapping).items()],
-    )
-    if commit:
-        conn.commit()
-
-
-# The labeled corpus behind each domain's snapshot: (evidence text, label) pairs.
+# The labeled history behind each domain: (row id, evidence text, label).
 _CORPUS_SQL = {
     "payee": (
-        "SELECT memo AS txt, payee AS label FROM transactions "
+        "SELECT id, memo AS txt, payee AS label FROM transactions "
         "WHERE memo IS NOT NULL AND TRIM(memo) <> '' "
         "  AND payee IS NOT NULL AND TRIM(payee) <> '' "
         "  AND transfer_account_id IS NULL ORDER BY id ASC"
     ),
     "action": (
-        "SELECT memo AS txt, action AS label FROM investment_transactions "
+        "SELECT id, memo AS txt, action AS label FROM investment_transactions "
         "WHERE memo IS NOT NULL AND TRIM(memo) <> '' "
         "  AND action IS NOT NULL AND TRIM(action) <> '' ORDER BY id ASC"
     ),
 }
 
 
-def snapshot_stats(conn, *, kind: str = "payee", commit: bool = True) -> int:
-    """Rebuild the token snapshot -- document frequency AND label entropy -- from
-    the domain's labeled corpus. Returns the number of distinct tokens.
-
-    Entropy is H(label | token) over the corpus: 0 for a token that always
-    co-occurs with one label (maximally discriminating -- ranks first however
-    frequent it is), rising as the token spreads across labels. This is the
-    partition the ranking sorts by; the trie itself stays an online learner, so
-    like the old frequency snapshot this is refreshed at bootstrap, not on every
-    learn -- queries tolerate drift because the walk is by token presence."""
-    import math
-
-    dom = _DOMAINS[kind]
-    freq: dict = {}
-    labels: dict = {}
-    for r in conn.execute(_CORPUS_SQL[kind]):
-        for tok in set(normalize_tokens(r["txt"])):
-            freq[tok] = freq.get(tok, 0) + 1
-            d = labels.setdefault(tok, {})
-            d[r["label"]] = d.get(r["label"], 0) + 1
-    import math as _m
-    rows = []
-    for tok, f in freq.items():
-        d = labels[tok]
-        n = sum(d.values())
-        h = -sum((v / n) * _m.log2(v / n) for v in d.values()) if n else 0.0
-        rows.append((tok, f, h))
-    conn.execute("DELETE FROM %s" % dom["freq"])
-    conn.executemany(
-        "INSERT INTO %s(token, freq, entropy) VALUES(?,?,?)" % dom["freq"], rows
-    )
-    if commit:
-        conn.commit()
-    return len(rows)
-
-
-def snapshot_frequencies(conn, *, commit: bool = True) -> int:
-    """Back-compat alias: rebuild the PAYEE snapshot (now with entropy)."""
-    return snapshot_stats(conn, kind="payee", commit=commit)
-
-
-# ---------------------------------------------------------------------------
-# bootstrap from register history
-# ---------------------------------------------------------------------------
 def bootstrap(conn, *, force: bool = False) -> int:
-    """Replay accepted renames from register history into the tree (idempotent).
+    """Replay register history into the PAYEE example log (idempotent).
 
-    A posted, non-transfer transaction pairs a raw ``memo`` with a chosen
-    ``payee`` -- one accepted rename to replay. Builds the frequency snapshot
-    first (so ranking reflects the real corpus), then learns each pair oldest
-    first. Guarded by a meta flag: a second call is a no-op unless ``force``.
-    Returns the number of renames replayed.
+    Every posted non-transfer transaction pairs a ``memo`` with a ``payee``.
+    That is an accepted rename only for DOWNLOADED rows -- for hand-entered and
+    QIF-imported history the memo is a note the user typed -- which is why the
+    app no longer calls this on open. It remains for an explicit seed. Guarded
+    by a meta flag; returns the number of rows replayed.
     """
     return _bootstrap_kind(conn, "payee", force=force)
+
+
+def bootstrap_actions(conn, *, force: bool = False) -> int:
+    """Replay investment history (memo -> action the user kept) into the
+    ACTION example log (idempotent, own meta flag)."""
+    return _bootstrap_kind(conn, "action", force=force)
 
 
 def _bootstrap_kind(conn, kind: str, *, force: bool = False) -> int:
     dom = _DOMAINS[kind]
     if not force and _meta_get(conn, dom["meta_key"]) == "1":
         return 0
-    snapshot_stats(conn, kind=kind, commit=False)
-    rows = conn.execute(_CORPUS_SQL[kind]).fetchall()
     n = 0
-    for r in rows:
-        if learn(conn, r["txt"], r["label"], kind=kind, commit=False):
+    for r in conn.execute(_CORPUS_SQL[kind]).fetchall():
+        if learn(conn, r["txt"], r["label"], kind=kind, txn_id=int(r["id"]),
+                 commit=False):
             n += 1
     _meta_set(conn, dom["meta_key"], "1", commit=False)
     conn.commit()
     return n
 
 
-def bootstrap_actions(conn, *, force: bool = False) -> int:
-    """Replay register history into the ACTION tree (idempotent) -- every posted
-    investment row pairs a source description with the action the user kept,
-    which is one accepted mapping to replay. 5,619 such rows in the reference
-    ledger reach 88% correct auto-mapping before the first manual correction."""
-    return _bootstrap_kind(conn, "action", force=force)
-
-
-# Bumped whenever the RANKING algorithm changes shape. A trie's paths are laid
-# down in ranking order and walked in ranking order, so a tree built under one
-# ranking is silently unreachable under another -- after the entropy rewrite, a
-# ledger's existing payee tree answered LEAVE for descriptions it had learned
-# hundreds of times. The version marker forces a one-time rebuild from register
-# history, which loses nothing: history IS the training set.
-RANKING_VERSION = "2"
-
-
 def ensure_bootstrapped(conn) -> int:
-    """Run both bootstraps once; a no-op after the first time. Cheap to call on
-    every app launch (two meta lookups once the flags are set). A ranking
-    algorithm change rebuilds both trees from history, once."""
-    if _meta_get(conn, "ranking_version") != RANKING_VERSION:
-        clear(conn, kind="payee", commit=False)
-        clear(conn, kind="action", commit=False)
-        n = bootstrap(conn, force=True) + bootstrap_actions(conn, force=True)
-        _meta_set(conn, "ranking_version", RANKING_VERSION)
-        return n
+    """Run both bootstraps once; a no-op after the first time. Callable API for
+    an explicit seed-from-history action; app startup does not invoke it."""
     return bootstrap(conn, force=False) + bootstrap_actions(conn, force=False)
 
 
 # ---------------------------------------------------------------------------
-# meta: bootstrap flag
+# meta: bootstrap flags
 # ---------------------------------------------------------------------------
 def _meta_get(conn, key: str, default=None):
     row = conn.execute(
@@ -776,5 +931,3 @@ def _meta_set(conn, key: str, value, *, commit: bool = True) -> None:
     )
     if commit:
         conn.commit()
-
-

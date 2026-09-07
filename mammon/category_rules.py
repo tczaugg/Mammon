@@ -1,27 +1,37 @@
-"""Category learning rules -- the category-side twin of :mod:`mammon.payee_rules`.
+"""Hand-written ``keyword -> category_id`` rules (the Rules manager's table).
 
-When a user sets or edits the category of a NEW import-review row, Mammon should
-*learn* the association so the same bank ``statementDescription`` pre-fills that
-category on every future import -- the same "type the first few of each kind"
-gesture that payee renaming rules give for payees.
+This table used to LEARN. ``learn_from_edit`` minted a rule from a single
+correction, keyed on the first non-noise token of the raw description, matched
+GLOBALLY against every merchant. Replayed over a real first year it fired on 67%
+of rows and was wrong on 26% of those, and half those errors proposed a category
+the payee had never carried -- a rule learned from one merchant firing on an
+unrelated one. The town in the tail of every local card swipe ("ANYTOWN", from
+Anytown UT) became a Utilities:Gas & Electric rule and then fired on Subway,
+O'Reilly, Clegg Automotive and the youth theatre.
 
-A rule is ``keyword -> category_id`` where ``keyword`` is a distinguishing,
-UPPER-CASED token (or space-joined refinement) pulled from the raw description.
-Matching, keyword extraction, and keyword-scoped refinement are shared verbatim
-with :mod:`mammon.payee_rules` (same tokenizer, same "first significant token",
-same "longer keyword wins" precedence, same whole-token guarantee), so the two
-engines behave identically -- only the stored payload (a category id vs a payee
-string) differs.
+Auto-categorization now lives in :mod:`mammon.category_tree`, a discrimination
+tree per PAYEE, where a candidate can only ever be a category that payee has
+carried. The learner here is gone and migration 57 deleted every row it had
+written, so what remains is exactly what somebody typed into the Rules manager.
 
-Design notes / contracts (mirroring payee_rules):
+That is the whole point of the purge: because nothing writes this table
+automatically any more, a rule in it is a deliberate instruction rather than a
+guess, and :func:`mammon.import_review.predict_fields` can honour it directly --
+it is not the system offering an unrelated category at the user, which is the
+thing the payee scoping exists to prevent.
 
-* Rules are GLOBAL, not per-account. ``keyword`` is UNIQUE; re-teaching the same
-  keyword overwrites its category (an edit is an update, not a duplicate).
-* A one-off correction of an auto-filled category does NOT clobber a good broad
-  rule -- :func:`learn_from_edit` learns a more specific compound keyword instead
-  (see :func:`mammon.keywords.refine_keyword`).
+Design notes / contracts:
+
+* Rules are GLOBAL, not per-account, and that is now the user's explicit choice
+  rather than an accident of learning. ``keyword`` is UNIQUE; re-teaching the
+  same keyword overwrites its category (an edit is an update, not a duplicate).
+* The tokenizer, keyword extraction and whole-token matching are shared with
+  :mod:`mammon.transfer_rules` via :mod:`mammon.keywords`, so the two stay in
+  lock-step. (``transfer_rules`` still learns; it maps statement text to an
+  ACCOUNT, a far smaller and less ambiguous target than a category.)
+* Consulted only after the payee tree declines; see ``predict_fields``.
 * Transfer rows are handled entirely by :mod:`mammon.import_review`; callers must
-  NOT apply or learn category rules for a transfer row.
+  NOT apply category rules for a transfer row.
 * Every mutator commits itself.
 """
 from __future__ import annotations
@@ -48,7 +58,6 @@ __all__ = [
     "upsert_rule",
     "update_rule",
     "delete_rule",
-    "learn_from_edit",
 ]
 
 
@@ -82,7 +91,7 @@ def apply_rules(conn, desc: str, *, context=None) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
-# management surface (list / edit / delete) + learning
+# management surface (list / edit / delete)
 # ---------------------------------------------------------------------------
 def list_rules(conn) -> list[dict]:
     """Rules for a management UI, alphabetically by keyword.
@@ -197,40 +206,6 @@ def delete_rule(conn, rule_id: int) -> None:
     """Remove a rule (management UI). Commits."""
     conn.execute("DELETE FROM category_rules WHERE id=?", (rule_id,))
     conn.commit()
-
-
-def learn_from_edit(conn, desc: str, chosen: Optional[int],
-                    *, provisional: Optional[int] = None) -> Optional[int]:
-    """Learn/refresh a rule from a user's category choice; return its id.
-
-    ``desc`` is the raw ``statementDescription``, ``chosen`` the ``category_id``
-    the user is committing, and ``provisional`` the category Mammon had predicted
-    (possibly already rule-applied). Learns nothing (returns ``None``) when the
-    chosen category is ``None`` (the user left it blank), equals the provisional
-    (no correction happened), or no keyword can be extracted.
-
-    Keyword-scoped refinement (using :func:`mammon.keywords.refine_keyword`): when
-    the wrong ``provisional`` came from an existing broad rule, a more specific
-    compound keyword is learned instead of overwriting that rule.
-    """
-    if chosen is None:
-        return None
-    picked = int(chosen)
-    if provisional is not None and picked == int(provisional):
-        return None
-    if provisional is not None:
-        matched = match_rule(desc, load_rules(conn))
-        if (matched is not None
-                and int(matched["category_id"]) == int(provisional)
-                and int(provisional) != picked):
-            refined = refine_keyword(desc, matched["keyword"])
-            if refined:
-                return upsert_rule(conn, refined, picked, compound=True)
-            # No distinguishing token: fall through and overwrite the broad rule.
-    keyword = extract_keyword(desc)
-    if not keyword:
-        return None
-    return upsert_rule(conn, keyword, picked)
 
 
 def note_applied(conn, rule_id: int) -> None:

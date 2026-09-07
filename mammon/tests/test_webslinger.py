@@ -8,7 +8,7 @@ real payload.
 """
 from __future__ import annotations
 
-from mammon import downloads
+from mammon import downloads, webslinger
 from mammon.webslinger import (
     FakeWebSlingerClient, RunResult, ScriptSchema, download_readiness, mcp_runner,
     preflight_download,
@@ -492,3 +492,51 @@ def test_download_failed_error_mentions_keycocoon():
     with pytest.raises(downloads.DownloadFailedError) as exc:
         downloads._require_output(downloads.RunOutput(), "S")
     assert "keyCocoon" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# payload extraction: a script's OTHER arrays are not transaction rows
+# ---------------------------------------------------------------------------
+def test_a_lookup_table_beside_the_rows_is_not_gathered():
+    """Regression (the user, on a fresh reload): eleven blank lines at the top
+    of the review list.
+
+    The America First script's own description says "The subAccountList maps
+    shortName to accountId", and it returns one transaction array per
+    sub-account. The gather-every-list fallback concatenated the lookup table
+    with the rows, so 11 ``{"id": ..., "shortName": ...}`` entries became 11
+    review rows with no date, no amount and no text. The key name is per-bank,
+    so only the row SHAPE can be tested.
+    """
+    payload = {"output_data": {
+        "subAccountList": [{"id": 6239395, "shortName": "Household Checking"},
+                           {"id": 5896620, "shortName": "Checking"}],
+        "Checking": [
+            {"transactionId": "A1", "postedDate": "2026-09-02",
+             "amount": "42.10", "isDebit": True,
+             "statementDescription": "COSTCO WHSE #1118"},
+        ]}}
+    rows = webslinger._extract_records(payload)
+    assert [r["transactionId"] for r in rows] == ["A1"]
+    assert all("shortName" not in r for r in rows)
+
+
+def test_a_payload_of_only_a_lookup_table_yields_no_records():
+    """...and a run that returned ONLY the lookup table has no data at all,
+    rather than looking like eleven successful rows."""
+    assert webslinger._extract_records(
+        {"output_data": {"subAccountList": [{"id": 1, "shortName": "Checking"}]}}
+    ) is None
+
+
+def test_named_row_arrays_are_still_gathered():
+    """The fallback must keep doing its job: a script that named its array gets
+    its rows, and several such arrays are still concatenated."""
+    payload = {"output_data": {
+        "shareSavings": [{"postedDate": "2026-09-01", "amount": "1.00",
+                          "statementDescription": "DIVIDEND"}],
+        "checking": [{"postedDate": "2026-09-02", "amount": "2.00",
+                      "statementDescription": "POS PURCHASE"}]}}
+    rows = webslinger._extract_records(payload)
+    assert len(rows) == 2
+    assert {r["statementDescription"] for r in rows} == {"DIVIDEND", "POS PURCHASE"}

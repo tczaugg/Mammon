@@ -361,6 +361,21 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   `category_rules` is what the user typed into the Rules manager, so it is
   honoured directly when the payee tree declines -- an explicit instruction,
   not the system guessing.
+- **Two votes fill; QuickFill covers one.** `category_tree.MIN_COUNT` is 2,
+  the same floor as a rename (the 4 it inherited was compensating for the old
+  trie's resetting counts). Below that, once the payee is SETTLED -- filled by
+  the rename tree or supplied by the source -- `predict_fields` asks the
+  register's own QuickFill (`categorize.quickfill`, this account's row
+  preferred) what it would pre-enter for that payee typed by hand, so a payee
+  the ledger has categorized for years fills on its first download. Typing the
+  payee already did this; an auto-filled payee must not do worse. Withheld only
+  when review history has shown the payee to be a catalogue (coherence below
+  `PAYEE_COHERENCE` on at least `MIN_COUNT` votes). The accepted category is
+  recorded as a vote whichever source supplied it. Measured over the older
+  ledger's 599 categorized accepts, replayed cold: 294 fills, 249 right; the
+  floor at 2 versus 4 adds 10 right fills and no wrong ones, and the errors
+  that remain sit on well-corroborated nodes where the user's own
+  categorization changed over the years.
 
 ### 5.6 Import (see Section 6 for the strategy)
 - One-time migration of the full ~40-year Quicken 2017 history into Mammon's DB.
@@ -1773,12 +1788,16 @@ direction and the Portfolio totals never move.
   seed-from-history action, but nothing invokes it on open.
 - **Offering a name and applying it are separate gates.**
   `import_review.RENAME_MIN_SIGHTINGS` (2) decides whether a payee appears in the
-  dropdown; `rename_tree.HIGH_CONFIDENCE_MIN_COUNT` (4) decides whether it is
-  written into the cell. Below the second the register shows the raw statement
-  description with the candidates one click away; below the first the name is not
-  shown at all. A payee chosen once is neither filled nor offered -- the gate used
-  to cover the AUTO tier only, so a contested node pre-filled its top candidate
-  from a single sighting.
+  dropdown; `rename_tree.MIN_FILL` (2) decides whether it is written into the
+  cell, and applies to the matched leaf -- the same text renamed twice -- not to
+  the payee overall. A payee renamed twice on other text is offered for a new
+  variant but not applied to it. A payee chosen once is neither filled nor
+  offered.
+- **Prior register rows never fill the payee.** Rows that never went through
+  review carry memos the user typed, and matching a download against them is
+  how a 1998 note of "deposit" once renamed `MOBILE DEPOSIT`. Those rows still
+  back-fill the CATEGORY when they agree (`PRIOR_TXN_MIN_ROWS`,
+  `PRIOR_TXN_PURITY`) and the resolved payee is theirs.
 
 ### 5.5i Discarding a review row removes it
 - **Discard means "not now", not "never again".** Discarding used to TOMBSTONE:
@@ -1830,13 +1849,29 @@ direction and the Portfolio totals never move.
   are looking at the right row.
 
 ### 5.5d Accepting a review in bulk
-- **A MATCH merges into the existing line; it never overwrites a user-entered
-  field.** Accepting a MATCHING review row — one at a time or via Accept All —
-  reconciles the register (or scheduled/loan placeholder) line it matched: it
-  marks that line cleared and stamps the source's transaction id *only* when the
-  line had none. It leaves the date, amount, payee, memo and category the user
-  entered by hand untouched, so a download can never overwrite a manually-entered
-  date with the bank's posting date — the failure users report of other tools.
+- **A MATCH merges into the existing line. The bank owns the AMOUNT; the
+  register owns everything else.** Accepting a MATCHING review row — one at a
+  time or via Accept All — reconciles the register (or scheduled/loan
+  placeholder) line it matched: it marks that line cleared, stamps the source's
+  transaction id *only* when the line had none, and **adopts the downloaded
+  amount**. It leaves the date, payee, memo, category and SPLIT the user entered
+  untouched, so a download can never overwrite a manually-entered date with the
+  bank's posting date — the failure users report of other tools.
+- The amount is the exception because a matched line's own figure is often a
+  FORECAST: a scheduled pre-entry carries the finance calendar's six-month
+  median, a loan pre-entry an amortization figure whose escrow may have moved
+  since. That staleness is exactly why such a row needed a tolerant or hand-made
+  match, and leaving it meant the register kept a number that never happened.
+  The file-import path already merged this way (`merge_import_into_placeholder`:
+  "adopt the actual date and amount… the pre-entry keeps its own payee and
+  category").
+- A split whose lines no longer sum to the adopted amount is allowed and stays
+  visible — that sum invariant was deliberately removed so a row carrying a
+  discrepancy can still be edited, and the discrepancy is the signal that the
+  loan or the schedule needs updating.
+- Undo restores it: `review_items.prior_amount` (migration 59) records the line's
+  own figure, and both `unmatch_one` and `undo_all_matches` put it back through
+  one shared helper, alongside fitid/cleared/reconciled.
   `import_review.accept_match` is the sole writer of this path, and the review
   panel makes the policy inspectable: a matched row's Status cell states, on
   hover, what merges versus what is preserved. Regression:
@@ -1900,32 +1935,67 @@ direction and the Portfolio totals never move.
   invented for it.
 
 ### 5.5b Learned description mapping (payees and investment actions)
-- One engine, two domains (`rename_tree._DOMAINS`): statement description →
-  payee, and a source's raw activity text → Quicken investment action. Both are
-  importer vocabulary guesses that only the user's own corrections can make
-  right; every review accept is one correction, replayed by the tree for the
-  next import. Bootstrapped from register history (8,096 payee pairs, 5,619
-  action pairs in the reference ledger), so an existing install starts warm.
-- Tokens are partitioned by **conditional label entropy** measured over that
-  history — a token that always co-occurs with one label ranks first however
-  frequent it is; a token spread across many labels ranks last however rare.
-  Mixed letter+digit tokens not seen twice (ISINs, auth codes, masked ids — 87%
-  single-occurrence in the real corpus) are dropped as per-transaction noise.
-  Replayed online over the ledger this cut wrong auto-renames from 4.2% to 1.8%
-  at identical coverage (silence 38% → 23%); the action domain reaches 88%
-  correct auto-mapping (4.2% wrong) against 76%/8.5% under frequency ranking.
+- One engine, two domains (`rename_tree._DOMAINS`): statement description
+  and/or the source's own payee field → payee, and a source's raw activity text
+  → Quicken investment action. Both are importer vocabulary guesses that only
+  the user's own corrections can make right.
+- **The engine is a decision tree rebuilt from the user's accepted corrections
+  at every prediction** (modelled on webSlinger's `selector_tree`, features
+  replaced by tokens, branching one). Nothing is learned online. The corpus is
+  `rename_examples` (schema v60): one row per accepted review row — source
+  text, supplied payee field, the label chosen, and the id of the transaction
+  the accept created. The label is read **live** through that id, so a payee
+  edited in the register or an undone accept changes the next answer without
+  re-teaching. Review retention never touches the table, so a rename taught
+  from a review row purged a year later is not forgotten.
+- **Only corrections train the payee domain.** A row accepted with the text it
+  was shown with (the description, its title-cased default, or the supplied
+  payee) is not a rename and is not counted. A bulk Accept All logs only a row
+  whose payee was actually renamed by an applied fill. The action domain counts
+  every accept: a kept importer guess is a confirmation.
+- **The user's display rule.** The register shows the source's payee field if
+  the record carried one, else the bank's description (title-cased when the
+  feed shouts), until the same text has been renamed **at least twice**
+  (`rename_tree.MIN_FILL`) and the matched leaf names ONE payee — then that
+  payee fills the cell. A leaf with several payees is a dropdown, never a fill.
+- Answering a row: (1) candidates are the examples sharing a *distinctive*
+  token — a non-boilerplate token carried by at most
+  `MAX_LABELS_PER_TOKEN` (5) payees — plus exact token-set matches (how an
+  all-boilerplate `MOBILE DEPOSIT` finds its own history); (2) a binary
+  decision tree on token presence is grown over them by information gain;
+  (3) the leaf's leading label is **generalized the way webSlinger
+  generalizes an array selector over its fields** (the user's rule): each
+  example is a feature set — every token, the token before it, the token
+  after it, the same over the payee field, and "no payee field" as a value —
+  and the pattern keeps a feature only when every example has it, with its
+  value when they agree, as a bare "something here" slot when they differ,
+  dropped when any example lacks it. `June rent` and `July rent` renamed
+  Tenant generalize to "a token, then RENT": `August rent` fits, a bare
+  `rent` does not until it is named too, after which anything with RENT
+  fits. A pattern from identical rows stays exact, so a youth theater in
+  Anytown does not inherit Walmart's exact rows on the town's tokens. A
+  label spanning unrelated formats (Amazon) is split by shape first so its
+  pattern pins a merchant token. (4) the leading label fills when the row
+  fits, ≥ `MIN_FILL` (2) of its examples back it, and it holds ≥
+  `FILL_PURITY` (0.9) of the leaf; else the leaf's labels and the other
+  candidates (each with ≥ `RENAME_MIN_SIGHTINGS` sightings) go in the
+  dropdown and the raw text stays.
+- Measured, predicting each accepted row before learning it: on the fresh
+  ledger (42 corrections) 20 fills, 0 wrong, first fill on the third sighting
+  of every recurring payee (the online trie: 15 fills, 1 wrong, on the fourth);
+  on the older ledger (679 rows) 369 fills at 98.6% precision with the right
+  answer in the dropdown for 71 of the 138 unfilled rows (the trie: 255 fills
+  at 96.9%, 58 of 71). The five misses: two payees the user spelled two ways,
+  one ambiguous deposit, two first sightings. Suggest costs under a
+  millisecond.
 - **A supplied payee field is evidence, not a gate.** Its tokens join the
-  description's in one ranked pool; the field stands verbatim unless a rename
-  corroborated `min_count` times over a ≥90%-pure node overrides it (the
-  truncated-field case — `Dividend Earned For Period O` — is exactly such an
-  override; the Venmo counterparty case never reaches purity and stands).
-- Auto-apply needs the domain's `min_count` corroborating examples (payee 4,
-  action 2), node purity ≥ 0.9, and the confidence floor; below that the row
-  shows a dropdown or the raw text. Importer `action_map` tables are being
-  retired in favour of this learning — Interactive Brokers ships with none.
-- `RANKING_VERSION` rebuilds both trees from history, once, whenever the
-  ranking algorithm changes shape: a trie built under one ranking is silently
-  unreachable under another. Rebuild of 13,655 pairs measures ~0.4s.
+  description's in the query and its features join the pattern, so the
+  truncated-field case (`Dividend Earned For Period O`) is renamed once
+  corrected twice, while the Venmo counterparty case is not: a pattern learned
+  from description-only rows requires the absence of a payee field, and a
+  pattern learned under one counterparty's name requires that name.
+- Importer `action_map` tables are being retired in favour of this learning —
+  Interactive Brokers ships with none.
 
 ### 5.5g Rule conditions and the Rules Manager (roadmap item 10)
 The keyword engines above learn a bare `keyword -> category` / `keyword ->

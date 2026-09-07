@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from mammon import crashlog, db, ledger, rename_tree
+from mammon import crashlog, db, ledger
 
 
 def sample_data(conn) -> None:
@@ -132,10 +132,19 @@ def _open_db(db_path):
     # diagnosable record next to the database instead of vanishing.
     crashlog.install_excepthook(crashlog.crash_log_path(db_path))
     conn = db.init_db(db_path)
-    # Seed the payee-rename tree from existing register history once (a no-op on
-    # every launch after the first) so learning survives the migration off the
-    # old keyword rules table.
-    rename_tree.ensure_bootstrapped(conn)
+    # The learned trees are NOT seeded here. Opening a ledger used to bootstrap
+    # the rename tree from register history, replaying every posted row's
+    # memo->payee pair as though it were an accepted rename. That premise only
+    # holds for downloaded rows, where the memo IS the bank's text; for
+    # hand-entered and QIF-imported history the memo is a note the USER typed. A
+    # 1998 memo of "deposit" on a Foothill Place row therefore taught the tree
+    # that MOBILE DEPOSIT means Foothill Place -- a payee never chosen in any
+    # review -- in a ledger deliberately started fresh.
+    #
+    # Both trees now learn only from what the user actually accepts in review.
+    # ``rename_tree.ensure_bootstrapped`` / ``category_tree.ensure_bootstrapped``
+    # remain as callable API for an explicit "seed from history" action, but
+    # nothing invokes them on open. (By request.)
     return conn
 
 

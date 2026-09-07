@@ -19,7 +19,8 @@ from PyQt5.QtCore import (QAbstractTableModel, QDate, QModelIndex, Qt, QTimer,
                           pyqtSignal)
 from PyQt5.QtGui import QBrush, QColor
 
-from mammon import categorize, crypto, import_review, investments, ledger
+from mammon import (categorize, category_tree, crypto, import_review,
+                    investments, ledger)
 from mammon.ui import style
 
 
@@ -591,24 +592,34 @@ class RegisterModel(QAbstractTableModel):
         them (see :func:`import_review.save_new`)."""
         m = entry.mapped
         amt = m.amount_cents
-        payee, cat_id = import_review.predict_fields(self.conn, m)
+        payee, cat_id = import_review.predict_fields(self.conn, m,
+                                                     account_id=self.account_id)
         # Stash the prediction in its OWN field. Writing it to ``m.payee`` wrote
         # through to the review entry the panel is rendering, so selecting a row
         # silently rewrote the review list's own Payee cell -- the review list is
         # ground truth and must never be edited by a prediction.
         m.predicted_payee = payee
         m.category_id = cat_id
-        if m.is_transfer:
-            # A transfer's Category cell holds the linked account as '[Account]'.
-            # Pre-fill a learned transfer account (by request) so accepting
-            # keeps the double-entry; fall back to the parsed counterparty name
-            # only when it resolves to a real account.
-            taid = import_review.predict_transfer_account(self.conn, m)
-            if taid is None and m.transfer_account:
-                taid = import_review.transfer_account_id_for_name(
-                    self.conn, f"[{m.transfer_account}]")
+        # A transfer's Category cell holds the linked account as '[Account]'.
+        # Pre-fill a learned transfer account (by request) so accepting keeps the
+        # double-entry; fall back to the parsed counterparty name only when it
+        # resolves to a real account.
+        #
+        # The learned rule is consulted for EVERY row, not only ones the parser
+        # called a transfer. It is learned for text the parser does not
+        # recognise -- "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD" -- so gating the
+        # lookup on the parser's verdict made it unreachable for the very rows it
+        # was taught from, and the account had to be picked by hand every time.
+        taid = import_review.predict_transfer_account(self.conn, m)
+        if taid is None and m.is_transfer and m.transfer_account:
+            taid = import_review.transfer_account_id_for_name(
+                self.conn, f"[{m.transfer_account}]")
+        if taid is not None:
             m.transfer_account_id = taid
             cat_text = import_review.account_label_for_id(self.conn, taid)
+        elif m.is_transfer:
+            m.transfer_account_id = None
+            cat_text = import_review.account_label_for_id(self.conn, None)
         else:
             cat_text = import_review.category_name_for_id(self.conn, cat_id)
         self.beginResetModel()
@@ -664,9 +675,22 @@ class RegisterModel(QAbstractTableModel):
         return -1
 
     # ---- category picker choices -----------------------------------------
-    def category_choices(self) -> list[str]:
+    def category_choices(self, row=None) -> list[str]:
         """Real category paths PLUS a ``[Other Account]`` entry per other
-        account, so selecting one turns the row into a transfer."""
+        account, so selecting one turns the row into a transfer.
+
+        With a ``row``, the categories THIS row's payee has actually carried are
+        lifted to the top, most likely first (:mod:`mammon.category_tree`); the
+        full alphabetical list follows underneath so any category is still
+        reachable. That ranking is the other half of the auto-categorizer: when
+        the tree is not confident enough to fill the category in, it still knows
+        which few categories are plausible for this merchant, and the picker is
+        where that knowledge is worth something. Nothing is REMOVED -- a payee's
+        first-ever category has to come from the full list.
+
+        ``row`` is optional so the validation callers (``category_matches``, the
+        new-category guard) keep getting the plain list they compare against.
+        """
         self._transfer_targets = {}
         transfers = []
         for a in ledger.list_accounts(self.conn, include_closed=True):
@@ -676,7 +700,48 @@ class RegisterModel(QAbstractTableModel):
             transfers.append(label)
             self._transfer_targets[label] = a["id"]
         cats = [c["path"] for c in ledger.list_categories(self.conn)]
-        return transfers + cats
+        promoted = self._promoted_category_paths(row)
+        if not promoted:
+            return transfers + cats
+        rest = [c for c in cats if c not in promoted]
+        return promoted + transfers + rest
+
+    def _promoted_category_paths(self, row) -> list[str]:
+        """Category paths to lift to the top of the picker for ``row``.
+
+        For the PENDING review row the ids come straight off the mapped row --
+        :func:`import_review.predict_fields` already computed and stashed them,
+        so the picker cannot disagree with the prediction that populated (or
+        deliberately did not populate) the cell. For a posted row they are
+        recomputed from the payee and its memo.
+        """
+        if row is None:
+            return []
+        ids: list = []
+        try:
+            if self._pending is not None and row == self.pending_row():
+                m = self._pending["entry"].mapped
+                ids = list(getattr(m, "category_candidates", None) or [])
+                if not ids:
+                    payee = getattr(m, "predicted_payee", None) or m.payee
+                    desc = category_tree.source_text(
+                        m.memo, m.payee,
+                        bool(getattr(m, "payee_supplied", False)))
+                    ids = [c for c, _ in
+                           category_tree.ranked_categories(self.conn, payee, desc)]
+            else:
+                txn = self.txn_at(row)
+                if txn is not None and txn["payee"]:
+                    ids = [c for c, _ in category_tree.ranked_categories(
+                        self.conn, txn["payee"], txn["memo"] or "")]
+        except Exception:
+            return []                      # a picker must never fail to open
+        out: list[str] = []
+        for cid in ids:
+            path = ledger.category_path(self.conn, cid)
+            if path and path not in out:
+                out.append(path)
+        return out
 
     def transfer_target(self, label):
         """Account id if ``label`` names a '[Account]' transfer target, else None."""

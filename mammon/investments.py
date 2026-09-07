@@ -115,6 +115,23 @@ _CASH_ZERO_ACTIONS = {
     "stksplit", "shrsin", "shrsout", "addshares", "removeshares", "stockdividend",
 }
 
+# Actions that CONTRIBUTE capital to (or WITHDRAW it from) a specific security
+# position, as opposed to income (dividends/interest) or price movement. A buy
+# deploys cash into the position; a sell returns it. The X-funded twins (BuyX /
+# SellX) do the same with the cash arriving/leaving via a transfer, so they count
+# too. Reinvested dividends, stock splits and pure share transfers are NOT here: a
+# reinvestment is funded by income already earned (its added value is return, not
+# new capital), and a split/transfer moves shares without a cash contribution.
+# This vocabulary mirrors Quicken's BUY*/SELL* actions and is kept beside
+# _CASH_OUT_ACTIONS so the two stay in step. It is the "net contributions" term of
+# a period-bounded gain (see :func:`net_contributions_by_symbol`).
+_ACQUIRE_ACTIONS = {
+    "buy", "buybond", "buymf", "buyother", "buystock", "buyx",
+}
+_DISPOSE_ACTIONS = {
+    "sell", "sellbond", "sellmf", "sellother", "sellstock", "sellx",
+}
+
 
 def _cash_effect(action, amount) -> int:
     a = (action or "").strip().lower().replace(" ", "")
@@ -1900,6 +1917,62 @@ def delete_investment(conn, txn_id: int) -> bool:
     _invalidate_holdings_checkpoints_from(conn, prior["account_id"], prior["date"])
     conn.commit()
     return True
+
+
+def holding_values_at(conn, account_id: int, as_of: Optional[str] = None,
+                      prices: Optional[dict] = None) -> dict:
+    """``{symbol: market_value_cents}`` for every security the account HELD on
+    ``as_of`` -- the shares ACTUALLY held that day (the replay is rewound to the
+    date, unlike :func:`security_positions`, which freezes the share count at the
+    latest transaction and only caps the price), valued at the price recorded
+    on/before ``as_of``.
+
+    Symbols with no shares held, or with no price available, are omitted (their
+    value is zero or unknown). This is the true point-in-time valuation a
+    period-bounded gain needs for ``value_at(start)``; ``prices`` overrides the
+    recorded close for the named symbols (used only on the 'end' side, where an
+    injected quote applies -- a start-date value always reads recorded history)."""
+    positions = _replay_positions(conn, account_id, as_of=as_of)
+    out: dict = {}
+    for sym, pos in positions.items():
+        if pos.qty == 0:
+            continue
+        price = _resolve_price(conn, sym, as_of, prices, account_id)
+        if price is not None:
+            out[sym] = _cents(pos.qty * price * _HUNDRED)
+    return out
+
+
+def net_contributions_by_symbol(conn, account_id: int, start: str,
+                                end: str) -> dict:
+    """``{symbol: net cents}`` contributed to each security over the window
+    ``(start, end]`` -- cash paid for share PURCHASES minus cash received for share
+    SALES. Positive means net capital was put into the position during the window.
+
+    The window is start-EXCLUSIVE so a transaction dated on ``start`` belongs to
+    the starting position (``value_at(start)`` already reflects it), not the
+    window's flows -- the same lower-exclusive boundary the checkpoint replay uses.
+    Dividend/interest income and reinvestments are deliberately NOT counted (they
+    are return, not contributed capital, and a reinvestment nets to zero cash), so
+    ``period_gain = value_at(end) - value_at(start) - net_contributions`` isolates
+    the security's gain measured from the period start -- matching how the report's
+    Gain/Loss column already excludes income (see
+    :mod:`mammon.reports.investment_performance`)."""
+    out: dict = {}
+    rows = conn.execute(
+        "SELECT symbol, action, amount FROM investment_transactions "
+        "WHERE account_id=? AND date>? AND date<=? "
+        "AND symbol IS NOT NULL AND symbol<>''",
+        (account_id, start, end),
+    ).fetchall()
+    for r in rows:
+        a = (r["action"] or "").strip().lower().replace(" ", "")
+        amt = abs(int(r["amount"] or 0))
+        if a in _ACQUIRE_ACTIONS:
+            out[r["symbol"]] = out.get(r["symbol"], 0) + amt
+        elif a in _DISPOSE_ACTIONS:
+            out[r["symbol"]] = out.get(r["symbol"], 0) - amt
+    return out
 
 
 def investment_cash(conn, account_id: int, as_of: Optional[str] = None) -> int:
