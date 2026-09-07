@@ -286,6 +286,14 @@ class ReviewEntry:
     state: str = "pending"                 # pending | accepted | discarded
     accepted_txn_id: Optional[int] = None  # register row an accepted NEW created
     batch_id: Optional[int] = None         # the import operation it arrived in
+    # TRANSIENT, never persisted: the Amazon per-item split allocation this row
+    # carries (an ``amazon_items.ChargeAllocation``) when the entry came from
+    # :func:`build_amazon_review`. Amazon invoice data is NEVER stored (SRD A6):
+    # the review is rebuilt from the Downloads file on demand, so this lives only
+    # in memory for the duration of the session. ``persist_entries`` neither reads
+    # nor writes it; its presence is what routes accept through the Amazon
+    # split-writing path instead of the single-category one.
+    amazon_alloc: Optional[object] = None
 
     @property
     def is_actioned(self) -> bool:
@@ -2346,3 +2354,213 @@ def set_manual_match(conn, entry: ReviewEntry, matched_txn_id: int) -> None:
                    label=LABEL_MATCHING, matched_txn_id=int(matched_txn_id),
                    match_method="manual")
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Amazon invoice itemization (SRD 6.7 / requirements A6, A8)
+# ---------------------------------------------------------------------------
+# Loading a time-tagged Amazon invoice JSON turns each order into a review row
+# for the CARD register: the per-item split proposed by
+# :mod:`mammon.importers.amazon_items` (one leg per item, tax and any gift-card /
+# reward-point offset spread PROPORTIONALLY so the legs net to the charged amount
+# in exact integer cents), classified NEW when no card charge matches it yet, or
+# MATCHING when the charge is already an accepted register line -- in which case
+# accepting REPLACES that line's splits/categories rather than adding a duplicate.
+#
+# Nothing here is persisted: Amazon invoice data is NEVER stored (requirement A6).
+# The file is re-loadable across sessions, and re-loading after an accept simply
+# re-classifies the now-existing charge as MATCHING. The review lives only in
+# memory (:attr:`ReviewEntry.amazon_alloc`); ``persist_entries`` is never called
+# for it, and no table records the invoice. This module stays the SOLE writer of
+# the review flow and :mod:`ledger` the SOLE writer of transaction rows -- Amazon
+# accepts funnel through :func:`ledger.add_transaction` / :func:`ledger.set_splits`,
+# adding no second write path.
+
+#: Payee written onto an Amazon-sourced charge and used (via LIKE) to gate a
+#: match: only an already-Amazon register line may absorb an invoice's splits, so
+#: an unrelated same-day, same-amount charge is never silently itemized.
+AMAZON_PAYEE = "Amazon"
+AMAZON_PAYEE_LIKE = "%amazon%"
+
+
+def _amazon_default_category(conn) -> str:
+    """The default item-leg category (requirement A1): 'household', then the
+    user's own past-Amazon categories, most-used first. Ordering only -- it never
+    overrides a learned rule and proposes nothing the data has not shown."""
+    from mammon.importers import amazon_items
+    order = amazon_items.default_category_order(
+        amazon_items.amazon_categories_from_history(conn))
+    return order[0] if order else ""
+
+
+def _order_memo(order) -> str:
+    """A one-line human summary of an order's items for the review row's memo."""
+    items = [str(i).strip() for i in (getattr(order, "items", None) or [])
+             if str(i).strip()]
+    if not items:
+        return "Amazon order"
+    head = "; ".join(items[:3])
+    if len(items) > 3:
+        head += " (+%d more)" % (len(items) - 3)
+    return head
+
+
+def _find_amazon_match(conn, account_id, date_iso, amount_cents, window_days,
+                       claimed):
+    """The id of an already-accepted Amazon card charge this order reconciles
+    against, or ``None``.
+
+    Mirrors :func:`_find_match`'s date+amount tier -- same signed cents, within
+    +/- ``window_days`` of the order date, closest date first -- and ADDS the
+    payee gate requirement A8 asks for: the register line must already read as
+    Amazon (``payee LIKE '%amazon%'``). A line already claimed by an earlier
+    order in this same load is skipped, and a whole-transaction transfer is
+    excluded (a transfer cannot be split)."""
+    if not date_iso:
+        return None
+    lo = record.iso_shift(date_iso, -window_days)
+    hi = record.iso_shift(date_iso, window_days)
+    rows = conn.execute(
+        "SELECT id FROM transactions "
+        "WHERE account_id=? AND amount=? AND date BETWEEN ? AND ? "
+        "AND transfer_account_id IS NULL "
+        "AND payee IS NOT NULL AND LOWER(payee) LIKE ? "
+        "ORDER BY ABS(julianday(date) - julianday(?)), id",
+        (account_id, int(amount_cents), lo, hi, AMAZON_PAYEE_LIKE.lower(),
+         date_iso),
+    ).fetchall()
+    for row in rows:
+        if int(row[0]) not in claimed:
+            return int(row[0])
+    return None
+
+
+def build_amazon_review(conn, account_id, path, *, card_number="",
+                        window_days=DEFAULT_WINDOW_DAYS):
+    """Classify a time-tagged Amazon invoice file into in-memory review rows.
+
+    Reads the Downloads file at ``path`` on demand (nothing is stored --
+    requirement A6), turns each order that reached the card into one review row
+    for ``account_id``, and classifies it NEW or MATCHING an already-accepted
+    Amazon charge (requirement A8, via :func:`_find_amazon_match`). Each returned
+    :class:`ReviewEntry` carries its proposed per-item split (``amazon_alloc``);
+    accepting it later writes those legs through :func:`accept_amazon_new` /
+    :func:`accept_amazon_match`.
+
+    Orders that never hit the card (fully covered by a gift-card balance, so
+    ``charged_cents == 0``) and refunds (out of scope -- requirement A7) create
+    no card review row. A single order is treated as ONE charge equal to its
+    invoice Grand Total; splitting one order across several shipment charges is a
+    later phase (:func:`amazon_items.allocate_charges`)."""
+    from mammon.importers import amazon_items
+    orders = amazon_items.load_invoice_orders(path, card_number)
+    default_cat = _amazon_default_category(conn)
+    claimed: set = set()
+    entries: list = []
+    for order in orders:
+        charged = int(getattr(order, "charged_cents", 0) or 0)
+        if charged <= 0:
+            continue                    # zero-charge / non-card order: nothing to reconcile
+        d = getattr(order, "date", None)
+        date_iso = d.isoformat() if d is not None else ""
+        if not date_iso:
+            continue                    # unmatchable and uncreatable without a date
+        alloc = amazon_items.allocate_order(order, default_category=default_cat)
+        amount_cents = int(alloc.charge_cents)     # signed debit, == -charged
+        mapped = MappedRow(
+            date=date_iso,
+            amount_cents=amount_cents,
+            payee=AMAZON_PAYEE,
+            memo=_order_memo(order),
+            raw={"amazon_order_number":
+                 str(getattr(order, "order_number", "") or "")},
+        )
+        matched = _find_amazon_match(conn, account_id, date_iso, amount_cents,
+                                     window_days, claimed)
+        if matched is not None:
+            claimed.add(matched)
+            entries.append(ReviewEntry(
+                mapped=mapped, label=LABEL_MATCHING, matched_txn_id=matched,
+                match_method="date+amount", amazon_alloc=alloc))
+        else:
+            entries.append(ReviewEntry(
+                mapped=mapped, label=LABEL_NEW, amazon_alloc=alloc))
+    return entries
+
+
+def _amazon_split_lines(conn, alloc, category_ids=None) -> list:
+    """The :func:`ledger.set_splits` lines for an allocation: one dict per leg,
+    ``{category_id, amount, memo}``.
+
+    Each leg's category NAME (item legs default to 'household'; the offset legs
+    are 'gift cards' / 'reward points' -- CATEGORIES, never accounts, per
+    requirement A3/A5) is get-or-created through
+    :func:`resolve_or_create_category`, the single category writer.
+    ``category_ids`` optionally overrides per-leg category ids (a future per-item
+    picker) positionally; ``None`` in a slot falls back to the leg's own category
+    name. Amounts are the allocator's exact signed cents, passed through
+    untouched, so the legs still sum to the charge to the cent."""
+    ids = list(category_ids or [])
+    lines: list = []
+    for i, leg in enumerate(alloc.legs):
+        cid = ids[i] if i < len(ids) and ids[i] is not None else \
+            resolve_or_create_category(conn, getattr(leg, "category", "") or "")
+        lines.append({
+            "category_id": cid,
+            "amount": int(leg.amount_cents),
+            "memo": (getattr(leg, "memo", "") or None),
+        })
+    return lines
+
+
+def accept_amazon_new(conn, account_id, entry, *, category_ids=None) -> int:
+    """Post an Amazon NEW review row as a real card charge with its item splits.
+
+    Creates the charge through :func:`ledger.add_transaction` (payee 'Amazon',
+    the invoice's item summary as memo) and, when the order has more than one
+    leg, writes the per-item split through :func:`ledger.set_splits` -- the legs
+    already sum to the charge in exact cents, so nothing is fabricated. A lone-leg
+    order (one item, no offset) collapses to a plain categorised transaction,
+    since a split needs two legs. Returns the new txn id."""
+    if entry.amazon_alloc is None:
+        raise ValueError("entry carries no Amazon allocation")
+    m = entry.mapped
+    lines = _amazon_split_lines(conn, entry.amazon_alloc, category_ids)
+    if len(lines) <= 1:
+        cid = lines[0]["category_id"] if lines else None
+        return ledger.add_transaction(
+            conn, account_id, m.date, int(m.amount_cents),
+            payee=AMAZON_PAYEE, memo=(m.memo or None), category_id=cid)
+    txn_id = ledger.add_transaction(
+        conn, account_id, m.date, int(m.amount_cents),
+        payee=AMAZON_PAYEE, memo=(m.memo or None))
+    ledger.set_splits(conn, txn_id, lines)
+    return txn_id
+
+
+def accept_amazon_match(conn, entry, *, category_ids=None) -> int:
+    """Itemize the EXISTING card charge an Amazon MATCHING row points at.
+
+    Replaces that register line's splits/categories with the invoice's per-item
+    split (requirement A8) rather than inserting a duplicate -- the charge, its
+    date and its amount are the user's already-accepted line and are left
+    untouched; only the split legs change (plus the payee, if it was blank).
+    Returns the matched txn id."""
+    txn_id = entry.matched_txn_id
+    if txn_id is None:
+        raise ValueError("entry is not a MATCHING row")
+    if entry.amazon_alloc is None:
+        raise ValueError("entry carries no Amazon allocation")
+    lines = _amazon_split_lines(conn, entry.amazon_alloc, category_ids)
+    if len(lines) <= 1:
+        cid = lines[0]["category_id"] if lines else None
+        ledger.update_transaction(conn, txn_id, category_id=cid)
+    else:
+        ledger.set_splits(conn, txn_id, lines)
+    # Name a bank line that still reads as bare statement gobbledygook, but never
+    # overwrite a payee the user already chose.
+    cur = conn.execute("SELECT payee FROM transactions WHERE id=?",
+                       (txn_id,)).fetchone()
+    if cur is not None and not (cur[0] or "").strip():
+        ledger.update_transaction(conn, txn_id, payee=AMAZON_PAYEE)
+    return txn_id
