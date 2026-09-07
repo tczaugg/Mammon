@@ -2718,6 +2718,61 @@ A companion utility set (not the core ledger app):
     one. The tool filters by card, not by account, so pointing it at the other
     account's scrape picks them up.
 
+- Amazon invoice ITEMIZATION (`mammon/importers/amazon_items.py`, phase-1 core
+  IMPLEMENTED; review/UI wiring is a later phase). Where §7.2's CSV tool only
+  names the items in a memo, this turns one matched card charge into a proper
+  SPLIT - one leg per item - so each purchase lands in the right category. It is
+  a pure, offline core: it reads the webSlinger invoice report file (the
+  time-tagged JSON that lands in the user's Downloads folder, `priceAccounting`
+  schema assumed present) ON DEMAND via `amazon_invoices.load_orders` and returns
+  plain data structures. **Mammon does not store Amazon data**; the file is
+  re-loaded when needed, across sessions. Nothing here writes the ledger - the
+  legs it emits reach the register only through the review queue and
+  `mammon.ledger`, the single writer, in the later phase.
+
+  Data flow: invoice file in Downloads -> `load_invoice_orders` -> `Order`
+  records (cents fields; LIST prices index-aligned with de-duplicated item
+  titles) -> `allocate_order` / `allocate_charges` -> `ChargeAllocation`
+  (per-item split legs + offsets) -> [phase 2] review rows -> ledger.
+
+  The proportional-allocation rule (locked; integer cents throughout, no floats,
+  `ROUND_HALF_UP` at the cents boundary during money parsing):
+  - **One leg per item.** Each item's leg gets its share of the *item portion* -
+    the items' cost grossed up by tax - distributed across items by LIST PRICE
+    with **largest-remainder rounding** (ties broken by lowest index), so the item
+    legs sum to the item portion to the cent. TAX is therefore allocated
+    PROPORTIONALLY across the item legs and is never a leg of its own. The item
+    portion is `|charge| + gift_card + rewards`, because the invoice `Grand Total`
+    (the charge) is already net of the offsets. List prices weight the split but
+    are never summed to reconcile it - the charge is authoritative.
+  - **Gift card and reward points are CATEGORIES, not accounts.** A partial
+    gift-card / rewards payment adds a balancing money-IN leg categorised
+    `gift cards` / `reward points`. This is the locked override of the earlier
+    design, which modelled the offset as a transfer to a synthetic
+    `[Amazon Gift Card]` / `[Amazon Rewards]` account: **no account is ever
+    created here.** The offset legs net against the proportionally allocated item
+    legs to reach the charge. (Worked example: subtotal $80, tax $6, gift card
+    $30 -> charge -$56.00; items list $30 / $50 -> `-32.25`, `-53.75`,
+    `gift cards +30.00` -> sum `-56.00`.)
+  - **Multiple charges per order.** Amazon bills per shipment, so one order can be
+    charged several times; each charge is allocated INDEPENDENTLY from its own
+    item subset and is self-consistent to its own cents (`allocate_charges`). Which
+    shipment consumed a shared gift card is not in the scrape, so the caller
+    supplies the per-charge offset (0 by default); this core does not guess.
+  - **Exactness is the invariant.** Every allocation satisfies
+    `sum(legs) == charge` in signed integer cents; any residual (only possible
+    when list prices are missing and the fallback puts the money on one visible
+    `Amazon - unallocated` leg) is folded deterministically so the sum never
+    silently breaks.
+  - Item legs are left UNCATEGORISED for the user to fill from a dropdown ordered
+    by `default_category_order`: the fixed fallback list (`household`, `groceries`,
+    `electronics accessories`, `computer accessories`, `electronic hardware`,
+    `computer hardware`) first, then the categories the user has historically put
+    on Amazon rows (`amazon_categories_from_history`, READ-ONLY). Ordering only -
+    it overrides no learned rule and proposes nothing the data has not shown.
+  - **Refunds are out of scope** (not on an invoice; handled manually). The
+    allocator rejects a credit outright.
+
 ### 7.3 The MCP server: asking an LLM about the ledger (roadmap item 3)
 - `python -m mammon.mcp_server [--db PATH] [--transport stdio|streamable-http|sse]`
   serves the ledger over the Model Context Protocol. The tool surface is
