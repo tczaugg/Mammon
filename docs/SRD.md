@@ -208,6 +208,15 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   transaction -- Copy-from-previous-`<payee>` button and all -- whose lines are
   written by `ledger.set_splits`. An empty blank row (no date + amount) stays a
   no-op, and a transfer entered on the blank row commits but is not splittable.
+- **The split dialog's live Remainder is exact integer cents.** A leg's amount is a
+  spin box; backspacing it empty used to leave `value()` returning the LAST accepted
+  number (Qt treats the empty string as an intermediate edit, not the value 0) and
+  fire no change, so clearing a leg to drop it left the running Remainder — and the
+  uncategorized slot it lands in on save — stale by that amount (often ~$4).
+  `ui/delegates.SplitAmountSpinBox` reads a cleared box as 0 and the dialog
+  recomputes on the line edit's text change, so the Remainder is right the instant a
+  leg is cleared. All remainder math stays in signed integer cents (`ROUND_HALF_UP`
+  at the cents boundary), never floats.
 - The full-field New Transaction dialog completes and pre-enters the same way
   on leaving the Payee field; the Edit dialog completes but fills nothing.
 - Deliberately NOT a separate memorized-payee table: the ledger is the memory,
@@ -2199,6 +2208,17 @@ money movement.
   (`0xc0000374`) with no Python traceback — the same class of failure
   `RegisterModel._write` defers its reload to avoid. The deferred write goes
   through a `QPersistentModelIndex` and drops a row that vanished meanwhile.
+- **Tab selects the field, a click places the caret.** Opening a classification
+  editor (Category, Payee, Memo, Tag) by Tab or the keyboard SELECTS ALL its text,
+  so the first keystroke REPLACES the highlighted value — matching the
+  click-to-edit path, which select-alls too. The ONE case that appends is a mouse
+  click, which lands the caret where the user pressed. The choice is a pure function
+  of the Qt focus reason (`ui/delegates.select_all_on_focus`), applied on focus-in
+  by `_FocusSelectLineEdit` (and, through it, `CategoryLineEdit`), so it is testable
+  headless. Before this, Tabbing into a pending review row's field left the caret at
+  the end and the first key APPENDED — disagreeing with a click on the same field,
+  the same "typed into a pre-filled field without selecting first" hazard §5.11
+  removed for statement dates.
 
 ### 5.10b Dates: one format, everywhere
 - A single **date-format preference** (`ui/prefs.date_format`, one of
@@ -2233,6 +2253,12 @@ money movement.
   bypassing both chokepoints. Every effective-date cell is now a `make_date_edit`
   editor (calendar-pickable, in the chosen format), read back through
   `date_edit_iso`; storage and the amortization domain stay ISO.
+- **The new-account dialog's opening date is a date editor too.** Its optional
+  opening-date field was the last holdout — a bare `QLineEdit` with a hardcoded
+  `YYYY-MM-DD` placeholder read raw, so it ignored the preference and only accepted
+  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso` (blank
+  → `None`), like the reconcile setup: the DISPLAY honors the setting while the
+  stored/returned value stays ISO `YYYY-MM-DD`.
 
 ### 5.11 Reconcile against a statement
 - Two-pane workspace (debits left, credits right) after a setup dialog that

@@ -39,9 +39,9 @@ from mammon.ui import prefs, sounds, style
 from mammon.ui.import_review_widget import ImportReviewPanel
 from mammon.ui.delegates import (
     CategoryDelegate, DateDelegate, MoneyDelegate, NoWheelComboBox,
-    NoWheelDoubleSpinBox, PayeeCompleter, PayeeTwoLineDelegate, TwoLineHeaderView,
-    _accept_active_completion, accept_category_text, date_edit_iso,
-    make_category_combo, make_date_edit, refresh_date_format,
+    NoWheelDoubleSpinBox, PayeeCompleter, PayeeTwoLineDelegate, SplitAmountSpinBox,
+    TwoLineHeaderView, _accept_active_completion, accept_category_text,
+    date_edit_iso, make_category_combo, make_date_edit, refresh_date_format,
 )
 from mammon.ui.models import (
     AccountsModel, CryptoRegisterModel, InvestmentRegisterModel, RegisterFilter,
@@ -3897,8 +3897,13 @@ class NewAccountDialog(QDialog):
         self.opening = QDoubleSpinBox()
         self.opening.setRange(-1_000_000_000, 1_000_000_000)
         self.opening.setDecimals(2)
-        self.opening_date = QLineEdit()
-        self.opening_date.setPlaceholderText("YYYY-MM-DD (optional)")
+        # Optional opening date: a calendar-backed editor shown in the user's
+        # date-format preference (never a hardcoded YYYY-MM-DD), read back to ISO
+        # by date_edit_iso -- like ReconcileStartDialog. blank_ok + starting at the
+        # sentinel minimum keeps it empty until the user sets one, so an omitted
+        # opening date stays None.
+        self.opening_date = make_date_edit(blank_ok=True)
+        self.opening_date.setDate(self.opening_date.minimumDate())
         form.addRow("Name", self.name)
         form.addRow("Type", self.type)
         form.addRow("Opening balance", self.opening)
@@ -3913,7 +3918,7 @@ class NewAccountDialog(QDialog):
             "name": self.name.text().strip(),
             "type": self.type.currentText(),
             "opening_balance": parse_amount(str(self.opening.value())),
-            "opening_date": self.opening_date.text().strip() or None,
+            "opening_date": date_edit_iso(self.opening_date) or None,
         }
 
 
@@ -4699,11 +4704,16 @@ class SplitDialog(QDialog):
         # Safe on every keystroke because _update_remainder no longer resolves
         # (get-or-creates) categories -- see _line_amounts.
         cat.currentTextChanged.connect(lambda *_: self._update_remainder())
-        amt = NoWheelDoubleSpinBox()
+        amt = SplitAmountSpinBox()
         amt.setRange(-1_000_000_000, 1_000_000_000)
         amt.setDecimals(2)
         amt.setValue(float(amount or 0.0))
         amt.valueChanged.connect(self._update_remainder)
+        # Clearing the box (backspacing it empty) fires no valueChanged -- the spin
+        # box treats "" as an intermediate edit -- so listen to the text too, and
+        # SplitAmountSpinBox.value() reads a cleared box as 0. Together the live
+        # Remainder is exact integer cents the instant a leg is cleared (BUG 4).
+        amt.lineEdit().textChanged.connect(lambda *_: self._update_remainder())
         memo_edit = QLineEdit(memo or "")
         memo_edit.setPlaceholderText("memo")
         remove = QPushButton("Remove")
