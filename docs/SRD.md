@@ -946,6 +946,12 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   buy/sell rides on the crypto row's own `amount` (an internal cash sleeve, the
   way investments keeps buy/sell cash in `investment_transactions`), so both
   domains tell one cash story and no cash-ledger row is written for a trade.
+- **A crypto wallet is creatable from the New Account dialog.** `Crypto` is
+  offered in the dialog's type list alongside `Investment` (both are
+  investment-like), so the user creates a `type='crypto'` account the same way as
+  any other; creation still funnels through the sole writer
+  `ledger.create_account`, and the wallet then groups under Investing and routes
+  to its own `CryptoRegisterWidget` (SRD 5.8j).
 - **Quantities and per-unit prices are Decimal-encoded TEXT; fiat is signed
   integer cents.** TEXT storage round-trips an 18-decimal wei value exactly. The
   one new hazard over equities is SUMMATION, not storage: Python's default

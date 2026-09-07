@@ -73,8 +73,12 @@ _BAR_GROUPS = [
     ("Property & Debt", ("asset", "liability")),
 ]
 
+# 'crypto' is offered alongside 'investment' because it is investment-LIKE
+# (see ledger.INVESTMENT_LIKE_TYPES): the crypto track groups it under investing
+# and routes it to CryptoRegisterWidget/Model. Without it the New Account dialog
+# gave the user no way to create a crypto account at all.
 _ACCOUNT_TYPES = ["checking", "savings", "credit", "cash",
-                  "investment", "asset", "liability"]
+                  "investment", "crypto", "asset", "liability"]
 
 
 def _text_width(fm: QFontMetrics, text: str) -> int:
