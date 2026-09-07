@@ -14,6 +14,7 @@ import pytest
 from mammon import db
 from mammon.reports import CashFlowReport, FlowRow, TransferRow
 from mammon.ui.report_window import (
+    CASH_FLOW_SPEC,
     COLUMNS,
     ReportRow,
     ReportWindow,
@@ -154,7 +155,10 @@ def test_report_window_constructs_offscreen(qapp, tmp_path):
     try:
         headers = [win.table.horizontalHeaderItem(i).text()
                    for i in range(win.table.columnCount())]
-        assert headers == COLUMNS
+        # Cash Flow renames the shared first column "Section" -> "Direction"
+        # (Income / Expense / Transfers / Net); the other two are the shared set.
+        assert headers == CASH_FLOW_SPEC.columns
+        assert headers == ["Direction", "Category / Account", "Amount"]
         # The report always emits at least the Total Income / Total Expense /
         # Net rows, so the projection is never empty and the table mirrors it.
         assert len(win._rows) >= 3
@@ -176,8 +180,10 @@ def test_report_window_export_csv_matches_serializer(qapp, tmp_path):
         out = tmp_path / "cash_flow.csv"
         win.export_csv_to(out)
         text = out.read_text(encoding="utf-8")
-        assert text == report_rows_to_csv(win._rows)
-        assert text.startswith("Section,Category / Account,Amount\n")
+        # Cash Flow's first column is "Direction" (see CASH_FLOW_SPEC), so the
+        # export uses the window's own columns, not the shared default.
+        assert text == report_rows_to_csv(win._rows, win.columns)
+        assert text.startswith("Direction,Category / Account,Amount\n")
     finally:
         win.close()
         conn.close()
@@ -212,8 +218,10 @@ def test_report_window_export_html_matches_serializer(qapp, tmp_path):
         win.export_html_to(out)
         text = out.read_text(encoding="utf-8")
         # The seam writes exactly what the pure serializer produces for the
-        # displayed rows and the window title.
-        assert text == report_rows_to_html(win._rows, win.windowTitle())
+        # displayed rows, the window title and the window's own columns (Cash
+        # Flow's first header is "Direction", not the shared "Section").
+        assert text == report_rows_to_html(win._rows, win.windowTitle(),
+                                           win.columns)
         assert "<h2>Cash Flow</h2>" in text
     finally:
         win.close()

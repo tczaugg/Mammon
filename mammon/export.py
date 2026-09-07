@@ -10,9 +10,14 @@ it. Three shapes, for three needs:
   check numbers), the security list and the price history. The test of a
   complete QIF export is the round trip: exporting a ledger and importing the
   file into an empty database reproduces every balance and holding
-  (``test_export.py``). What QIF cannot carry -- tags, loan setups, scheduled
-  payments, learned rules, the exact ratio of an odd stock split -- stays
-  behind, and the JSON export exists for that.
+  (``test_export.py``). Tags travel too, as Quicken writes them: a
+  ``!Type:Tag`` master with descriptions, and a ``/Tag`` suffix on the category
+  of a transaction or of an individual split leg. The format holds ONE tag per
+  line -- no line in 27 years of Quicken's own exports carries two -- so a row
+  with several keeps only the first. What QIF cannot carry -- the other tags on
+  such a row, tag colors, loan setups, scheduled payments, learned rules, the
+  exact ratio of an odd stock split -- stays behind, and the JSON export exists
+  for that.
 
   **The migration is one-way, by decision.** Every record shape here was
   verified against Intuit's QIF specification and against 27 years of
@@ -127,6 +132,24 @@ def _category_lines(conn) -> list:
     return out
 
 
+def _tag_lines(conn) -> list:
+    """The ``!Type:Tag`` master, Quicken's own N/D shape (spec: "Items for a
+    Class List"). Written whole, including tags no exported transaction uses:
+    a tag the user defined still exists, and its description is the only place
+    its meaning is recorded."""
+    rows = conn.execute(
+        "SELECT name, description FROM tags ORDER BY name").fetchall()
+    if not rows:
+        return []
+    out = ["!Type:Tag"]
+    for r in rows:
+        out.append(f"N{r['name']}")
+        if r["description"]:
+            out.append(f"D{r['description']}")
+        out.append("^")
+    return out
+
+
 def _security_rows(conn, account_ids: Optional[Iterable[int]]) -> list:
     """(name, symbol, type) for every security the exported accounts have
     traded, joined with what the securities table says about it."""
@@ -181,9 +204,9 @@ def _cash_txn_lines(conn, row, names: dict) -> list:
     if splits:
         # Quicken echoes the first leg's label on L, bracketed account and all
         # (verified against its own exports); the S lines carry the posting.
-        out.append(f"L{splits[0]['category_label']}")
+        out.append(f"L{_tagged(splits[0]['category_label'], splits[0]['tag'])}")
         for s in splits:
-            out.append(f"S{s['category_label']}")
+            out.append(f"S{_tagged(s['category_label'], s['tag'])}")
             if s["memo"]:
                 out.append(f"E{s['memo']}")
             out.append(f"${money(s['amount'])}")
@@ -192,9 +215,19 @@ def _cash_txn_lines(conn, row, names: dict) -> list:
     else:
         path = ledger.category_path(conn, row["category_id"])
         if path:
-            out.append(f"L{path}")
+            out.append(f"L{_tagged(path, (row['tag'] or '').split(',')[0].strip())}")
     out.append("^")
     return out
+
+
+def _tagged(label: str, tag: str) -> str:
+    """A QIF category field with its tag suffix: ``Category:Sub/Tag``.
+
+    A bracketed ``[Account]`` transfer target takes no tag -- the slash would be
+    read back as part of the account name."""
+    if not tag or (label.startswith("[") and label.endswith("]")):
+        return label
+    return f"{label}/{tag}"
 
 
 def _invst_cash_lines(conn, row, names: dict) -> list:
@@ -285,7 +318,10 @@ def _qif_document(conn, accounts, names: dict, start: Optional[str], end: Option
     first file). ``include_empty`` keeps an account's section even with
     nothing in the range: one whole-ledger file lists every account; a
     year's file only the accounts with activity that year."""
-    lines: list = ["!Option:AutoSwitch", "!Account"]
+    # The tag master leads the file, where Quicken puts it (line 1 of every one
+    # of its own exports of this ledger).
+    lines: list = _tag_lines(conn)
+    lines += ["!Option:AutoSwitch", "!Account"]
     for a in accounts:
         lines += [f"N{a['name']}", f"T{_QIF_TYPE.get(a['type'], 'Bank')}", "^"]
     lines.append("!Clear:AutoSwitch")

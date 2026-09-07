@@ -20,7 +20,8 @@ import os
 
 import pytest
 
-from mammon import app, category_rules, db, import_review, ledger, rename_tree
+from mammon import (app, category_rules, category_tree, db, import_review,
+                    ledger, rename_tree)
 
 
 def _row(desc, *, tid="", amount="12.34", debit=True, date="2026-05-01"):
@@ -276,19 +277,23 @@ def test_learning_survives_restart_across_working_dirs(tmp_path):
         _, pre_cat = import_review.predict_fields(c1, m)
         assert pre_cat is None  # nothing learned yet
         import_review.save_new(c1, acct, m, payee="Coffee Shop", category_id=cid)
-        # Enough corrections to make the payee HIGH-CONFIDENCE, so it still
-        # prefills after the restart rather than showing the raw text. Keyed to
-        # the constant rather than a literal: the entropy-ranked tree raised the
-        # floor from 2 to 4, and a test that hardcodes the old number reports the
-        # rewrite as a persistence bug.
-        for n in range(rename_tree.HIGH_CONFIDENCE_MIN_COUNT - 1):
+        # Enough corrections for BOTH learners to prefill after the restart
+        # rather than showing the raw text: the rename tree fills after
+        # rename_tree.MIN_FILL, the category tree after category_tree.MIN_COUNT.
+        # Keyed to the constants rather than literals -- a test that hardcodes
+        # either number reports a threshold change as a persistence bug.
+        total = max(rename_tree.MIN_FILL, category_tree.MIN_COUNT)
+        for n in range(total - 1):
             mb = import_review.map_row(
                 _row("POS COFFEE SHOP %d" % (22 + n), tid="C1b%d" % n))
             import_review.save_new(c1, acct, mb, payee="Coffee Shop",
                                    category_id=cid)
         # committed to disk by save_new's self-committing rule writes
-        assert rename_tree.list_nodes(c1)      # the rename tree learned a payee
-        assert category_rules.list_rules(c1)   # a category rule row exists
+        assert rename_tree.examples(c1)        # the rename tree logged the payee
+        # The category side now learns into the per-payee tree, not the flat
+        # keyword table (mammon.category_tree) -- assert the learner that is
+        # actually written, or this reports the rewrite as a persistence bug.
+        assert category_tree.known_categories(c1, "Coffee Shop") == [(cid, total)]
         c1.close()
 
         # ---- Session 2: brand-new process, launched from a DIFFERENT directory.

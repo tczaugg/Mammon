@@ -80,25 +80,58 @@ def parent_autocomplete(typed: str, completion: str) -> str:
     return ":".join(parts[:level] + [seg]) + ":"
 
 
-class CategoryLineEdit(QLineEdit):
+def select_all_on_focus(reason) -> bool:
+    """Whether an editor gaining focus for the Qt focus ``reason`` should SELECT
+    ALL its text -- so the first keystroke REPLACES the highlighted value (True) --
+    or leave the caret where it is so typing APPENDS (False).
+
+    Tab, backtab, shortcut and the programmatic focus a view gives a freshly opened
+    editor all mean the user did not aim a caret at a spot, so the highlighted value
+    is replaced -- matching the click-to-edit path (RegisterWidget._edit_cell),
+    which select-alls too. The ONE case that appends is a mouse click, which places
+    the caret where the user pressed. Previously EVERY keyboard/Tab open appended
+    while a click replaced, so Tab and click disagreed on the same field (BUG 2);
+    keying the choice on the focus reason makes Tab behave like click.
+
+    A pure function of the reason so it is unit-testable headless."""
+    return reason != Qt.MouseFocusReason
+
+
+def apply_focus_selection(line_edit, reason) -> None:
+    """Select-all or place-the-caret-at-end on a freshly focused ``line_edit`` per
+    :func:`select_all_on_focus`: a Tab/keyboard/programmatic open replaces, a mouse
+    click appends. Shared by :class:`_FocusSelectLineEdit` and, through it,
+    :class:`CategoryLineEdit`."""
+    if select_all_on_focus(reason):
+        line_edit.selectAll()
+    else:
+        line_edit.deselect()
+        line_edit.end(False)
+
+
+class _FocusSelectLineEdit(QLineEdit):
+    """A line edit that decides, on gaining focus, between selecting all its text
+    (Tab/keyboard/programmatic focus -> the first keystroke REPLACES) and leaving
+    the caret at the end (a mouse click -> typing APPENDS), via
+    :func:`apply_focus_selection`. This is what makes TAB behave like the register's
+    click-to-edit path in a pending review row (BUG 2). Used directly for the Payee,
+    Memo and Tag editors and, through :class:`CategoryLineEdit`, for Category."""
+
+    def focusInEvent(self, event):  # noqa: N802 - Qt override name
+        super().focusInEvent(event)
+        apply_focus_selection(self, event.reason())
+
+
+class CategoryLineEdit(_FocusSelectLineEdit):
     """The category combo's line edit: pressing ':' autocompletes the current
     parent segment then inserts the ':' so typing flows into the subcategory
-    (see :func:`parent_autocomplete`). Every other key behaves normally."""
+    (see :func:`parent_autocomplete`). Inherits the Tab-selects / click-appends
+    focus behaviour from :class:`_FocusSelectLineEdit`; every other key behaves
+    normally."""
 
     def __init__(self, combo, parent=None):
         super().__init__(parent)
         self._combo = combo
-
-    def focusInEvent(self, event):  # noqa: N802 - Qt override name
-        # Qt gives a keystroke/Tab-opened editor focus via a programmatic
-        # setFocus(), and QLineEdit's default focus-in SELECTS ALL its text, so the
-        # first key would REPLACE the field. Cancel that: leave the cursor at the
-        # end with no selection so the first key APPENDS. The click-to-edit path
-        # re-selects explicitly afterwards (RegisterWidget._edit_cell), so
-        # clicking a category still replaces on first key.
-        super().focusInEvent(event)
-        self.deselect()
-        self.end(False)
 
     def keyPressEvent(self, event):  # noqa: N802 - Qt override name
         if (event.text() == ":"
@@ -165,6 +198,23 @@ def refresh_date_format(root) -> int:
     for e in edits:
         e.setDisplayFormat(fmt)
     return len(edits)
+
+
+def _choices_for(model, row=None):
+    """Category picker choices from ``model``, ranked for ``row`` when it can be.
+
+    Older/other models expose a no-argument ``category_choices``; asking them for
+    a ranked list must not break the editor, so the row argument is dropped on a
+    TypeError rather than guarded by isinstance checks.
+    """
+    if not hasattr(model, "category_choices"):
+        return []
+    if row is None:
+        return model.category_choices()
+    try:
+        return model.category_choices(row)
+    except TypeError:
+        return model.category_choices()
 
 
 def make_category_combo(parent, choices):
@@ -377,10 +427,13 @@ def accept_category_text(editor, *, take_first: bool = False) -> None:
 
 
 def select_editor_for_append(editor) -> None:
-    """Put a fresh combo/line-edit editor's cursor at the END with no selection,
-    so the FIRST key typed after TAB-ing into the field APPENDS instead of
-    replacing the whole value. The click path re-selects all afterwards
-    (RegisterWidget._edit_cell), so click-to-edit still replaces on first key."""
+    """Put a fresh combo/line-edit editor's cursor at the END with no selection as
+    its NEUTRAL pre-focus state, before the widget is shown and focused. The actual
+    append-vs-replace choice is made a moment later on focus-in, keyed on the focus
+    reason (:class:`_FocusSelectLineEdit` / :func:`select_all_on_focus`): Tab and
+    keyboard focus select-all so typing REPLACES, a mouse click keeps the caret so
+    typing APPENDS. This just avoids a transient full selection between
+    setEditorData and focus-in."""
     le = editor.lineEdit() if isinstance(editor, QComboBox) else editor
     if isinstance(le, QLineEdit):
         le.deselect()
@@ -394,6 +447,35 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
 
     def wheelEvent(self, event):  # noqa: N802 - Qt override name
         event.ignore()
+
+
+class SplitAmountSpinBox(NoWheelDoubleSpinBox):
+    """A split leg's amount field that reports a CLEARED box as 0.
+
+    QDoubleSpinBox treats an empty line edit as an intermediate edit, not the value
+    0: backspacing every digit leaves ``value()`` returning the LAST accepted number
+    and fires no ``valueChanged``. The split's live Remainder trusted ``value()``,
+    so clearing a leg to drop it left the uncategorized slot off by that stale amount
+    (BUG 4 -- often ~$4). Here ``value()`` returns 0 whenever the text holds no digit
+    (empty, or a lone sign), WITHOUT rewriting the text -- so the user can retype
+    freely -- and :class:`SplitDialog` also listens to the line edit's ``textChanged``
+    so the Remainder recomputes the instant the box is cleared. All Remainder math
+    stays in integer cents.
+
+    Overriding the (non-virtual) getter only affects Python callers; Qt's own C++
+    internals read their stored value directly and are unaffected."""
+
+    def _text_has_no_number(self) -> bool:
+        text = self.lineEdit().text()
+        for token in (self.prefix(), self.suffix()):
+            if token:
+                text = text.replace(token, "")
+        return not any(ch.isdigit() for ch in text)
+
+    def value(self) -> float:  # noqa: N802 - Qt method name
+        if self._text_has_no_number():
+            return 0.0
+        return super().value()
 
 # Category / Memo / Tag take these fractions of the classification strip; Tag
 # gets the remainder so the three boxes ALWAYS fill the full width edge-to-edge.
@@ -483,7 +565,9 @@ class CategoryDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         model = index.model()
-        choices = model.category_choices() if hasattr(model, "category_choices") else []
+        # Pass the row so the model can promote this payee's own categories to
+        # the top of the list (see RegisterModel.category_choices).
+        choices = _choices_for(model, index.row())
         return make_category_combo(parent, choices)
 
     def setEditorData(self, editor, index):
@@ -740,10 +824,12 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
             if self._classification_locked(index):
                 return None            # transfers/splits are not inline-recategorized
             model = index.model()
-            choices = model.category_choices() if hasattr(model, "category_choices") else []
+            choices = _choices_for(model, index.row())
             return make_category_combo(parent, choices)
         if field in ("memo", "tag"):
-            return QLineEdit(parent)
+            # _FocusSelectLineEdit, so a Tab into the memo/tag box selects-all and
+            # the first keystroke replaces -- parity with the click path (BUG 2).
+            return _FocusSelectLineEdit(parent)
         # Payee (line 1): a typeable dropdown seeded with the rename tree's
         # candidate payees when editing a pending review row (pick one or type a
         # brand-new name). Falls back to a plain line edit otherwise.
@@ -752,7 +838,8 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
             return combo
         # QuickFill: every other payee edit gets a completer over the payees the
         # register has used, most recent first (RegisterModel.payee_choices).
-        editor = QLineEdit(parent)
+        # _FocusSelectLineEdit so Tab selects-all and typing replaces (BUG 2).
+        editor = _FocusSelectLineEdit(parent)
         model = index.model()
         choices = model.payee_choices() if hasattr(model, "payee_choices") else []
         if choices:
@@ -777,12 +864,17 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
             return None
         combo = NoWheelComboBox(parent)
         combo.setEditable(True)
+        # _FocusSelectLineEdit so a Tab into the payee combo selects-all and typing
+        # replaces the highlighted candidate (BUG 2); set before wiring the completer.
+        combo.setLineEdit(_FocusSelectLineEdit(combo))
         combo.setInsertPolicy(QComboBox.NoInsert)
         combo.addItems(cands)
         completer = combo.completer()
-        if completer is not None:
-            completer.setCompletionMode(QCompleter.PopupCompletion)
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
+        if completer is None:
+            completer = QCompleter(cands, combo)
+            combo.setCompleter(completer)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
         return combo
 
     def setEditorData(self, editor, index):

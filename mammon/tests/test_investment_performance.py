@@ -289,11 +289,18 @@ def test_report_window_projector_and_spec(conn, world):
     assert totals["Return of Capital"] == 100_00
 
     # The Market Value total line breaks the portfolio gain out into its own two
-    # columns (dollars and percent), not just the Amount column.
+    # columns (dollars and percent), not just the Amount column. The spec runs the
+    # report PERIOD-bounded (the filter's From..To window), so this headline is the
+    # sum of the per-holding period gains -- it reconciles with the line items, not
+    # with the lifetime unrealized figure. Here the window starts before every
+    # position opened, so it captures each open holding's whole gain including the
+    # realized part of MSFT's partial sale: AAPL 1,000 + MSFT 1,300 + RC 0 = 2,300
+    # over a 16,000 base (14.375% -> +14.4%). The lifetime unrealized total still
+    # shows on its own "Unrealized Gain/Loss" line below (1,400.00).
     mv = [r for r in rows if r.section == "Portfolio" and r.label == "Market Value"][0]
     mv_cells = rw._row_cells(mv, rw.INVESTMENT_PERFORMANCE_SPEC.columns)
     assert mv_cells == ["Portfolio", "Market Value", "18,300.00",
-                        "1,400.00", "+8.3%"]
+                        "2,300.00", "+14.4%"]
 
 
 # ---------------------------------------------------------------------------

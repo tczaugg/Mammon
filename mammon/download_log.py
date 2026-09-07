@@ -36,13 +36,13 @@ def default_data_dir() -> str:
     """The directory the log lives in. Honours ``MAMMON_DATA_DIR`` (so tests and
     alternate installs can redirect it) and otherwise defaults to the live
     install's data folder next to ``mammon.db``."""
-    env = os.environ.get("MAMMON_DATA_DIR")
-    if env:
-        return env
-    # Derived from where the package actually lives -- NEVER a hardcoded
-    # absolute path, which pointed at one developer's install and made any
-    # other checkout (or a test run) write into it.
-    return str(Path(__file__).resolve().parent.parent / "data")
+    # Resolved by mammon.paths, which is the single authority: honours
+    # $MAMMON_DATA_DIR, uses a per-user folder in a packaged build, and
+    # otherwise the data dir beside the package -- NEVER a hardcoded absolute
+    # path, which once pointed at one developer's install and made every other
+    # checkout (and every test run) write into it.
+    from mammon import paths
+    return str(paths.data_dir())
 
 
 def db_path_from_conn(conn) -> Optional[str]:

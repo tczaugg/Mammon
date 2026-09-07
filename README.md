@@ -95,7 +95,13 @@ does not carry.
 
 ## Install
 
-Python 3.12 or newer. From a clone of the repository:
+Python 3.12 or newer, on **Windows, macOS or Linux** — it is pure Python on
+PyQt5, with no platform-specific code beyond one path-parsing branch. It is
+developed and used daily on Windows, and the macOS and Linux paths are currently
+untested rather than known-good; the default font is picked per platform, and
+everything else should follow. Reports from either are welcome.
+
+From a clone of the repository:
 
 ```
 pip install -r requirements.txt        # PyQt5 and matplotlib: the app itself
@@ -142,7 +148,7 @@ python -m mammon.app --db data\demo.db --demo
 Optional, and off by default. With no password the ledger is an ordinary SQLite
 file.
 
-Set a password under **Settings → Database Password** and the entire file is 
+Set a password under **File → Database Password** and the entire file is 
 encrypted with SQLCipher (AES-256): every account, transaction and price, the 
 indexes, and the schema. Backups taken from it are encrypted too.
 

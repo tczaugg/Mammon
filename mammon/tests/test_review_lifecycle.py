@@ -287,18 +287,39 @@ def _seed(conn, account_id):
 def test_accepted_row_stays_visible_and_greys_in_pending_plus_accepted(
         qapp, conn, account):
     from mammon.ui import prefs
+    # A register line for the first seeded row, so it classifies MATCHING and can
+    # be ACCEPTED -- discard is no longer a stand-in for "action a row", because
+    # it deletes.
+    ledger.add_transaction(conn, account, "2026-05-01", -1000, payee="Store 0")
+    _seed(conn, account)
+    panel = _panel(conn, account, prefs.VIS_BATCH)
+    assert panel.table.rowCount() == 3
+    assert panel._entries[0].is_matching
+
+    panel.accept_index(0)
+
+    assert panel.table.rowCount() == 3, "the row must NOT vanish from this view"
+    assert panel._entries[0].is_actioned is True
+    assert panel._entries[0].state == "accepted"
+    # and a re-query agrees with what is on screen -- the bug was that it did not
+    reloaded = ir.load_review(conn, account, prefs.VIS_BATCH)
+    assert len(reloaded) == 3
+    panel.deleteLater()
+
+
+def test_a_discarded_row_leaves_every_view(qapp, conn, account):
+    """Discard deletes its ``review_items`` row, so greying it would put the
+    screen at odds with a re-query -- the same disagreement the greying was
+    introduced to fix, pointed the other way."""
+    from mammon.ui import prefs
     _seed(conn, account)
     panel = _panel(conn, account, prefs.VIS_BATCH)
     assert panel.table.rowCount() == 3
 
-    panel.discard_index(0)          # any action retires a row; discard needs no register
+    panel.discard_index(0)
 
-    assert panel.table.rowCount() == 3, "the row must NOT vanish from this view"
-    assert panel._entries[0].is_actioned is True
-    assert panel._entries[0].state == "discarded"
-    # and a re-query agrees with what is on screen -- the bug was that it did not
-    reloaded = ir.load_review(conn, account, prefs.VIS_BATCH)
-    assert len(reloaded) == 3
+    assert panel.table.rowCount() == 2
+    assert len(ir.load_review(conn, account, prefs.VIS_BATCH)) == 2
     panel.deleteLater()
 
 

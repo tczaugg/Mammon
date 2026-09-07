@@ -126,8 +126,10 @@ def signed_lines(conn, start: str, end: str, acct_list: list[int], *,
                 split_parents.add(int(s["transaction_id"]))
             continue
         for s in conn.execute(
-            f"SELECT transaction_id, category_id, amount, memo, transfer_account_id "
-            f"FROM splits WHERE transaction_id IN ({cmarks}) ORDER BY id", chunk,
+            f"SELECT s.transaction_id, s.category_id, s.amount, s.memo, "
+            f"s.transfer_account_id, g.name AS tag "
+            f"FROM splits s LEFT JOIN tags g ON g.id = s.tag_id "
+            f"WHERE s.transaction_id IN ({cmarks}) ORDER BY s.id", chunk,
         ).fetchall():
             splits.setdefault(s["transaction_id"], []).append(s)
 
@@ -151,7 +153,8 @@ def signed_lines(conn, start: str, end: str, acct_list: list[int], *,
                 out.append(Line(
                     txn_id=int(t["id"]), date=t["date"], account_id=int(t["account_id"]),
                     category_id=None if taid is not None else s["category_id"],
-                    amount=int(s["amount"]), payee=t["payee"] or "", tag=t["tag"] or "",
+                    amount=int(s["amount"]), payee=t["payee"] or "",
+                    tag=_line_tags(t["tag"], s["tag"]),
                     memo=s["memo"] or t["memo"] or "", transfer_account_id=taid,
                     is_split_line=True))
         else:
@@ -170,6 +173,22 @@ def signed_lines(conn, start: str, end: str, acct_list: list[int], *,
                 amount=int(t["amount"]), payee=t["payee"] or "", tag=t["tag"] or "",
                 memo=t["memo"] or "", transfer_account_id=taid, is_split_line=False))
     return out
+
+
+def _line_tags(parent_tag, leg_tag) -> str:
+    """The tags a SPLIT LINE carries: the parent transaction's, plus the leg's
+    own, in one comma-joined string.
+
+    Both apply. A row tagged ``reimbursable`` whose legs are tagged ``Rig 8``
+    and ``Rig 9`` has a Rig 8 leg that is also reimbursable, and
+    ``reports.tags`` counts a line under every tag it carries. Before
+    ``splits.tag_id`` existed a line could only show the parent's, so a leg's
+    project was invisible to every report."""
+    names = ledger.parse_tags(parent_tag)
+    for name in ledger.parse_tags(leg_tag):
+        if name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    return ledger.format_tags(names)
 
 
 def category_paths(conn) -> dict[int, str]:

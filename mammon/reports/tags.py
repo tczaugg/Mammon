@@ -12,9 +12,25 @@ own function rather than reusing the single-key grouper.
 The tags themselves come from the ``transactions.tag`` cache, which ``ledger``
 keeps as the normalized, comma-joined projection of the authoritative
 ``transaction_tags`` junction; splitting it with ``ledger.parse_tags`` yields the
-same individual tags the junction holds, with no extra per-row query. Untagged
-money groups under ``(no tag)``. Transfers/splits/scheduling follow the shared
-line rules in :mod:`mammon.reports._lines`. Pure and read-only.
+same individual tags the junction holds, with no extra per-row query.
+Transfers/splits/scheduling follow the shared line rules in
+:mod:`mammon.reports._lines`. Pure and read-only.
+
+**Untagged money is not in this report at all** -- there is deliberately no
+``(no tag)`` bucket, which is where ``payees.by_tag`` differs. It is not a tag,
+and on a real ledger it is not a footnote either: where tags cover a small
+fraction of a long history, untagged money was 97.8% of the report and 158x the
+largest real tag, sorted to the top, with every actual tag a rounding error
+beneath it. A report about tags should contain tags.
+
+``total`` is the sum of the rows, which is only commensurable when the rows are:
+tags serve different purposes in different years, so adding a project's build
+cost to an unrelated year's book-series spending is meaningless. It is
+meaningful under a filter that makes the tags comparable -- one category, one
+period -- which is how the number earns its place rather than being dropped.
+Overlapping tags on a single transaction are counted under each, so the total
+can then exceed the money that moved; that is the same deliberate fan-out the
+rows show.
 """
 from __future__ import annotations
 
@@ -22,7 +38,7 @@ from typing import Iterable, Optional
 
 from mammon import ledger
 from mammon.reports._lines import resolve_accounts, signed_lines
-from mammon.reports.payees import DIRECTIONS, NO_TAG, PayeeReport, PayeeRow
+from mammon.reports.payees import DIRECTIONS, PayeeReport, PayeeRow
 
 
 def spending_by_tag(conn, start: str, end: str, *,
@@ -51,8 +67,7 @@ def spending_by_tag(conn, start: str, end: str, *,
             value = ln.amount
         else:
             value = ln.amount
-        names = ledger.parse_tags(ln.tag) or [NO_TAG]
-        for name in names:
+        for name in ledger.parse_tags(ln.tag):
             cents[name] = cents.get(name, 0) + value
             txns.setdefault(name, set()).add(ln.txn_id)
     rows = [PayeeRow(k, len(txns[k]), v) for k, v in cents.items()]

@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Mammon is a Windows desktop personal-finance application (Python 3.12 + PyQt5) with a classic,
+Mammon is a cross-platform desktop personal-finance application (Python 3.12 + PyQt5) with a classic,
 dense account register, storing everything in one SQLite file the user owns. Its concrete goal is
 absorbing ~40 years of existing financial history and taking over ongoing transaction download
 from the user's institutions.
+
+Developed on Windows; macOS and Linux are supported in principle (no platform-specific
+code beyond one shlex branch in `webslinger.py` and the per-platform default font in
+`ui/style.py`) but are untested — do not assume a change works there without saying so.
 
 `docs/SRD.md` is the requirements document of record — read it before designing anything new; it
 states the data model, the import strategy, the download strategy, and which decisions are locked.
@@ -101,7 +105,7 @@ dropped in migration 28.
 ### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 53).
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 60).
 **Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
 databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
 
@@ -128,6 +132,15 @@ the checkpoint path; the full-sum version is retained as the oracle it must matc
    below the register. Nothing enters the ledger until the user accepts or saves a row, and
    `mammon/import_review.py` is the sole writer for that flow.
 
+A **scheduled pre-entry matches on tolerance, not on exact cents.** Its amount is a
+forecast (the calendar's six-month median, or the amortization figure), so escrow or a rate
+change makes it miss by construction. `_find_match` adds a last tier for `num='Sched'` rows —
+same sign, within `SCHED_AMOUNT_TOLERANCE` (half the placeholder's amount, matching
+`importers/core._funding_pending_by_payee`) — and fires it only when exactly ONE such candidate
+is in the window, because a review row has no payee yet to disambiguate with. Manual match
+opens the same amount tolerance over `MANUAL_WINDOW_DAYS` (15, a hard cap); the sign never
+varies.
+
 `NormalizedTxn` (`importers/record.py`, SRD §6.4) is the waist of the hourglass: parsers stay
 ignorant of the database, and `core.py` stays ignorant of file formats.
 
@@ -150,20 +163,92 @@ Two things here are load-bearing and easy to undo by accident:
   balance column parses as money just like an amount column), so values alone cannot tell a user
   whether the mapping is right. Both the prompt and the wizard render `Role <- source column`.
 
-### Learned rules (four cooperating engines)
+### Tags, and the two places a tag can live
 
-Raw bank `statementDescription` text is gobbledygook, so the app learns from corrections:
+A tag is first-class (`tags` + the `transaction_tags` junction, migration 45), and
+a transaction can carry several. A **split leg** carries its own single `tag_id`
+(migration 54) — that is not redundancy. Quicken tags a leg to attribute part of
+one payment to a project, and folding those up onto the parent credits the WHOLE
+payment to every tag in the split: measured on a real ledger, that reported 2.6x
+the money actually spent, an overstatement of the same shape as a double-counted
+transfer. `reports/_lines.py` gives a split line
+the union of the parent's tags and the leg's, so both apply and neither inflates.
 
-- `rename_tree.py` — payee renaming AND investment-action mapping via an online discriminative
-  **trie** per domain that grows only where it must to tell two labels apart. Tokens are ranked by
-  **label entropy** (purest first — measured, not assumed: frequency was the wrong axis), and
-  pure-numeric, very-short, and unseen mixed letter+digit tokens (ISINs, auth codes) are dropped
-  during normalization (the overfitting guards). A supplied payee field is ranking *evidence*, not
-  a gate; only a high-confidence pure rename overrides it. `RANKING_VERSION` forces a one-time
-  rebuild from history when the ranking algorithm changes — a trie built under one ranking is
-  unreachable under another.
+QIF carries tags in three places and all three are read and written: the
+`!Type:Tag` master (`N` name, `D` description — `!Type:Class` in files older than
+2010), a `/Tag` suffix on the `L` category line, and the same suffix on each `S`
+split leg. **`record.clean_category` discards the tag half**; use
+`split_category_tag` anywhere the tag matters. A split's `L` line echoes the
+first leg's category tag and all, so reading it at row level double-tags the
+transaction with one leg's project — `_build_cash` clears it deliberately.
+
+### Learned rules (five cooperating engines)
+
+Raw bank `statementDescription` text is gobbledygook, so the app learns from corrections.
+**Payee is resolved first, then category is resolved BELOW it** — that ordering is what keeps a
+suggestion scoped to the merchant it came from:
+
+- `rename_tree.py` — payee renaming AND investment-action mapping as a **decision tree rebuilt
+  from the accepted corrections at every prediction** (webSlinger's `selector_tree` with tokens
+  for features, branching one). Nothing is learned online: the corpus is the `rename_examples`
+  log (one row per accepted review row, label read LIVE through the transaction it created, so
+  a register edit or an undo changes the next answer), and review retention never touches it.
+  Per query: candidates = examples sharing a *distinctive* token (carried by ≤ 5 payees) or the
+  exact token set; a binary presence tree by information gain over them; then the leaf's
+  leading label is GENERALIZED like webSlinger's array selector (features = each token, the
+  token before, the token after, the same over the payee field, plus "no field": agreed value
+  kept, varying slot binarized, feature missing from any example dropped) and the row must FIT
+  that pattern — `June rent` + `July rent` fit `August rent` but not a bare `rent`; identical
+  rows stay exact. The label fills at ≥ `MIN_FILL` (2) fitting examples and ≥ `FILL_PURITY`
+  (0.9) of the leaf, anything else is a dropdown. Only CORRECTIONS train the payee domain — a
+  row kept as its shown text (description, title-cased default, supplied payee) is skipped — so
+  the title-cased bank text can never become a "payee".
+  The old trie reset its counts on every split, split on tokens both sides shared, and hid a
+  parent's labels behind a weak child; the module docstring records the measurements.
+**Neither tree is seeded from history.** Both learn ONLY from what the user accepts in
+review. `rename_tree` used to bootstrap at startup, replaying every posted row's
+`memo -> payee` pair as an accepted rename — true for downloaded rows, where the memo IS the
+bank's text, and false for hand-entered and QIF-imported history, where it is a note the user
+typed. A 1998 memo of "deposit" on a Foothill Place row taught the tree that `MOBILE DEPOSIT`
+means Foothill Place, in a ledger deliberately started fresh. `ensure_bootstrapped` survives on
+both modules as callable API for an explicit seed-from-history action; nothing calls it on open.
+For the same reason `_prior_txn_for` no longer fills the PAYEE from register rows sharing the
+statement text (category only).
+
+Two thresholds, and they are different questions. `import_review.RENAME_MIN_SIGHTINGS` (2) is
+whether a payee is OFFERED in the dropdown at all; `rename_tree.MIN_FILL` (2) is whether it is
+APPLIED to the cell, and it counts the matched leaf — the same text renamed twice — not the
+payee overall. Between them the user sees the bank's own text and a one-click list. A payee
+chosen ONCE is neither filled nor offered.
+
+- `category_tree.py` — the auto-categorizer: one discrimination trie **per payee**, over the source
+  text, ranked by category entropy. Two gates, and both are load-bearing: **node purity** asks *does
+  this description discriminate?*, **payee coherence** (`PAYEE_COHERENCE`) asks *is this merchant
+  categorizable at all?* — the second applies only at DEPTH 0, where the answer is the payee's bare
+  prior and nothing distinguished the row. A node below the root matched a token that has meant one
+  category every time, and must not be refused because the payee is bimodal overall: gating every
+  depth on the payee's mix would refuse Costco's `GAS` branch, the one answer the tree is surest of.
+  **A candidate can only ever be a category that payee has already carried**; a first-ever payee
+  proposes nothing at all. Replayed cold over the real ledger's first year (625 accepted rows) it
+  auto-fills 29% at 97% precision with zero never-seen proposals, against the old keyword table's
+  67% fire rate at 74% precision, half of whose errors were a category from an unrelated merchant.
+  Text-less evidence (a register edit, 30 years of imported Quicken rows) updates the payee TALLY
+  only and never the trie — with no tokens to walk it would all land on the root, where mismatched
+  categories accumulate and kill the confident cases. `MIN_COUNT` is 2 (by request, same as a
+  rename); below it, for a SETTLED payee, `predict_fields` asks the register's QuickFill what it
+  would pre-enter for that payee typed by hand — an auto-filled payee must not do worse than a
+  typed one — unless review history already shows the payee to be a catalogue.
 - `category_rules.py`, `transfer_rules.py` — `keyword -> category_id` / `keyword -> account_id`,
   sharing their tokenizer with each other via `keywords.py` so they stay in lock-step.
+  **`category_rules` no longer learns.** One correction minted a GLOBAL keyword rule, which is how
+  the town name `ANYTOWN` became a Utilities rule that fired on Subway, O'Reilly and the youth
+  theater. `learn_from_edit` is deleted and migration 57 purged every row it had written (all 228 on
+  the reference ledger — 67 carried multi-token keywords, which only `refine_keyword` produces and
+  the Rules manager's Add dialog cannot). Nothing writes the table automatically now, so a row in it
+  is a deliberate Rules-manager entry and `predict_fields` honours it directly, *after* the tree
+  declines. That is the one place a category outside the payee's own history can be filled in, and
+  it is there because the user typed it. `transfer_rules` still learns — it maps statement text to
+  an ACCOUNT, a far smaller and less ambiguous target.
 - `categorize.py` — payee-level `import_mappings` keyed on the *normalized* payee, with a `source`
   ranking where an explicit user choice outranks an inferred one.
 
@@ -191,7 +276,18 @@ Two independent guards keep the 1/minute auto-backup cheap, and both are load-be
 *do* happen from copying 12 MB to record a 15 KB change. Measured on the real ledger, a minute of
 work touches ~14 pages of 2,999.
 
-Four invariants:
+**Each snapshot also carries a "what changed" summary**, because the file name alone (time + tag)
+cannot tell one one-minute auto-backup from the next when picking a restore point. At snapshot time
+`build_manifest` takes a lightweight, READ-ONLY census of the staged copy — per-account transaction
+count, balance in cents, and latest row — and `summarize` diffs it against the previous snapshot
+**of the same tag** (within a tag the timestamp-before-extension name sorts chronologically; across
+tags it does not, so the diff is tag-scoped, and each tag forms its own chain). The first snapshot
+of a tag reads as `baseline / initial`. A delta stashes the manifest+summary as extra keys in its
+JSON header; a full `.bak` (a plain SQLite file with nowhere to put metadata) gets a
+`<name>.bak.meta.json` sidecar. `_describe` (CLI `list`) and the Restore confirm dialog surface the
+summary; the UI reads it through `backup.snapshot_summary` only — no SQL or money logic in `ui/`.
+
+Five invariants:
 
 - **A restore never crosses databases.** `restore_backup` refuses a snapshot whose own
   `<db-file-name>` prefix disagrees with the file being replaced (`snapshot_db_name` /
@@ -206,11 +302,16 @@ Four invariants:
 - **Deltas reference the baseline directly, never each other.** No chains — one damaged delta costs
   one restore point, not every point after it. Growth against a fixed baseline is sublinear, so this
   costs almost nothing.
-- **Retention must never orphan a baseline.** `prune_backups` and `purge_auto_backups` hold a full
-  snapshot back past its turn while any surviving delta names it. Dropping it is the one way this
-  scheme loses real data.
+- **Retention must never orphan a baseline — or a sidecar.** `prune_backups` and
+  `purge_auto_backups` hold a full snapshot back past its turn while any surviving delta names it
+  (dropping it is the one way this scheme loses real data), and both delete a full snapshot's
+  `.bak.meta.json` sidecar in lockstep with the `.bak` (as does `organize_backups` when it moves a
+  legacy snapshot into its per-db folder). A sidecar left behind names a snapshot that no longer
+  exists.
 - **A rebuilt delta is checksum-verified** against the hash taken when it was written; a mismatch
-  raises rather than handing back a plausible-looking database.
+  raises rather than handing back a plausible-looking database. The manifest/summary keys must stay
+  OUT of that hash: the `sha256` is of the reconstructed DB bytes, never of the header, so the added
+  header keys cannot corrupt a restore (regression: `test_backup_summary.py`).
 
 Anything needing a real file from either kind calls `backup.restore_backup(snapshot, out)`.
 `python -m mammon.backup list|verify|restore` does the same from a terminal, so a delta is never a
@@ -221,21 +322,32 @@ longer exist).
 
 ## Paths, and why they are the way they are
 
-Every path in this app resolves from the **install root**, never the current working directory. This
-is not stylistic — each of these was a real bug:
+**`mammon/paths.py` is the only place that decides where data lives.** Never resolve a data path
+anywhere else. Three modules used to answer this separately and the copies drifted: `backup` and
+`download_log` honoured `$MAMMON_DATA_DIR`, `app._resolve_db` did not, so redirecting that variable
+moved the snapshots and the log while leaving the database in the install.
 
-- `app._resolve_db` — `--db` is authoritative and used verbatim; otherwise the default is
-  `<install root>/data/mammon.db`. Resolving relative to the CWD meant launching from a different
-  directory silently opened a *different*, empty database, and learned rules looked lost.
-- `backup.DEFAULT_BACKUP_DIR` — anchored at import from the install root, overridable via
-  `$MAMMON_DATA_DIR` and monkeypatched by tests. It was `Path("data")/"backups"`, so snapshots
-  landed wherever the process happened to start.
-- `download_log.default_data_dir()` — derived from the package location. It hardcoded one
-  developer's absolute install path.
+`paths.data_dir()` answers in this order:
 
-The last two are how a test run once reached a real ledger and migrated it. **Any new default path
-must be anchored and test-overridable**; a test that can write outside `tmp_path` will eventually
-write somewhere that matters.
+1. **`$MAMMON_DATA_DIR`** — wins outright. Tests and alternate installs use it, and it must move
+   the database with everything else.
+2. **A packaged build** (PyInstaller sets `sys.frozen`) — `~/Documents/Mammon`. An installed app
+   cannot write beside itself: `Program Files` is read-only to a standard user, and Windows does not
+   fail cleanly, it redirects the writes into a per-user VirtualStore copy, so the ledger appears to
+   save and then appears to vanish. Documents over `%LOCALAPPDATA%` is deliberate — the whole promise
+   is that the user owns the file, and a file they cannot find is not one they own.
+3. **A source checkout** — `data/` beside the package, resolved from the package location and never
+   from the CWD. Resolving relative to the CWD meant launching from a different directory silently
+   opened a *different*, empty database, and learned rules looked lost.
+
+`--db` is still authoritative and used verbatim, ahead of all of this.
+
+Nothing in `paths.py` creates directories; the callers that write do that, so importing it can never
+leave a stray folder behind. `backup.DEFAULT_BACKUP_DIR` stays a module attribute resolved at import,
+because tests monkeypatch it to redirect snapshots into a tmp dir — that seam is what keeps a test
+run from writing into a real install's data folder. A test run once reached a real ledger and
+migrated it. **Any new default path must go through `paths.py` and be test-overridable**; a test that
+can write outside `tmp_path` will eventually write somewhere that matters.
 
 ## Configuration
 

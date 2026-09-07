@@ -14,19 +14,83 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
+from PyQt5.QtGui import QCursor
+from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QToolTip, QVBoxLayout
 
 from .models import fmt_date  # single date-display chokepoint (honors the pref)
 from . import style            # active theme (dark/light) -- same source the register reads
 
-# A calm, Quicken-ish categorical palette (blue-led), reused across charts.
-_PALETTE = [
-    "#3b6ea5", "#e0803a", "#4f9d69", "#c0504d", "#8064a2",
-    "#4bacc6", "#d9a441", "#7f8fa6", "#9bbb59", "#a5568c",
+# A calm, Quicken-ish categorical palette (blue-led), reused across the category
+# pies. It carries enough VISUALLY DISTINCT hues for the worst realistic pie --
+# ~19 wedges, which happens when every real category is roughly 5% of the period
+# and the sub-10% tail rolls up into an ``Other`` that is itself >=10%. The ten
+# calm lead colours are unchanged, so the common (few-category) pie looks exactly
+# as before; the tail extends them with further separated hues. The FINAL entry
+# is a neutral gray RESERVED for the ``Other`` wedge: pinning ``Other`` there
+# (see :func:`wedge_colors`) keeps it a stable, recognizable colour no matter how
+# many real categories precede it. The old 10-colour list wrapped with
+# ``i % len``, so an 11th category collided with -- and was indistinguishable
+# from -- the ``Other`` wedge.
+_PIE_PALETTE = [
+    "#3b6ea5",  # blue
+    "#e0803a",  # orange
+    "#4f9d69",  # green
+    "#c0504d",  # red
+    "#8064a2",  # purple
+    "#4bacc6",  # cyan
+    "#d9a441",  # gold
+    "#9bbb59",  # yellow-green
+    "#a5568c",  # plum
+    "#5b9bd5",  # sky blue
+    "#e15759",  # coral
+    "#1b9e77",  # teal
+    "#7570b3",  # periwinkle
+    "#e7298a",  # magenta
+    "#a6761d",  # bronze
+    "#66a61e",  # grass green
+    "#b15928",  # rust
+    "#6a3d9a",  # deep violet
+    "#f2c80f",  # bright yellow
+    "#8a949e",  # neutral gray -- RESERVED for the 'Other' wedge (always last)
 ]
+_OTHER_LABEL = "Other"
 _BLUE = "#3b6ea5"
 _RED = "#c0504d"          # SPENDING bars (money out)
 _GREEN = "#4f9d69"        # INCOME bars (money in)
+
+# Grid-line weight/opacity for the Net Worth chart. matplotlib's default y-grid
+# (alpha 0.25, no vertical lines) reads as barely-there hairlines; these draw a
+# crisp ~1px line at near-full opacity on BOTH axes, matching the app's financial
+# calendar table grid (a solid 1px line in the theme's ``grid`` colour) so values
+# read against horizontal and vertical guides alike.
+_GRID_LINEWIDTH = 0.8
+_GRID_ALPHA = 0.9
+_GRID_LIGHT = "#c9ced8"   # light-theme grid colour (charts skip the dark palette in light mode)
+
+
+def wedge_colors(labels, group_label=_OTHER_LABEL, palette=None):
+    """Map each wedge label to a stable colour. Real categories take the leading
+    palette entries in order; the ``group_label`` (``Other``) wedge ALWAYS takes
+    the palette's FINAL entry, so it never shares a colour with a real category
+    however many divisions there are. With 18 real categories plus ``Other`` --
+    the worst realistic pie -- all 19 wedges get distinct colours.
+
+    Pinning ``Other`` to the last slot (rather than letting it fall wherever the
+    slice order put it and wrapping the list past its length) is the whole fix:
+    before, an 11th category wrapped back onto ``Other``'s colour and the two
+    were indistinguishable.
+    """
+    pal = palette if palette is not None else _PIE_PALETTE
+    non_other = pal[:-1]
+    other_color = pal[-1]
+    colors, i = [], 0
+    for lab in labels:
+        if lab == group_label:
+            colors.append(other_color)
+        else:
+            colors.append(non_other[i % len(non_other)])
+            i += 1
+    return colors
 
 
 def _dollars(cents: int) -> str:
@@ -125,7 +189,7 @@ class SpendingPieCanvas(FigureCanvasQTAgg):
 
         labels = [s.label for s in pie.slices]
         sizes = [s.cents for s in pie.slices]
-        colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(sizes))]
+        colors = wedge_colors(labels)
 
         def _autopct(pct):
             cents = int(round(pct / 100.0 * pie.total_cents))
@@ -205,9 +269,16 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
     the same arc until none can be read. The lowest-share categories that
     together make up :attr:`GROUP_TARGET_PCT` of the total are folded into one
     **Other** wedge (:func:`group_small_slices`), and any wedge still under
-    :attr:`LABEL_MIN_PCT` of the *drawn* pie is drawn without text at all -- the
-    table beside the chart names it, so nothing is lost, while a sliver's label
-    would have landed on its neighbour's.
+    :attr:`LABEL_MIN_PCT` of the *drawn* pie is drawn without inline text -- a
+    sliver's label would have landed on its neighbour's. Every wedge stays
+    identifiable regardless: the un-labelled slivers get a **hover tooltip**
+    (:meth:`_on_motion`) naming the category, its share of the whole and its
+    dollar amount, so nothing on the pie is anonymous.
+
+    **Colours are stable and distinct** (:func:`wedge_colors`): the palette
+    carries enough separated hues for the worst realistic pie (~19 wedges), and
+    the **Other** wedge is pinned to the palette's final neutral colour so it
+    never collides with a real category as the division count grows.
 
     **Percentages are of the whole.** Every wedge's label shows its share of the
     overall period total (:meth:`whole_total`), NOT its share of the subset it
@@ -243,11 +314,13 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
         self._drawn: list = []          # [(label, cents)] actually on the figure
         self._grouped: list = []        # what the Other wedge holds, if any
         self._wedges: list = []         # [(label, matplotlib wedge)]
+        self._tooltips: dict = {}       # {label: hover text} -- names every wedge
         self.group_target_pct = (self.GROUP_TARGET_PCT if group_target_pct is None
                                  else float(group_target_pct))
         self.label_min_pct = (self.LABEL_MIN_PCT if label_min_pct is None
                               else float(label_min_pct))
         self.mpl_connect("button_press_event", self._on_click)
+        self.mpl_connect("motion_notify_event", self._on_motion)
         self.render()
 
     # -- state ------------------------------------------------------------
@@ -323,6 +396,27 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
                 return
         self.zoom_out()          # a click off the pie is the way back out
 
+    def tooltip_for_event(self, event) -> str | None:
+        """The hover text for the wedge under ``event`` (``None`` when the cursor
+        is off the pie). Split out from :meth:`_on_motion` so the mapping from a
+        wedge to its ``name: pct of total, $amount`` string is testable without a
+        live Qt tooltip."""
+        for label, wedge in self._wedges:
+            hit, _ = wedge.contains(event)
+            if hit:
+                return self._tooltips.get(label, label)
+        return None
+
+    def _on_motion(self, event) -> None:
+        """Show a per-wedge tooltip on hover, so a wedge too small to carry an
+        inline label is still identifiable. Hidden when the cursor leaves the
+        pie."""
+        text = self.tooltip_for_event(event)
+        if text:
+            QToolTip.showText(QCursor.pos(), text, self)
+        else:
+            QToolTip.hideText()
+
     # -- drawing ------------------------------------------------------------
     def render(self) -> None:
         """(Re)draw the pie, re-reading the ACTIVE theme every time (the same
@@ -336,6 +430,7 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
         if pal is not None:
             ax.set_facecolor(pal["surface"])
         self._wedges, self._drawn, self._grouped = [], [], []
+        self._tooltips = {}
         slices = self.current_slices()
         total = sum(c for _, c in slices)
         if not slices or total <= 0:
@@ -350,8 +445,19 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
         shown = set(self.visible_labels())
         labels = [lab if lab in shown else "" for lab, _ in drawn]
         sizes = [c for _, c in drawn]
-        colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(sizes))]
+        colors = wedge_colors([lab for lab, _ in drawn], self.GROUP_LABEL)
         whole = self.whole_total() or total
+
+        # Every wedge is identifiable: big ones carry an inline label+percent,
+        # and the slivers whose text was suppressed (they would land on a
+        # neighbour) get a hover tooltip instead -- category name, its share of
+        # the WHOLE period, and the dollar amount. Built for ALL wedges so the
+        # hovered exact dollars are available even on a labelled wedge.
+        self._tooltips = {
+            lab: f"{lab}: {(c / whole * 100.0 if whole else 0.0):.1f}% of total, "
+                 f"{_dollars(c)}"
+            for lab, c in drawn
+        }
 
         # matplotlib calls autopct once per wedge in ``sizes`` order, so a plain
         # counter maps each call back to its exact cents -- no re-deriving the
@@ -439,7 +545,15 @@ class NetWorthCanvas(FigureCanvasQTAgg):
         ax.set_xticklabels([fmt_date(xs[i]) for i in ticks], rotation=45,
                            ha="right", fontsize=8)
         ax.set_title("Net Worth Over Time", fontsize=10)
-        ax.grid(True, axis="y", alpha=0.25)
+        # Both axes, crisp: horizontal lines that were too faint get stronger,
+        # and vertical lines (aligned to the x-axis ticks set above) are added,
+        # matching the financial calendar's grid weight/opacity. In dark mode the
+        # colour is the palette's line colour -- the same value _theme_axes_chrome
+        # gives the y-gridlines -- so both axes stay consistent.
+        grid_color = pal["line"] if pal else _GRID_LIGHT
+        ax.set_axisbelow(True)
+        ax.grid(True, axis="both", color=grid_color,
+                linewidth=_GRID_LINEWIDTH, alpha=_GRID_ALPHA)
         _theme_axes_chrome(ax, pal)
         self.draw_idle()
 

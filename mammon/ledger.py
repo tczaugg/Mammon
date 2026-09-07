@@ -314,6 +314,17 @@ def _tag_id(conn: sqlite3.Connection, name: str) -> int:
     return int(conn.execute("INSERT INTO tags(name) VALUES (?)", (name,)).lastrowid)
 
 
+def tag_id(conn: sqlite3.Connection, name: str) -> Optional[int]:
+    """Public get-or-create for a tag name -- the id a SPLIT LEG stores.
+
+    Row-level tags go through :func:`set_tags`, which owns the junction and the
+    cache together. A split leg holds a single ``tag_id`` of its own instead, so
+    the importer needs this one resolver; a blank name yields ``None`` rather
+    than creating an empty tag."""
+    name = (name or "").strip()
+    return _tag_id(conn, name) if name else None
+
+
 def get_tags(conn: sqlite3.Connection, txn_id: int) -> list[str]:
     """A transaction's tag names, in the order they were entered."""
     rows = conn.execute(
@@ -871,10 +882,13 @@ def get_splits(conn: sqlite3.Connection, txn_id: int) -> list[dict]:
     ``category_id`` (or ``transfer_account_id`` when the leg is a transfer to
     another account), signed ``amount`` cents, ``memo``, and a display
     ``category_label`` -- the ``Parent:Child`` category path, or ``[Account]``
-    for a transfer leg. Empty list when the transaction is not split."""
+    for a transfer leg -- plus the leg's own ``tag`` name (``""`` when
+    untagged). Empty list when the transaction is not split."""
     rows = conn.execute(
-        "SELECT id, category_id, transfer_account_id, transfer_pair_id, amount, memo "
-        "FROM splits WHERE transaction_id=? ORDER BY id", (txn_id,),
+        "SELECT s.id, s.category_id, s.transfer_account_id, s.transfer_pair_id, "
+        "s.amount, s.memo, s.tag_id, g.name AS tag "
+        "FROM splits s LEFT JOIN tags g ON g.id = s.tag_id "
+        "WHERE s.transaction_id=? ORDER BY s.id", (txn_id,),
     ).fetchall()
     out = []
     for r in rows:
@@ -892,6 +906,8 @@ def get_splits(conn: sqlite3.Connection, txn_id: int) -> list[dict]:
             "amount": r["amount"],
             "memo": r["memo"] or "",
             "category_label": label,
+            "tag_id": r["tag_id"],
+            "tag": r["tag"] or "",
         })
     return out
 

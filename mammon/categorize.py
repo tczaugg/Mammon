@@ -42,7 +42,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from typing import Optional
 
-from mammon import ledger
+from mammon import category_tree, ledger
 from mammon.importers.record import normalize_payee
 
 # A learned pattern must be this consistent to be trusted for auto-fill.
@@ -301,10 +301,17 @@ def record_user_categorization(
     overwritten by :func:`learn_from_history`, so the next suggestion follows the
     override. Passing ``category_id=None`` records a user decision to leave this
     payee uncategorized (suppressing learned suggestions).
+
+    It also records the vote with :mod:`mammon.category_tree`, whose per-payee
+    tally drives the import review's confidence gate and the ranked category
+    picker. A register edit carries no bank text, so this teaches the payee
+    tally only and never the trie (see :func:`mammon.category_tree.learn`) --
+    but it is the same user decision, and the picker must reflect it.
     """
     pattern = normalized_pattern(payee)
     if not pattern:
         return
+    category_tree.learn(conn, payee, "", category_id)
     existing = conn.execute(
         "SELECT id, hit_count FROM import_mappings WHERE payee_pattern=?", (pattern,)
     ).fetchone()

@@ -237,8 +237,8 @@ class ImportReviewPanel(QWidget):
         self.accept_all_btn.clicked.connect(self._on_accept_all)
         self.discard_all_btn = QPushButton("Discard All")
         self.discard_all_btn.setToolTip(
-            "Drop every pending row without adding it to the register (they will "
-            "not reappear on a re-download).")
+            "Drop every pending row without adding it to the register. They are "
+            "removed, so downloading the same range again brings them back.")
         self.discard_all_btn.clicked.connect(self._on_discard_all)
         self.undo_all_btn = QPushButton("Undo All Matches")
         self.undo_all_btn.setToolTip(
@@ -431,8 +431,9 @@ class ImportReviewPanel(QWidget):
 
         Kept visible rather than deleted: it is the ground truth to compare
         against when two rows are confusable, the way back when a rename turns
-        out wrong, the bearings after an interruption, and the only route to
-        recovering something discarded by mistake."""
+        out wrong, and the bearings after an interruption. (Recovering a
+        DISCARDED row is no longer this view's job -- discarding removes the row,
+        so re-downloading the range brings it back.)"""
         for col in range(self.table.columnCount()):
             it = self.table.item(i, col)
             if it is not None:
@@ -507,7 +508,7 @@ class ImportReviewPanel(QWidget):
         self.row_selected.emit(self._entries[i])
 
     def _remove_and_advance(self, i: int, state: str = "accepted",
-                            txn_id=None) -> None:
+                            txn_id=None, *, drop: bool = False) -> None:
         """Retire the acted-on entry ``i`` and advance to the next actionable row.
 
         In "pending only" the row leaves the list, as it always did. In a mode
@@ -516,9 +517,15 @@ class ImportReviewPanel(QWidget):
         it visible, and it reappeared as soon as the user toggled the filter,
         because the reload re-queried what the in-memory list had thrown away.
 
+        ``drop`` forces removal in EVERY mode. That is for DISCARD, which now
+        deletes its ``review_items`` row: greying a row the database no longer
+        holds puts the screen at odds with a re-query, which is the same
+        disagreement the greying was introduced to fix, pointed the other way.
+
         Either way the selection advances to the next row still needing action,
         which is the classic auto-advance."""
-        show_actioned = (self.visibility.currentData() != prefs.VIS_PENDING)
+        show_actioned = (self.visibility.currentData() != prefs.VIS_PENDING
+                         and not drop)
         if show_actioned:
             entry = self._entries[i]
             try:
@@ -575,15 +582,16 @@ class ImportReviewPanel(QWidget):
         return txn_id
 
     def discard_index(self, i: int) -> None:
-        """Discard the pending row at ``i`` without adding it to the register
-        (the user's stray blank-line rows). Persisted rows are marked discarded so a
-        re-download will not re-add them; then the row is dropped and the
-        selection advances. An already-actioned row is left alone."""
+        """Discard the pending row at ``i`` without adding it to the register.
+        A persisted row is DELETED, so downloading the same range again brings it
+        back -- discard means "not now", not "never again". The row is then
+        dropped from the list and the selection advances. An already-actioned row
+        is left alone."""
         if i < 0 or i >= len(self._entries) or self._states[i].done:
             return
         entry = self._entries[i]
         import_review.discard_one(self.conn, getattr(entry, "review_id", None))
-        self._remove_and_advance(i, state="discarded")
+        self._remove_and_advance(i, state="discarded", drop=True)
         self.changed.emit()
 
     def accept_new(self, entry, values: dict) -> int:
@@ -612,10 +620,19 @@ class ImportReviewPanel(QWidget):
         # A '[Account]' category names a transfer target: resolve it to an
         # account id so save_new creates the double-entry (and learns the
         # statement text -> account mapping). Otherwise it is a plain category.
+        # Transfer detection takes precedence over category creation; only when
+        # the text is neither a transfer target nor blank is a category resolved.
         transfer_account_id = import_review.transfer_account_id_for_name(
             self.conn, cat_text)
+        # Accept is the commit point: a category the user typed and confirmed
+        # here must be CREATED and assigned, not silently dropped. The old
+        # lookup-only resolve returned None for a brand-new name, so the register
+        # posted the row with no category and the user had to re-add it by hand.
+        # resolve_or_create_category routes through ledger.resolve_category (the
+        # sole writer of category rows), so this stays the single write path.
         category_id = (None if transfer_account_id is not None
-                       else import_review.category_id_for_name(self.conn, cat_text))
+                       else import_review.resolve_or_create_category(
+                           self.conn, cat_text))
         txn_id = import_review.save_new(
             self.conn, self.account_id, m,
             payee=values.get("payee"), category_id=category_id,
@@ -664,7 +681,8 @@ class ImportReviewPanel(QWidget):
         resp = QMessageBox.question(
             self, "Discard All",
             "Discard all pending review rows? They will NOT be added to the "
-            "register, and will not reappear on a re-download.",
+            "register. They are removed, not hidden, so downloading the same "
+            "date range again brings them back.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if resp != QMessageBox.Yes:
             return
@@ -679,21 +697,56 @@ class ImportReviewPanel(QWidget):
 
     # ---- manual match -----------------------------------------------------
     def _on_context_menu(self, pos):
-        """Right-click a row -> offer Manual Match… for an un-actioned row."""
+        """Right-click a row -> Manual Match / Unmatch / Delete.
+
+        An ALREADY-ACTIONED row still gets a menu when it is a MATCHING row:
+        undoing one wrong match used to mean "Undo All Matches", tearing down
+        every correct one alongside it (by request)."""
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
         i = index.row()
-        if i < 0 or i >= len(self._entries) or self._states[i].done:
+        if i < 0 or i >= len(self._entries):
             return
+        entry = self._entries[i]
+        done = self._states[i].done
+        matched = bool(getattr(entry, "is_matching", False))
+        if done and not matched:
+            return                       # accepted NEW row: nothing to offer
         menu = QMenu(self)
-        match_act = menu.addAction("Manual Match…")
-        delete_act = menu.addAction("Delete Row")
+        match_act = unmatch_act = delete_act = None
+        if not done:
+            match_act = menu.addAction("Manual Match…")
+        if matched:
+            unmatch_act = menu.addAction("Unmatch")
+        if not done:
+            delete_act = menu.addAction("Delete Row")
+        if menu.isEmpty():
+            return
         chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
         if chosen is match_act:
             self.manual_match_index(i)
+        elif chosen is unmatch_act:
+            self.unmatch_index(i)
         elif chosen is delete_act:
             self.discard_index(i)
+
+    def unmatch_index(self, i: int) -> None:
+        """Break row ``i``'s match and return it to pending NEW.
+
+        Restores the register line's prior fitid/cleared/reconciled when the row
+        had been accepted, so undoing one match leaves the ledger exactly as
+        "Undo All Matches" would have for that single row."""
+        if i < 0 or i >= len(self._entries):
+            return
+        entry = self._entries[i]
+        if not import_review.unmatch_one(
+                self.conn, getattr(entry, "review_id", None)):
+            return
+        self.reload_pending()
+        self.changed.emit()
 
     def manual_match_index(self, i: int, *, chosen_id: Optional[int] = None) -> None:
         """Hand-pick the existing register line row ``i`` matches. When
@@ -704,7 +757,8 @@ class ImportReviewPanel(QWidget):
         if chosen_id is None:
             candidates = import_review.manual_match_candidates(
                 self.conn, self.account_id, entry.mapped)
-            dlg = ManualMatchDialog(candidates, self)
+            dlg = ManualMatchDialog(candidates, self,
+                                    amount_cents=entry.mapped.amount_cents)
             if dlg.exec_() != QDialog.Accepted:
                 return
             chosen = dlg.selected_candidate()
@@ -735,20 +789,29 @@ class ImportReviewPanel(QWidget):
 class ManualMatchDialog(QDialog):
     """Pick the existing register transaction a reviewed row corresponds to.
 
-    Shows the wide-window candidates (Date, Payee, Amount) from
+    Shows the wide-window candidates from
     :func:`import_review.manual_match_candidates`; the caller reads
-    :meth:`selected_candidate` on accept."""
+    :meth:`selected_candidate` on accept.
 
-    def __init__(self, candidates, parent=None):
+    A DIFFERENCE column is shown when the downloaded amount is supplied.
+    Candidates no longer have to match to the cent -- a scheduled payment whose
+    escrow moved is exactly the row this dialog exists to find -- so "$1,200.00"
+    on its own no longer tells the user whether they are looking at the payment
+    or at something else that month. The delta does."""
+
+    def __init__(self, candidates, parent=None, *, amount_cents=None):
         super().__init__(parent)
         self.setWindowTitle("Manual Match")
         self._candidates = list(candidates)
+        self._amount_cents = amount_cents
 
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(
             "Select the existing register transaction this downloaded row matches:"))
-        self.table = QTableWidget(len(self._candidates), 3)
-        self.table.setHorizontalHeaderLabels(["Date", "Payee", "Amount"])
+        show_diff = amount_cents is not None
+        self.table = QTableWidget(len(self._candidates), 4 if show_diff else 3)
+        self.table.setHorizontalHeaderLabels(
+            ["Date", "Payee", "Amount"] + (["Difference"] if show_diff else []))
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -760,6 +823,12 @@ class ManualMatchDialog(QDialog):
             amt = QTableWidgetItem(_fmt_amount(c.get("amount") or 0))
             amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(r, 2, amt)
+            if show_diff:
+                delta = int(c.get("amount") or 0) - int(amount_cents)
+                cell = QTableWidgetItem("--" if delta == 0
+                                        else _fmt_amount(delta))
+                cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(r, 3, cell)
         lay.addWidget(self.table)
         if self._candidates:
             self.table.selectRow(0)

@@ -294,6 +294,41 @@ _NON_RECORD_KEYS = frozenset({
     "datastorage", "data_storage", "summary", "execution_summary",
 })
 
+# Field names that make a dict a TRANSACTION row, mirroring what
+# ``import_review.map_row`` actually reads (``_map_date`` / ``_signed_cents`` /
+# the description vocabulary). A blacklist of metadata KEY NAMES cannot cover
+# this: a script's lookup table is named whatever that bank calls it, and the
+# next bank names it something else. Testing the SHAPE of the rows does.
+_ROW_DATE_KEYS = ("posteddate", "posted", "postdate", "date", "transactiondate",
+                  "effectivedate")
+_ROW_AMOUNT_KEYS = ("amount", "transactionamount", "amount_usd")
+_ROW_TEXT_KEYS = ("statementdescription", "transactiondescription",
+                  "description", "memo", "name")
+
+
+def _looks_like_rows(vals: list) -> bool:
+    """True when ``vals`` holds dicts that could be transactions.
+
+    A script may return several arrays and only some of them are rows. The
+    America First script declares "The subAccountList maps shortName to
+    accountId", so its ``output_data`` carries a lookup table of
+    ``{"id": 6239395, "shortName": "Checking"}`` beside the per-sub-account
+    transaction arrays. Gathered blindly, those 11 lookup entries became 11
+    review rows with no date, no amount and no text -- blank lines at the top of
+    the user's review list, and a tell that the payload was being flattened
+    rather than read. A dict with none of a date, an amount or a description is
+    not a transaction, whatever array it came from.
+    """
+    for row in vals:
+        if not isinstance(row, dict):
+            continue
+        keys = {str(k).lower() for k in row}
+        if (keys.intersection(_ROW_DATE_KEYS)
+                or keys.intersection(_ROW_AMOUNT_KEYS)
+                or keys.intersection(_ROW_TEXT_KEYS)):
+            return True
+    return False
+
 
 def _rows_from(out) -> Optional[list]:
     """Pull a flat list of row dicts out of a script's ``output_data`` value.
@@ -315,13 +350,19 @@ def _rows_from(out) -> Optional[list]:
             return rows
     # Fall back to every non-metadata value, so a script that named its array
     # (e.g. "shareSavings"), returned one list per extraction, or nested the
-    # rows under a wrapper dict still yields them.
+    # rows under a wrapper dict still yields them. An array that does not hold
+    # transaction-SHAPED dicts is skipped rather than concatenated: a script
+    # that returns a lookup table beside its rows (America First's
+    # ``subAccountList``) would otherwise contribute blank review rows, and the
+    # key name it uses is per-bank so only the shape can be tested
+    # (:func:`_looks_like_rows`).
     gathered = []
     for key, val in out.items():
         if str(key).lower() in _NON_RECORD_KEYS:
             continue
         if isinstance(val, list):
-            gathered.extend(r for r in val if isinstance(r, dict))
+            if _looks_like_rows(val):
+                gathered.extend(r for r in val if isinstance(r, dict))
         elif isinstance(val, dict):
             nested = _rows_from(val)
             if nested:

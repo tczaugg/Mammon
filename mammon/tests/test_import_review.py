@@ -519,20 +519,26 @@ def test_accept_all_saves_new_and_stamps_matches(conn, account):
     assert matched["fitid"] == "M-1" and matched["cleared"] == 1
 
 
-def test_discard_all_marks_discarded_and_blocks_readd(conn, account):
-    """discard_all: pending -> 0, nothing entered the register, rows persist as
-    discarded so a re-download of the same ids does NOT re-add them."""
+def test_discard_all_removes_rows_so_a_redownload_brings_them_back(conn, account):
+    """the user's bug: "I discarded them expecting I could download them again and
+    get another chance to match them" -- and only the genuinely new ids came
+    back, because the discarded rows stayed as tombstones the re-download's
+    INSERT OR IGNORE collided with.
+
+    Discard means "not now", not "never again": the rows are DELETED, so the
+    same download offers them again. A row the user truly never wants is excluded
+    by picking a different date range.
+    """
     import_review.persist_entries(conn, account, build_review(conn, account, _new_rows()))
     n = import_review.discard_all(conn, account)
     assert n == 2
     assert import_review.count_pending(conn, account) == 0
     assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM review_items").fetchone()[0] == 0
 
     added = import_review.persist_entries(conn, account, build_review(conn, account, _new_rows()))
-    assert added == 0
-    assert import_review.count_pending(conn, account) == 0
-    assert conn.execute(
-        "SELECT COUNT(*) FROM review_items WHERE state='discarded'").fetchone()[0] == 2
+    assert added == 2                                  # they come back
+    assert import_review.count_pending(conn, account) == 2
 
 
 def test_undo_all_matches_reverts_matched_txns(conn, account):
@@ -556,18 +562,17 @@ def test_undo_all_matches_reverts_matched_txns(conn, account):
 
 
 def test_manual_match_candidates_and_set_manual_match(conn, account):
-    """manual_match_candidates offers a WIDER DATE window than the auto match
-    (ordered by date proximity) but ONLY equal same-signed amounts -- the date
-    tolerance never loosens the amount match; set_manual_match flips a NEW entry
-    to a MATCHING with method 'manual' (and persists it)."""
+    """manual_match_candidates offers a WIDER DATE window than the auto match,
+    capped at MANUAL_WINDOW_DAYS (a fortnight); set_manual_match flips a NEW
+    entry to a MATCHING with method 'manual' (and persists it)."""
     # Downloaded row is 77.00 OUT -> -7700 signed cents, dated 2026-08-21. The
     # equal-amount register lines sit OUTSIDE the 3-day auto window (so the row
-    # stays NEW) but inside the +/-30d manual window.
+    # stays NEW) but inside the +/-15d manual window.
     near = ledger.add_transaction(conn, account, "2026-08-26", -7700, payee="Near")
-    wide = ledger.add_transaction(conn, account, "2026-09-15", -7700, payee="Wide")
+    wide = ledger.add_transaction(conn, account, "2026-09-03", -7700, payee="Wide")
     wrong_amt = ledger.add_transaction(conn, account, "2026-08-22", -1234, payee="WrongAmt")
     wrong_sign = ledger.add_transaction(conn, account, "2026-08-22", 7700, payee="WrongSign")
-    far = ledger.add_transaction(conn, account, "2026-06-01", -7700, payee="Far")
+    far = ledger.add_transaction(conn, account, "2026-09-15", -7700, payee="Far")
 
     [entry] = build_review(conn, account, [{
         "transactionId": "MM-1", "postedDate": "2026-08-21", "amount": "77.00",
@@ -577,10 +582,10 @@ def test_manual_match_candidates_and_set_manual_match(conn, account):
 
     cands = import_review.manual_match_candidates(conn, account, entry.mapped)
     ids = [c["id"] for c in cands]
-    assert near in ids and wide in ids                  # equal amount, within +/-30d
-    assert wrong_amt not in ids                         # different value -> excluded
+    assert near in ids and wide in ids                  # equal amount, within +/-15d
+    assert wrong_amt not in ids                         # nowhere near the value
     assert wrong_sign not in ids                        # opposite sign -> excluded
-    assert far not in ids                               # >30d out
+    assert far not in ids                               # >15d out
     assert ids.index(near) < ids.index(wide)            # nearest date first
 
     # A mismatched-amount/sign candidate cannot be forced through the confirm
@@ -644,36 +649,40 @@ def test_auto_match_is_strict_on_signed_amount_within_date_tolerance(conn, accou
     assert e3.is_new
 
 
-def test_manual_match_rejects_sign_and_amount_mismatch(conn, account):
-    """the user's bug: manual match 'would let me match almost anything'. A same-account
-    match means the download IS that register line, so the candidate's SIGNED
-    amount must equal the downloaded amount to the cent. The date tolerance only
-    widens the DATE search; a nearer-dated but wrong-sign/wrong-value row is
-    neither OFFERED nor accepted if hand-picked."""
+def test_manual_match_rejects_sign_and_far_off_amounts(conn, account):
+    """the user's bug: manual match 'would let me match almost anything'. The SIGN
+    gate is what that was really about and it still holds absolutely -- a
+    payment is never the same event as a deposit, however near in date or value.
+
+    The exact-cents rule that used to sit beside it is gone: it made the manual
+    path useless for the case that most needs it (a scheduled payment whose
+    escrow moved never equals the real debit). A near amount is now offered and
+    accepted; a far-off one is still neither.
+    """
     # Downloaded row: 50.00 OUT -> -5000 signed cents, dated 2026-08-20.
     equal_far = ledger.add_transaction(conn, account, "2026-08-27", -5000, payee="Equal")   # 7d off, equal
-    opp_sign = ledger.add_transaction(conn, account, "2026-08-21", 5000, payee="Venmo")      # 1d off, opp sign
-    diff_amt = ledger.add_transaction(conn, account, "2026-08-21", -5001, payee="Off1c")     # 1d off, 1c off
+    opp_sign = ledger.add_transaction(conn, account, "2026-08-21", 5000, payee="Venmo")     # 1d off, opp sign
+    near_amt = ledger.add_transaction(conn, account, "2026-08-21", -5001, payee="Off1c")    # 1d off, 1c off
+    far_amt = ledger.add_transaction(conn, account, "2026-08-21", -25000, payee="Way off")  # 5x
 
     [entry] = build_review(conn, account, [{
         "transactionId": "SM-1", "postedDate": "2026-08-20", "amount": "50.00",
         "isDebit": True, "statementDescription": "MYSTERY"}])
     assert entry.is_new                                  # equal_far is >3d -> no auto match
 
-    # Only the equal same-signed amount is OFFERED, despite opp_sign/diff_amt
-    # being NEARER in date.
     ids = [c["id"] for c in import_review.manual_match_candidates(conn, account, entry.mapped)]
-    assert ids == [equal_far]
+    assert ids[0] == equal_far          # the EXACT amount still heads the list
+    assert near_amt in ids              # a cent off is now offered...
+    assert opp_sign not in ids          # ...the opposite sign never is
+    assert far_amt not in ids           # ...nor an amount nowhere near it
 
-    # Even hand-picking a mismatch (bypassing the candidate list) is REJECTED --
-    # no match is created.
+    # Hand-picking past the candidate list is still gated.
     with pytest.raises(ValueError):
         import_review.set_manual_match(conn, entry, opp_sign)
     with pytest.raises(ValueError):
-        import_review.set_manual_match(conn, entry, diff_amt)
+        import_review.set_manual_match(conn, entry, far_amt)
     assert entry.is_new
 
-    # The exact same-signed amount within the manual tolerance IS accepted.
     import_review.set_manual_match(conn, entry, equal_far)
     assert entry.is_matching and entry.matched_txn_id == equal_far
 
@@ -768,7 +777,9 @@ def test_transfer_account_id_for_name_resolves_bracket_text(conn, account):
 # ---------------------------------------------------------------------------
 # discard a single review row (the fix 2): stray blank-line rows.
 # ---------------------------------------------------------------------------
-def test_discard_one_marks_only_that_row_discarded(conn, account):
+def test_discard_one_removes_only_that_row(conn, account):
+    """One discarded row leaves the list and the table; its neighbour is
+    untouched; and downloading it again offers it again."""
     entries = build_review(conn, account, [
         {"transactionId": "A", "postedDate": "2026-08-15", "amount": "5.00",
          "isDebit": True, "statementDescription": "COFFEE"},
@@ -781,12 +792,15 @@ def test_discard_one_marks_only_that_row_discarded(conn, account):
 
     remaining = import_review.load_pending(conn, account)
     assert [e.mapped.transaction_id for e in remaining] == ["B"]
-    # discarded rows stay in the table so a re-download won't re-add them
+    assert conn.execute("SELECT COUNT(*) FROM review_items").fetchone()[0] == 1
+
     again = import_review.persist_entries(
         conn, account, build_review(conn, account, [
             {"transactionId": "A", "postedDate": "2026-08-15", "amount": "5.00",
              "isDebit": True, "statementDescription": "COFFEE"}]))
-    assert again == 0
+    assert again == 1
+    assert {e.mapped.transaction_id
+            for e in import_review.load_pending(conn, account)} == {"A", "B"}
 
 
 def test_discard_one_none_id_is_noop(conn, account):
@@ -886,7 +900,14 @@ def test_near_match_is_count_aware_and_exact_identity_wins(conn, account):
 def test_accept_all_applies_the_learned_rename_and_category(conn, account):
     """Regression: Accept All saved the RAW mapped values, so a rename tree the
     user had spent weeks training produced bank gobbledygook the moment they used
-    the bulk button instead of accepting rows one at a time."""
+    the bulk button instead of accepting rows one at a time.
+
+    The CATEGORY half comes from a HAND-WRITTEN keyword rule here. Nothing
+    writes ``category_rules`` automatically any more (migration 57 purged what
+    the old learner had minted), so a row in it is a deliberate Rules-manager
+    entry and is honoured directly -- unlike the payee-scoped tree, which may
+    only ever propose a category that payee has already carried.
+    """
     from mammon import category_rules, rename_tree
 
     cat = ledger.create_category(conn, "Coffee")
@@ -905,6 +926,7 @@ def test_accept_all_applies_the_learned_rename_and_category(conn, account):
     predicted, predicted_cat = import_review.predict_fields(
         conn, entries[0].mapped)
     assert predicted == "Blue Bottle"
+    assert predicted_cat == cat
 
     assert import_review.accept_all(conn, account) == 1
     txn = conn.execute("SELECT * FROM transactions WHERE fitid='N-9'").fetchone()
@@ -919,8 +941,7 @@ def test_accept_all_learns_nothing_from_rows_nobody_read(conn, account):
     from mammon import rename_tree
 
     def taught():
-        return conn.execute(
-            "SELECT COUNT(*) FROM rename_node_payees").fetchone()[0]
+        return len(rename_tree.examples(conn))
 
     rename_tree.ensure_bootstrapped(conn)
     before = taught()
@@ -937,3 +958,361 @@ def test_accept_all_learns_nothing_from_rows_nobody_read(conn, account):
     assert taught() == before
     assert rename_tree.suggest(conn, "POS DEBIT 8842 WHOZIT LLC").action == \
         rename_tree.ACTION_LEAVE
+
+
+def test_a_row_that_cannot_be_a_transaction_never_reaches_the_review_list(conn, account):
+    """Backstop for the blank-lines bug (the user, on a fresh reload).
+
+    ``webslinger._rows_from`` now declines to gather a bank's lookup table, but
+    the review list must never show a row the user cannot act on, whatever the
+    source did -- so a mapped row with no date, no money and no text is dropped
+    here too. A zero-amount row that HAS a date or a description is a real
+    transaction and must survive.
+    """
+    entries = build_review(conn, account, [
+        {"id": 6239395, "shortName": "Household Checking"},          # lookup entry
+        {"id": 5896620, "shortName": "Checking"},                # lookup entry
+        {"transactionId": "R-1", "postedDate": "2026-08-15", "amount": "42.10",
+         "isDebit": True, "statementDescription": "COSTCO WHSE #1118"},
+        {"transactionId": "R-2", "postedDate": "2026-08-16", "amount": "0.00",
+         "statementDescription": "ZERO DOLLAR ADJUSTMENT"},      # real, keep it
+    ])
+    assert [e.mapped.transaction_id for e in entries] == ["R-1", "R-2"]
+    assert all(e.mapped.date for e in entries)
+
+
+def test_the_transaction_description_variant_is_read(conn, account):
+    """Regression: the SAME webSlinger script emitted ``statementDescription``
+    on one run and ``transactionDescription`` on the next, for byte-identical
+    Wells Fargo rows. Scripts are generated, so their field names drift; missing
+    the variant silently produced 214 review rows with no memo at all, and a row
+    with no text gives the categorizer nothing to learn and ``_prior_txn_for``
+    nothing to match.
+    """
+    shapes = [
+        {"transactionDate": "08/22/26", "transactionAmount": "$ 21.49",
+         "statementDescription": "ANTHROPIC* CLAUDE SUB ANTHROPIC.COMCA"},
+        {"transactionDate": "08/22/26", "transactionAmount": "$ 21.49",
+         "transactionDescription": "ANTHROPIC* CLAUDE SUB ANTHROPIC.COMCA"},
+    ]
+    a, b = build_review(conn, account, shapes)
+    assert a.mapped.memo == b.mapped.memo == "ANTHROPIC* CLAUDE SUB ANTHROPIC.COMCA"
+    assert a.mapped.date == b.mapped.date == "2026-08-22"
+    assert a.mapped.amount_cents == b.mapped.amount_cents
+
+
+# ---------------------------------------------------------------------------
+# scheduled pre-entries match on TOLERANCE, not on exact cents
+# ---------------------------------------------------------------------------
+def _sched(conn, account, date, cents, payee="US Bank"):
+    """A finance-calendar pre-entry: the marker is the visible ``num``, which is
+    what survives a QIF round trip (523 such rows on the reloaded ledger carry
+    it while ``scheduled`` is 0 on every one)."""
+    return ledger.add_transaction(conn, account, date, cents, payee=payee,
+                                  num=import_review.SCHED_NUM)
+
+
+def test_a_scheduled_payment_matches_after_the_escrow_moved(conn, account):
+    """the user's bug: the loan had not been updated for the last escrow rise, so the
+    pre-entered payment was for the wrong amount and the download did not match.
+
+    A scheduled amount is the finance calendar's MEDIAN of recent payments, so
+    it is wrong by construction the moment escrow or a rate moves. It still has
+    to meet its placeholder.
+    """
+    pending = _sched(conn, account, "2026-08-01", -120000)   # forecast $1,200.00
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-1", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert entry.label == LABEL_MATCHING
+    assert entry.match_method == "scheduled"
+    assert entry.matched_txn_id == pending
+
+
+def test_an_exact_match_still_beats_a_scheduled_one(conn, account):
+    """The tolerant tier runs LAST, so it only ever rescues a row that would
+    otherwise have been NEW -- it never displaces an exact match."""
+    _sched(conn, account, "2026-08-01", -120000)
+    exact = ledger.add_transaction(conn, account, "2026-08-01", -128544, payee="Exact")
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-2", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert entry.matched_txn_id == exact
+    assert entry.match_method == "date+amount"
+
+
+def test_two_scheduled_candidates_are_ambiguous_and_match_nothing(conn, account):
+    """A downloaded row carries no payee at classification time (map_row leaves
+    it empty on purpose), so with two in-window pre-entries there is nothing to
+    tell them apart. Reconciling the wrong one silently is worse than leaving
+    the row NEW for the user to match by hand."""
+    _sched(conn, account, "2026-08-01", -120000, payee="US Bank")
+    _sched(conn, account, "2026-08-02", -122000, payee="Provident Funding")
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-3", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "SOME MORTGAGE"}])
+    assert entry.is_new
+    assert entry.matched_txn_id is None
+
+
+def test_an_ordinary_row_gets_no_amount_tolerance(conn, account):
+    """The tolerance is bought by the 'Sched' marker. An ordinary register line
+    of a similar value is NOT the same transaction."""
+    ledger.add_transaction(conn, account, "2026-08-01", -120000, payee="Not scheduled")
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-4", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert entry.is_new
+
+
+def test_a_scheduled_payment_never_matches_the_opposite_sign(conn, account):
+    _sched(conn, account, "2026-08-01", 120000)              # a pre-entered DEPOSIT
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-5", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert entry.is_new
+
+
+def test_a_wildly_different_scheduled_amount_is_not_matched(conn, account):
+    """Tolerance, not a free pass: half the placeholder's own amount is the
+    limit, so a $1,200 pre-entry does not answer a $4,002 debit."""
+    _sched(conn, account, "2026-08-01", -120000)
+    [entry] = build_review(conn, account, [{
+        "transactionId": "L-6", "postedDate": "2026-08-01", "amount": "4002.00",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert entry.is_new
+
+
+def test_manual_candidates_never_reach_past_a_fortnight(conn, account):
+    """The hard cap, by request: past +/- 15 days a 'candidate' is guesswork
+    about a different month's payment."""
+    inside = ledger.add_transaction(conn, account, "2026-08-30", -7700, payee="In")
+    outside = ledger.add_transaction(conn, account, "2026-09-06", -7700, payee="Out")
+    mapped = import_review.map_row({
+        "postedDate": "2026-08-21", "amount": "77.00", "isDebit": True,
+        "statementDescription": "MYSTERY"})
+    ids = {c["id"] for c in import_review.manual_match_candidates(
+        conn, account, mapped, window_days=90)}    # asking wider changes nothing
+    assert inside in ids and outside not in ids
+
+
+def test_an_accepted_row_is_still_not_re_offered(conn, account):
+    """Discard deletes, but ACCEPT must not: an accepted row became a register
+    transaction, so re-offering it would duplicate work the user already did."""
+    import_review.persist_entries(conn, account, build_review(conn, account, [
+        {"transactionId": "K-1", "postedDate": "2026-08-15", "amount": "5.00",
+         "isDebit": True, "statementDescription": "COFFEE"}]))
+    assert import_review.accept_all(conn, account) == 1
+    assert import_review.count_pending(conn, account) == 0
+
+    again = import_review.persist_entries(conn, account, build_review(conn, account, [
+        {"transactionId": "K-1", "postedDate": "2026-08-15", "amount": "5.00",
+         "isDebit": True, "statementDescription": "COFFEE"}]))
+    assert again == 0
+    assert import_review.count_pending(conn, account) == 0
+
+
+# ---------------------------------------------------------------------------
+# match precedence, stealing, and undoing ONE match
+# ---------------------------------------------------------------------------
+def test_an_exact_match_outranks_a_tolerant_one_across_the_batch(conn, account):
+    """the user's bug: a mortgage row with the EXACT amount did not match, while a
+    later inexact row matched the very same register line.
+
+    Within one row the tolerant tier already ran last, but claiming is global:
+    a tolerant row earlier in the file took the line, and the exact row then
+    found it claimed and fell through to NEW. Precedence has to be global too.
+    """
+    pending = _sched(conn, account, "2026-08-01", -128544)
+    rows = [
+        # inexact, and FIRST in the file -- it used to win the line
+        {"transactionId": "T-1", "postedDate": "2026-08-01", "amount": "1200.00",
+         "isDebit": True, "statementDescription": "US BANK HOME MTG"},
+        # exact to the cent, later in the file
+        {"transactionId": "T-2", "postedDate": "2026-08-01", "amount": "1285.44",
+         "isDebit": True, "statementDescription": "US BANK HOME MTG"},
+    ]
+    inexact, exact = build_review(conn, account, rows)
+    assert exact.matched_txn_id == pending
+    assert exact.match_method == "date+amount"
+    assert inexact.is_new                      # the line was already spoken for
+
+
+def test_manual_match_steals_the_line_from_the_row_holding_it(conn, account):
+    """the user's bug: hand-matching onto a line another row already matched left
+    BOTH rows pointing at it. One register line is one event."""
+    pending = _sched(conn, account, "2026-08-01", -120000)
+    [holder] = build_review(conn, account, [{
+        "transactionId": "H-1", "postedDate": "2026-08-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    assert holder.matched_txn_id == pending    # took it on tolerance
+    import_review.persist_entries(conn, account, [holder])
+
+    [other] = build_review(conn, account, [{
+        "transactionId": "H-2", "postedDate": "2026-08-02", "amount": "1250.00",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    import_review.persist_entries(conn, account, [other])
+    import_review.set_manual_match(conn, other, pending)
+
+    assert other.matched_txn_id == pending
+    holders = conn.execute(
+        "SELECT id FROM review_items WHERE matched_txn_id=?", (pending,)).fetchall()
+    assert [int(r["id"]) for r in holders] == [other.review_id]
+
+
+def test_unmatch_one_returns_a_pending_row_to_new(conn, account):
+    ledger.add_transaction(conn, account, "2026-08-20", -2500, payee="Grocer")
+    [entry] = build_review(conn, account, [{
+        "transactionId": "U-1", "postedDate": "2026-08-21", "amount": "25.00",
+        "isDebit": True, "statementDescription": "GROCER"}])
+    import_review.persist_entries(conn, account, [entry])
+    assert entry.is_matching
+
+    assert import_review.unmatch_one(conn, entry.review_id) is True
+    [again] = import_review.load_pending(conn, account)
+    assert again.is_new and again.matched_txn_id is None
+
+
+def test_unmatch_one_restores_an_accepted_match(conn, account):
+    """The single-row twin of Undo All Matches: correcting ONE wrong match must
+    not require tearing down every right one."""
+    existing = ledger.add_transaction(conn, account, "2026-08-20", -2500, payee="Grocer")
+    import_review.persist_entries(conn, account, build_review(conn, account, [{
+        "transactionId": "U-2", "postedDate": "2026-08-21", "amount": "25.00",
+        "isDebit": True, "statementDescription": "GROCER"}]))
+    import_review.accept_all(conn, account)
+    assert _txn(conn, existing)["fitid"] == "U-2"
+    assert _txn(conn, existing)["cleared"] == 1
+
+    rid = conn.execute("SELECT id FROM review_items").fetchone()["id"]
+    assert import_review.unmatch_one(conn, rid) is True
+    after = _txn(conn, existing)
+    assert after["fitid"] is None and after["cleared"] == 0
+    [back] = import_review.load_pending(conn, account)
+    assert back.is_new
+
+
+def test_unmatch_one_ignores_a_row_that_is_not_matched(conn, account):
+    import_review.persist_entries(conn, account, build_review(conn, account, [{
+        "transactionId": "U-3", "postedDate": "2026-08-21", "amount": "25.00",
+        "isDebit": True, "statementDescription": "NOTHING TO MATCH"}]))
+    rid = conn.execute("SELECT id FROM review_items").fetchone()["id"]
+    assert import_review.unmatch_one(conn, rid) is False
+    assert import_review.unmatch_one(conn, None) is False
+
+
+# ---------------------------------------------------------------------------
+# accepting a match: the bank owns the amount, the register owns the rest
+# ---------------------------------------------------------------------------
+def test_accepting_a_match_takes_the_amount_and_keeps_payee_and_split(conn, account):
+    """the user's bug: hand-matching a mortgage whose pre-entered amount was stale
+    (the escrow had risen since the loan was last updated).
+
+    The bank's figure is what actually left the account, and a pre-entry's is a
+    forecast -- the calendar's median, or an amortization row. So the amount
+    comes from the download. The PAYEE and the CATEGORY/SPLIT are the user's and
+    stay: keeping them is the whole point of pre-entering.
+    """
+    principal = ledger.resolve_category(conn, "Mortgage:Principal")
+    escrow = ledger.resolve_category(conn, "Mortgage:Escrow")
+    tid = _sched(conn, account, "2026-09-01", -120000)          # forecast $1,200
+    ledger.set_splits(conn, tid, [
+        {"category_id": principal, "amount": -90000, "memo": "P&I"},
+        {"category_id": escrow, "amount": -30000, "memo": "Escrow"}])
+
+    [entry] = build_review(conn, account, [{
+        "transactionId": "M-1", "postedDate": "2026-09-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG ONLINE PMT"}])
+    import_review.persist_entries(conn, account, [entry])
+    import_review.accept_match(conn, entry)
+
+    row = _txn(conn, tid)
+    assert row["amount"] == -128544          # the bank's figure
+    assert row["payee"] == "US Bank"         # NOT the statement descriptor
+    assert row["cleared"] == 1
+    assert [s["amount"] for s in ledger.get_splits(conn, tid)] == [-90000, -30000]
+
+
+def test_undoing_a_match_puts_the_old_amount_back(conn, account):
+    """Accepting adopted the bank's amount, so undo has to restore the line's
+    own -- otherwise the register keeps a value the user never entered and has
+    no way to recover."""
+    tid = _sched(conn, account, "2026-09-01", -120000)
+    [entry] = build_review(conn, account, [{
+        "transactionId": "M-2", "postedDate": "2026-09-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}])
+    import_review.persist_entries(conn, account, [entry])
+    import_review.accept_match(conn, entry)
+    assert _txn(conn, tid)["amount"] == -128544
+
+    assert import_review.unmatch_one(conn, entry.review_id) is True
+    back = _txn(conn, tid)
+    assert back["amount"] == -120000
+    assert back["fitid"] is None and back["cleared"] == 0
+
+
+def test_undo_all_matches_also_restores_the_amount(conn, account):
+    """The bulk undo goes through the same restore helper, so it cannot drift
+    from the single-row one."""
+    tid = _sched(conn, account, "2026-09-01", -120000)
+    import_review.persist_entries(conn, account, build_review(conn, account, [{
+        "transactionId": "M-3", "postedDate": "2026-09-01", "amount": "1285.44",
+        "isDebit": True, "statementDescription": "US BANK HOME MTG"}]))
+    import_review.accept_all(conn, account)
+    assert _txn(conn, tid)["amount"] == -128544
+
+    assert import_review.undo_all_matches(conn, account) == 1
+    assert _txn(conn, tid)["amount"] == -120000
+    # ...and the row is still MATCHING, merely un-accepted -- that is Undo All
+    # Matches, not Unmatch.
+    [again] = import_review.load_pending(conn, account)
+    assert again.is_matching and again.matched_txn_id == tid
+
+
+# ---------------------------------------------------------------------------
+# transfers the PARSER never recognises, but the user teaches
+# ---------------------------------------------------------------------------
+def test_a_user_made_transfer_teaches_its_account(conn, account):
+    """the user's bug: five Venmo cashouts accepted onto [Venmo] and the sixth still
+    arrived blank.
+
+    "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD" does not read as a transfer, so
+    ``mapped.is_transfer`` is False -- and the learn branch, the rule lookup and
+    the register's Category cell all gated on that flag. The rule could only be
+    learned from, and applied to, text the parser already understood, which is
+    the one case it was not needed for. What the USER did is the correction.
+    """
+    venmo = ledger.create_account(conn, "Venmo", "checking")
+    desc = "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD"
+    [entry] = build_review(conn, account, [{
+        "transactionId": "V-1", "postedDate": "2026-05-04", "amount": "2250.00",
+        "isDebit": False, "statementDescription": desc}])
+    assert entry.mapped.is_transfer is False        # the parser sees nothing
+    import_review.persist_entries(conn, account, [entry])
+    import_review.save_new(conn, account, entry.mapped, payee="Venmo",
+                           transfer_account_id=venmo, review_id=entry.review_id)
+
+    [nxt] = build_review(conn, account, [{
+        "transactionId": "V-2", "postedDate": "2026-06-08", "amount": "1550.00",
+        "isDebit": False, "statementDescription": desc}])
+    assert nxt.mapped.transfer_account_id == venmo
+    assert import_review.predict_transfer_account(conn, nxt.mapped) == venmo
+
+
+def test_a_user_made_transfer_still_learns_its_payee(conn, account):
+    """A PARSER-detected transfer carries a derived "Transfer from X" payee, so
+    there is no rename to learn. A row the user turned into a transfer has a
+    payee they chose, and it is learned like any other."""
+    from mammon import rename_tree
+
+    venmo = ledger.create_account(conn, "Venmo", "checking")
+    desc = "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD"
+    for i in range(rename_tree.HIGH_CONFIDENCE_MIN_COUNT):
+        [entry] = build_review(conn, account, [{
+            "transactionId": f"P-{i}", "postedDate": "2026-05-04",
+            "amount": "10.00", "isDebit": False, "statementDescription": desc}])
+        import_review.persist_entries(conn, account, [entry])
+        import_review.save_new(conn, account, entry.mapped, payee="Venmo",
+                               transfer_account_id=venmo,
+                               review_id=entry.review_id)
+    assert rename_tree.suggest(conn, desc).payee == "Venmo"

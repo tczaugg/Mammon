@@ -18,11 +18,24 @@ data/
 download.log
 *_crash.log
 
-# Internal planning docs — never check in or reference from tracked files
-docs/parity_roadmap.md
+# Internal planning docs — never check in, and keep their names out of every
+# tracked file (so a grep of the committed tree never mentions them): match the
+# private roadmap and design-plan docs by SHAPE, not by literal name. The
+# *_roadmap.md and *_plan.md globs match only those two private docs under docs/;
+# the tracked docs/qif_import_research.md is a *_research.md and is deliberately
+# NOT covered by a wildcard, so it is listed nowhere here.
+docs/*_roadmap.md
 docs/quicken_research.md
 docs/priorities_proposal_2026-09.md
-docs/crypto_plan.md
+docs/*_plan.md
+
+# Build output: PyInstaller's dist/build, and the icon preview blowups.
+build/
+dist/
+*.spec.bak
+
+# Editor / vault state, personal to one machine.
+.obsidian/
 
 # Credentials / local config
 .env

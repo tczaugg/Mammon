@@ -47,6 +47,29 @@ Pruning is scoped to one (db-name, tag) pair, matched by the exact
 ``mammon.db.pre2001import.*.bak`` style checkpoints already in the folder, nor
 the other tag's snapshots.
 
+Each snapshot carries a "what changed" summary
+----------------------------------------------
+The file name records only a moment and a tag, which is not enough to pick the
+right one-minute backup out of a hundred near-identical auto snapshots. So every
+snapshot also carries a lightweight, READ-ONLY manifest of ledger totals
+(:func:`build_manifest`: per-account transaction count + balance in cents +
+latest row, plus the grand total) and a one-line summary diffing it against the
+chronologically previous snapshot (:func:`summarize`), e.g. ``+3 txns: Checking
++3 txns (bal 1,234.56->1,250.00)``. The first snapshot has no predecessor and
+reads as ``baseline / initial``.
+
+The manifest is a CONVENIENCE, never load-bearing: it is computed best-effort
+from the consistent staged copy and its absence never fails a backup nor alters
+one byte of the restorable payload. A delta stores it as extra keys in its JSON
+header, which is NOT part of the checksummed image (the ``sha256`` is of the
+reconstructed database bytes, never of the header), so it can never corrupt a
+restore. A full ``.bak`` is a plain SQLite file with nowhere to stash metadata,
+so its manifest/summary live in a ``<name>.bak.meta.json`` sidecar that
+retention (:func:`prune_backups`, :func:`purge_auto_backups`) and
+:func:`organize_backups` move and delete in lockstep with the ``.bak`` -- an
+orphaned sidecar is harmless but untidy, and a sidecar left behind would name a
+snapshot that no longer exists.
+
 Why incremental, and why by PAGE
 --------------------------------
 A 40-year ledger is ~12 MB, and a full snapshot every minute filled the folder
@@ -103,10 +126,11 @@ from mammon import sqldriver
 # into an unrelated tree -- the same CWD trap app._resolve_db already avoids
 # for the database itself. Overridable for tests via MAMMON_DATA_DIR.
 def _install_data_dir() -> Path:
-    env = os.environ.get("MAMMON_DATA_DIR")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parent.parent / "data"
+    """Kept as a thin alias so existing callers and tests still work; the rule
+    itself lives in :mod:`mammon.paths`, which is the only place that decides
+    where data goes."""
+    from mammon import paths
+    return paths.data_dir()
 
 
 def default_backup_dir() -> Path:
@@ -304,7 +328,8 @@ def delta_header(path) -> dict:
         return json.loads(fh.readline().decode("utf-8"))
 
 
-def _write_delta(new_path, baseline_path, out_path, *, when) -> Optional[Path]:
+def _write_delta(new_path, baseline_path, out_path, *, when,
+                 manifest=None, summary=None) -> Optional[Path]:
     """Write ``new_path`` as a page delta against ``baseline_path``.
 
     Returns the delta's path, or ``None`` when a delta is not worth taking (a
@@ -331,6 +356,15 @@ def _write_delta(new_path, baseline_path, out_path, *, when) -> Optional[Path]:
         "sha256": new_sha,              # of the RECONSTRUCTED file, checked on restore
         "created": when.isoformat(timespec="seconds"),
     }
+    # The change manifest/summary ride ALONG in the header but are NOT part of
+    # the checksummed image: ``sha256`` (above) is of the reconstructed database
+    # bytes, never of this JSON, and restore recomputes it the same way. So these
+    # keys can be any size and cannot corrupt a restore. Added only when present,
+    # so a header stays clean when the manifest could not be built.
+    if manifest is not None:
+        header["manifest"] = manifest
+    if summary:
+        header["summary"] = summary
     body = gzip.compress(b"".join(new_pages[i] for i in changed), 6)
     tmp = Path(str(out_path) + ".part")
     with open(tmp, "wb") as fh:
@@ -471,6 +505,170 @@ def plaintext_snapshots(db_path, backup_dir=None) -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Change summaries: a human-readable "what changed" line per snapshot
+# ---------------------------------------------------------------------------
+_META_EXT = ".meta.json"
+
+
+def _fmt_cents(cents) -> str:
+    """Integer cents -> ``1,234.56`` (thousands-separated, sign in front).
+
+    A deliberate local mirror of :func:`mammon.ui.models.fmt_cents`: this module
+    and its ``python -m mammon.backup`` CLI must stay headless, and importing the
+    Qt UI layer merely to format a summary line would drag PyQt into every
+    command-line invocation. Integer arithmetic only -- money is never a float."""
+    c = int(cents)
+    sign = "-" if c < 0 else ""
+    c = abs(c)
+    return f"{sign}{c // 100:,}.{c % 100:02d}"
+
+
+def build_manifest(conn) -> dict:
+    """A small, stable, READ-ONLY census of a ledger for change summaries.
+
+    Per account: id, name, transaction count, balance in signed cents, and the
+    latest row's date/payee; plus the grand total and the schema version. It
+    never writes (the single-writer rule -- a summary must not touch the ledger)
+    and is safe on a ``query_only`` connection. Balances come from
+    :func:`ledger.account_balance` so they match what the register shows."""
+    from mammon import db, ledger
+    accounts = []
+    total = 0
+    for a in ledger.list_accounts(conn, include_closed=True, include_hidden=True):
+        aid = a["id"]
+        n = int(conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE account_id=?",
+            (aid,)).fetchone()[0])
+        last = conn.execute(
+            "SELECT date, payee FROM transactions WHERE account_id=? "
+            "ORDER BY date DESC, id DESC LIMIT 1", (aid,)).fetchone()
+        accounts.append({
+            "id": aid,
+            "name": a["name"],
+            "txns": n,
+            "balance_cents": int(ledger.account_balance(conn, aid)),
+            "last_date": last["date"] if last else None,
+            "last_payee": last["payee"] if last else None,
+        })
+        total += n
+    return {
+        "schema_version": db.SCHEMA_VERSION,
+        "total_txns": total,
+        "accounts": accounts,
+    }
+
+
+def _safe_manifest(db_file, *, key: Optional[str] = None) -> Optional[dict]:
+    """:func:`build_manifest` over a snapshot file, or ``None`` on any trouble.
+
+    Opened read-only, with the same key the snapshot was written with. A failure
+    here (a locked file, an unexpected schema) must never abort the backup that
+    is already safely written -- the manifest is a convenience, not the copy."""
+    from mammon import db
+    try:
+        conn = db.connect(str(db_file), key=key)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            return build_manifest(conn)
+        finally:
+            conn.close()
+    except Exception:      # pragma: no cover - manifest is best-effort
+        return None
+
+
+def summarize(prev: Optional[dict], new: Optional[dict]) -> str:
+    """A short human 'what changed' line comparing two manifests.
+
+    Ordered the way someone scanning restore points reads: the net transaction
+    change first, then the accounts that moved and how their balance shifted.
+    Pure string building over integer cents (via :func:`_fmt_cents`) -- no
+    floats, no ledger access. The first-ever snapshot has no predecessor and
+    reports a baseline; an unchanged one reports ``no changes``."""
+    if not new:
+        return ""
+    if not prev:
+        return (f"baseline / initial ({new.get('total_txns', 0)} txns, "
+                f"{len(new.get('accounts', []))} accounts)")
+    prev_by = {a["id"]: a for a in prev.get("accounts", [])}
+    new_by = {a["id"]: a for a in new.get("accounts", [])}
+    parts: list = []
+    for aid, a in new_by.items():
+        p = prev_by.get(aid)
+        if p is None:
+            parts.append(f"new {a['name']} (+{a['txns']} txns)")
+            continue
+        dtx = a["txns"] - p["txns"]
+        dbal = a["balance_cents"] - p["balance_cents"]
+        if not dtx and not dbal:
+            continue
+        seg = a["name"]
+        if dtx:
+            seg += f" {dtx:+d} txns"
+        if dbal:
+            seg += (f" (bal {_fmt_cents(p['balance_cents'])}->"
+                    f"{_fmt_cents(a['balance_cents'])})")
+        parts.append(seg)
+    for aid, p in prev_by.items():
+        if aid not in new_by:
+            parts.append(f"deleted {p['name']}")
+    if not parts:
+        return "no changes"
+    limit = 6
+    if len(parts) > limit:
+        parts = parts[:limit] + [f"(+{len(parts) - limit} more)"]
+    dtot = new.get("total_txns", 0) - prev.get("total_txns", 0)
+    head = f"{dtot:+d} txns" if dtot else "balances changed"
+    return f"{head}: " + "; ".join(parts)
+
+
+def _meta_path(bak_path) -> Path:
+    """The metadata sidecar for a full ``.bak`` (deltas carry theirs in-header)."""
+    return Path(str(bak_path) + _META_EXT)
+
+
+def _write_meta_sidecar(bak_path, manifest, summary, when) -> None:
+    """Write a full snapshot's manifest/summary sidecar. No-op without a
+    manifest, so a best-effort miss leaves no stub behind."""
+    if manifest is None:
+        return
+    meta = {
+        "manifest": manifest,
+        "summary": summary,
+        "created": when.isoformat(timespec="seconds"),
+    }
+    _meta_path(bak_path).write_text(json.dumps(meta), encoding="utf-8")
+
+
+def read_meta(snapshot) -> dict:
+    """The recorded manifest/summary for a snapshot, or ``{}`` if it has none.
+
+    A delta keeps them in its JSON header; a full ``.bak`` in its sidecar.
+    Snapshots written before change summaries existed simply return ``{}`` --
+    that is not an error; the caller falls back to a plain listing."""
+    snapshot = Path(snapshot)
+    try:
+        if is_delta(snapshot):
+            h = delta_header(snapshot)
+            return {"manifest": h.get("manifest"), "summary": h.get("summary")}
+        meta = _meta_path(snapshot)
+        if meta.exists():
+            return json.loads(meta.read_text(encoding="utf-8"))
+    except Exception:      # pragma: no cover - unreadable/legacy snapshot
+        pass
+    return {}
+
+
+def read_manifest(snapshot) -> Optional[dict]:
+    """The change manifest recorded for a snapshot, or ``None``."""
+    return read_meta(snapshot).get("manifest")
+
+
+def snapshot_summary(snapshot) -> Optional[str]:
+    """The one-line change summary recorded for a snapshot, or ``None``."""
+    return read_meta(snapshot).get("summary")
+
+
 def create_backup(
     source: Union[sqlite3.Connection, str, Path],
     db_path=None,
@@ -538,18 +736,36 @@ def create_backup(
         if own:
             conn.close()
 
+    # A lightweight, read-only "what changed" manifest + summary for this
+    # snapshot, computed from the CONSISTENT staged copy so it describes exactly
+    # these bytes. Best-effort: it never blocks or fails the backup. The summary
+    # diffs against the previous snapshot OF THE SAME TAG -- within one tag the
+    # timestamp-before-extension name sorts chronologically, so ``[-1]`` is the
+    # true predecessor (across tags it would not: the tag sorts ahead of the
+    # stamp). Each tag thus forms its own chain: an auto diffs the last minute, a
+    # manual diffs since the last manual. The first of a tag has no predecessor
+    # and reads as a baseline.
+    manifest = _safe_manifest(staged, key=key)
+    prior = list_backups(db_path, tag=tag, backup_dir=backup_dir)
+    prev_manifest = read_manifest(prior[-1]) if prior else None
+    summary = summarize(prev_manifest, manifest)
+
     result = dest_path
     if incremental:
         baseline = latest_full(db_path, tag=tag, backup_dir=backup_dir)
         if baseline is not None:
             delta = dest_dir / backup_name(db_path, tag, when, DELTA_EXT)
             try:
-                if _write_delta(staged, baseline, delta, when=when) is not None:
+                if _write_delta(staged, baseline, delta, when=when,
+                                manifest=manifest, summary=summary) is not None:
                     result = delta
             except Exception:      # pragma: no cover - any trouble -> keep the full copy
                 result = dest_path
     if result is dest_path or result == dest_path:
         staged.replace(dest_path)
+        # A full .bak has nowhere to hold metadata, so its manifest/summary go in
+        # a sidecar that retention removes in lockstep with the .bak.
+        _write_meta_sidecar(dest_path, manifest, summary, when)
     else:
         staged.unlink(missing_ok=True)
 
@@ -628,6 +844,7 @@ def prune_backups(db_path, tag: str = AUTO_TAG, keep: int = DEFAULT_AUTO_KEEP,
             if f.suffix == FULL_EXT and f.name in protected:
                 continue             # a delta we are keeping still needs it
             f.unlink()
+            _meta_path(f).unlink(missing_ok=True)   # a .bak's sidecar goes with it
             removed.append(f)
     return removed
 
@@ -687,6 +904,7 @@ def purge_auto_backups(
             continue
         try:
             path.unlink()
+            _meta_path(path).unlink(missing_ok=True)   # a .bak's sidecar goes with it
         except OSError:  # pragma: no cover - vanished/locked; skip, retry next tick
             continue
         removed.append(path)
@@ -724,21 +942,29 @@ def organize_backups(backup_dir=None, *, dry_run: bool = False) -> list:
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             p.replace(dest)
+            # A full snapshot's sidecar rides along, so its summary is not
+            # orphaned in the flat folder when the .bak moves into its subfolder.
+            side = _meta_path(p)
+            if side.exists():
+                side.replace(_meta_path(dest))
         moved.append((p, dest))
     return moved
 
 
 def _describe(path: Path) -> str:
-    """One listing line: kind, size, and what a delta depends on."""
+    """One listing line: kind, size, what a delta depends on, and (if recorded)
+    the snapshot's change summary."""
     size = path.stat().st_size
+    summary = snapshot_summary(path)
+    tail = f"   {summary}" if summary else ""
     if path.suffix != DELTA_EXT:
-        return f"{path.name:<52} full   {size/1024/1024:>8.2f} MB"
+        return f"{path.name:<52} full   {size/1024/1024:>8.2f} MB{tail}"
     try:
         h = delta_header(path)
         dep = f"{len(h['pages'])} pages of {h['page_count']} <- {h['baseline']}"
     except Exception as exc:                # pragma: no cover - damaged file
         dep = f"UNREADABLE ({exc})"
-    return f"{path.name:<52} delta  {size/1024:>8.1f} KB  {dep}"
+    return f"{path.name:<52} delta  {size/1024:>8.1f} KB  {dep}{tail}"
 
 
 def _main(argv=None) -> int:

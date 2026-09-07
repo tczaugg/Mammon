@@ -43,7 +43,7 @@ Only when the file is actually encrypted. A plaintext ledger never prompts.
 | Starting the app | `app._launch_gui_locked` asks before opening; cancelling exits |
 | File → Open / New Database | `MainWindow.open_database` asks; cancelling leaves the current ledger open |
 | File → Restore from Backup | The restored file opens through that same path, so it asks when that snapshot is encrypted |
-| Settings → Database Password | Asks for the current password before changing it |
+| File → Database Password | Asks for the current password before changing it |
 
 The prompt allows three attempts, then stops.
 
@@ -56,7 +56,7 @@ QSettings, to the database, or to any file, and closing the app discards it.
 
 ## Setting, changing, and removing a password
 
-Settings → **Database Password…** does all three. Leaving the new password blank removes
+File → **Database Password…** does all three. Leaving the new password blank removes
 encryption.
 
 Conversion is never done in place:

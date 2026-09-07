@@ -1,14 +1,15 @@
-"""Management surface for the learned payee-renaming tree.
+"""Management surface for the learned payee renames.
 
-Replaces the old ``keyword -> payee`` rules dialog. Payee renaming now learns
-into an online discriminative tree (:mod:`mammon.rename_tree`), so instead of
-hand-edited keyword rows this dialog reports, per learned payee, how many times a
-rename to it was APPLIED and how many times it was OVERRIDDEN, alongside how much
-evidence the tree holds. A payee can be forgotten (removed from the tree).
+Replaces the old ``keyword -> payee`` rules dialog. Payee renaming is a decision
+tree rebuilt from the user's accepted corrections (:mod:`mammon.rename_tree`),
+so instead of hand-edited keyword rows this dialog reports, per learned payee,
+how many times a rename to it was APPLIED and how many times it was OVERRIDDEN,
+alongside how many corrections resolve to it. A payee can be forgotten (its
+examples removed).
 
-Auto-rename is not a tunable knob: the tree decides by node payee CARDINALITY (a
-single payee auto-renames, several offer a typeable dropdown), so there is no
-confidence threshold to adjust here.
+Auto-rename is not a tunable knob: a matched leaf with ONE payee behind at least
+two corrections fills the cell, several payees offer a typeable dropdown, so
+there is no confidence threshold to adjust here.
 
 The selection wiring (``currentCellChanged`` -> ``_sync_buttons``) is connected so
 the Delete button enables on a single click -- the omission that made the old
@@ -65,9 +66,9 @@ class RenameRulesDialog(QDialog):
         layout = QVBoxLayout(self)
         hint = QLabel(
             "Learned from your import-review renames. Mammon auto-fills a payee "
-            "when the match points to a single payee, offers a typeable dropdown "
-            "when several payees share the pattern, and leaves the row unchanged "
-            "when the match is too weak.")
+            "once the same bank text has been renamed to it at least twice, "
+            "offers a typeable dropdown when several payees share the pattern, "
+            "and shows the bank's own text when nothing matches.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         layout.addWidget(self.table)

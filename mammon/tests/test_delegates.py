@@ -1,7 +1,9 @@
 """Register category-editor parity tests (issues 2 and 6).
 
 Colon-completes-the-parent, case-insensitive category matching (no spurious
-"create new category?" prompt), and the TAB-into-field append cursor state.
+"create new category?" prompt), and the editor's neutral pre-focus cursor state
+(the Tab-selects / click-appends choice itself is made on focus-in and is covered
+by test_editor_tab_select.py).
 """
 from __future__ import annotations
 
@@ -110,7 +112,8 @@ def test_transfer_target_is_not_a_new_category(qapp, conn):
 
 
 # ---------------------------------------------------------------------------
-# TAB-into-field append cursor state (issue 2)
+# neutral pre-focus cursor state (issue 2; the focus-in choice is in
+# test_editor_tab_select.py)
 # ---------------------------------------------------------------------------
 def test_setmodeldata_existing_category_case_variant_accepts_without_prompt(
         qapp, conn, monkeypatch):
@@ -162,7 +165,11 @@ def test_category_editor_cursor_at_end_no_selection(qapp, conn):
     delegate.setEditorData(editor, idx)
     le = editor.lineEdit()
     assert le.text() == "Business"
-    assert le.hasSelectedText() is False        # nothing selected -> first key appends
+    # Neutral pre-focus state (setEditorData runs before the editor is focused). The
+    # append-vs-replace choice is made a moment later on focus-in, keyed on the focus
+    # reason -- Tab selects-all (replaces), a mouse click appends. See
+    # test_editor_tab_select.py.
+    assert le.hasSelectedText() is False
     assert le.cursorPosition() == len("Business")
 
 

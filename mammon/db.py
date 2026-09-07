@@ -1534,6 +1534,270 @@ CREATE INDEX idx_crypto_txn_fitid        ON crypto_transactions(fitid);
 CREATE INDEX idx_crypto_holdings_account ON crypto_holdings(account_id);
 """
 
+# 54 -- completes first-class tags (parity roadmap item 12).
+#
+# Three gaps closed at once, all in the same feature:
+#
+# `splits.tag_id` -- a tag PER SPLIT LEG. `transaction_tags` is keyed on the
+# transaction, so until now a tag could only describe a whole row. Quicken tags
+# a split leg (`SBusiness:Research/Rig 8`), and that is the case the tag exists
+# to serve: one parts order split across several projects. Unioning those onto
+# the parent would credit the WHOLE order to every project in it, silently
+# overstating each one in a by-tag spending report -- the same double-count the
+# transfer rules exist to prevent. A leg carries at most one tag because that is
+# all QIF can express; the many-per-ROW model is unchanged and still lives in
+# `transaction_tags`.
+#
+# `tags.color` -- a hex string (`#3b6ea5`), NULL meaning "not chosen", which the
+# UI fills from the shared categorical palette. Colors are per-tag identity, so
+# a tag keeps its color between the register, the By Tag report and chart
+# wedges, where color previously followed a slice's RANK and changed as the
+# ranking moved.
+#
+# `tags.description` -- Quicken's tag list carries one (`!Type:Tag` N/D pairs),
+# and discarding it on import is the bug this migration's own import fix is
+# about; there is no reason to drop it a second time on the way in.
+_V54 = """
+ALTER TABLE splits ADD COLUMN tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL;
+CREATE INDEX idx_splits_tag ON splits(tag_id);
+ALTER TABLE tags ADD COLUMN color TEXT;
+ALTER TABLE tags ADD COLUMN description TEXT;
+"""
+
+# ---------------------------------------------------------------------------
+# v55 -- the per-payee category tree (mammon.category_tree).
+#
+# The flat ``category_rules`` keyword table learns a rule from ONE correction,
+# keyed on the first non-noise token of the raw text, matched GLOBALLY. Replayed
+# over a new user's first year (625 accepted rows) it fired on 67% of rows and
+# was wrong on 26% of those, and half of the errors proposed a category never
+# seen for that payee -- a rule learned from one merchant firing on an unrelated
+# one. The town name "ANYTOWN" (Anytown UT, in the tail of every local
+# card swipe) became a Utilities:Gas & Electric rule and then fired on Subway,
+# O'Reilly, Clegg Automotive and the youth theater.
+#
+# The replacement scopes every decision to the resolved payee: one small
+# discrimination tree per payee, over the SOURCE TEXT tokens, so a candidate
+# category can only ever be one that payee has actually carried.
+#
+#   category_nodes        the trie; one root per normalized payee, children keyed
+#                         by the token that split them
+#   category_node_labels  category vote counts at a node
+#   category_payee_stats  category vote counts for the payee overall -- the
+#                         coherence gate and the dropdown ranking read this
+#   category_token_freq   token -> (freq, label entropy) snapshot for ranking
+# ---------------------------------------------------------------------------
+_V55 = """
+CREATE TABLE category_nodes (
+    id        INTEGER PRIMARY KEY,
+    parent_id INTEGER REFERENCES category_nodes(id) ON DELETE CASCADE,
+    payee_key TEXT NOT NULL,                       -- normalized payee (the root)
+    token     TEXT                                 -- NULL on a root node
+);
+CREATE INDEX idx_category_nodes_payee ON category_nodes(payee_key);
+CREATE UNIQUE INDEX idx_category_nodes_child
+    ON category_nodes(parent_id, token);
+
+CREATE TABLE category_node_labels (
+    id          INTEGER PRIMARY KEY,
+    node_id     INTEGER NOT NULL REFERENCES category_nodes(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX idx_category_node_label
+    ON category_node_labels(node_id, category_id);
+
+CREATE TABLE category_payee_stats (
+    id          INTEGER PRIMARY KEY,
+    payee_key   TEXT NOT NULL,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX idx_category_payee_stat
+    ON category_payee_stats(payee_key, category_id);
+
+CREATE TABLE category_token_freq (
+    token   TEXT PRIMARY KEY,
+    freq    INTEGER NOT NULL DEFAULT 0,
+    entropy REAL
+);
+
+"""
+
+
+# ---------------------------------------------------------------------------
+# v56 -- the per-token category distribution ``category_token_freq.entropy`` is
+# computed from.
+#
+# It has to be stored, not derived on demand: ranking decides which token a trie
+# walk descends on, so it must stay correct as rows are learned ONE AT A TIME
+# during a review session, not only when a snapshot is rebuilt. Without it a
+# freshly learned token has NULL entropy, every token ties, ranking degenerates
+# to frequency, and the Costco trie splits on the token COSTCO -- which both
+# branches carry and which therefore discriminates nothing, sending
+# "COSTCO WHSE ..." down the fuel branch.
+#
+# This is a SEPARATE migration rather than an edit to _V55 because a real
+# database had already applied _V55 by the time the gap was found. IF NOT EXISTS
+# so a database created from either shape upgrades cleanly.
+# ---------------------------------------------------------------------------
+_V56 = """
+CREATE TABLE IF NOT EXISTS category_token_labels (
+    id          INTEGER PRIMARY KEY,
+    token       TEXT NOT NULL,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_category_token_label
+    ON category_token_labels(token, category_id);
+"""
+
+
+# ---------------------------------------------------------------------------
+# v57 -- purge every learned category rule.
+#
+# ``category_rules`` was grown one row per correction by
+# ``category_rules.learn_from_edit``, keyed on the first non-noise token of the
+# raw text and matched GLOBALLY. Replayed over a real first year it fired on 67%
+# of rows and was wrong on 26% of those; the town name in the tail of every local
+# card swipe ("ANYTOWN", from Anytown UT) became a Utilities:Gas & Electric
+# rule that then fired on Subway, O'Reilly, Clegg Automotive and the youth
+# theatre. Every row in a real ledger came from that learner -- on the reference
+# ledger all 228 did: 67 carry multi-token keywords, which only
+# ``refine_keyword`` produces and which the Rules manager's Add dialog cannot
+# create, and none carries a condition, which only that editor can set.
+#
+# Auto-categorization now lives in the per-payee tree (mammon.category_tree,
+# v55/v56) and nothing writes this table any more. Keeping the old rows would
+# leave the broken engine's output quietly influencing predictions forever, so
+# they go. The TABLE stays: it is now hand-authored only, which is what makes a
+# rule in it a deliberate instruction rather than a guess.
+# ---------------------------------------------------------------------------
+_V57 = """
+DELETE FROM category_rules;
+"""
+
+
+# ---------------------------------------------------------------------------
+# v58 -- delete review rows that cannot be transactions.
+#
+# A webSlinger script returns one array per extraction, and the gather-every-list
+# fallback in ``webslinger._rows_from`` concatenated ALL of them. America First's
+# script declares "The subAccountList maps shortName to accountId", so its
+# lookup table -- ``{"id": 6239395, "shortName": "Checking"}`` -- was flattened in
+# with the transactions and became review rows with no date, no amount and no
+# text: eleven blank lines at the top of the user's review list on a fresh
+# reload. ``_rows_from`` now tests each array's row SHAPE (a per-bank key name
+# cannot be blacklisted) and ``import_review.build_review`` drops such rows as a
+# backstop, but the ones already stored have to go.
+#
+# Deliberately narrow: a row is removed only when it has NO date, NO amount, NO
+# payee, NO memo and NO check number, is not an investment row, and was never
+# accepted. A zero-amount row that carries a date or a description is a real,
+# reviewable transaction and stays.
+# ---------------------------------------------------------------------------
+_V58 = """
+DELETE FROM review_items
+ WHERE COALESCE(date,'') = ''
+   AND COALESCE(amount,0) = 0
+   AND COALESCE(payee,'') = ''
+   AND COALESCE(memo,'') = ''
+   AND COALESCE(check_number,'') = ''
+   AND COALESCE(is_investment,0) = 0
+   AND accepted_txn_id IS NULL;
+"""
+
+
+# ---------------------------------------------------------------------------
+# v59 -- remember a matched row's PRIOR amount.
+#
+# Accepting a match now adopts the bank's amount (see
+# ``import_review.accept_match``): the register line may be a scheduled
+# pre-entry whose figure is a forecast -- the finance calendar's median, or an
+# amortization row whose escrow has since moved -- and the bank's number is the
+# one that actually happened. The payee and the category/split stay as the user
+# has them.
+#
+# Undo therefore has to be able to put the old amount back, alongside the
+# fitid/cleared/reconciled it already restores, or ``unmatch_one`` would leave
+# the register holding a value the user never entered and could not recover.
+# ---------------------------------------------------------------------------
+_V59 = """
+ALTER TABLE review_items ADD COLUMN prior_amount INTEGER;
+"""
+
+
+# ---------------------------------------------------------------------------
+# v60 -- the rename EXAMPLE LOG replaces the online rename/action tries.
+#
+# Payee renaming and investment-action mapping are now a decision tree rebuilt
+# from the user's accepted corrections at every prediction
+# (:mod:`mammon.rename_tree`); nothing is learned online any more, so the trie
+# tables (``rename_nodes``, ``rename_node_payees``, ``rename_token_freq`` and
+# their ``action_*`` twins) go. What replaces them is the CORPUS: one row per
+# accepted review row -- the source text, the source's own payee field, the
+# label the user chose, and the id of the transaction the accept created. The
+# label is read LIVE through that id (a payee edited in the register is the
+# correction of a correction); the stored one is the fallback once the
+# transaction is gone.
+#
+# This table is what review retention must never touch. ``review_items`` keeps
+# three batches or a year, whichever is more, and then purges; a rename taught
+# from a row that has since been purged -- an annual bill -- lives here.
+#
+# Seeded from the accepted review rows on hand. Only CORRECTIONS are seeded for
+# payees: a row whose payee is its own description (case-insensitively -- the
+# title-cased default the register shows) or its supplied payee field was kept
+# as-is, and the loader would drop it anyway. Investment accepts seed the
+# action domain; the review row's ``action`` is the importer's raw guess and
+# rides along as ``extra`` (the loader blanks it when it is already a canonical
+# action). The old tries are not converted: the reference ledger's held 1,555
+# payees bootstrapped from hand-typed memos, which is the "name I never entered"
+# this rewrite exists to stop. ``rename_stats`` / ``rename_meta`` stay.
+# ---------------------------------------------------------------------------
+_V60 = """
+CREATE TABLE rename_examples (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,                  -- 'payee' | 'action'
+    txn_id     INTEGER,                        -- transactions.id / investment_transactions.id (live label)
+    review_id  INTEGER,                        -- the review row it came from (informational; may be purged)
+    text       TEXT NOT NULL DEFAULT '',       -- the bank's description, verbatim
+    extra      TEXT NOT NULL DEFAULT '',       -- the source's own payee field / raw action text
+    label      TEXT NOT NULL,                  -- what the user chose at accept time (fallback)
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_rename_examples_kind ON rename_examples(kind, id);
+CREATE INDEX idx_rename_examples_txn ON rename_examples(kind, txn_id);
+
+INSERT INTO rename_examples(kind, txn_id, review_id, text, extra, label, created_at)
+SELECT 'payee', t.id, ri.id, COALESCE(ri.memo, ''),
+       CASE WHEN COALESCE(ri.payee_supplied, 0) = 1 THEN COALESCE(ri.payee, '') ELSE '' END,
+       t.payee, COALESCE(ri.created_at, datetime('now'))
+  FROM review_items ri JOIN transactions t ON t.id = ri.accepted_txn_id
+ WHERE ri.state = 'accepted' AND ri.label = 'NEW'
+   AND COALESCE(ri.is_investment, 0) = 0 AND COALESCE(ri.is_transfer, 0) = 0
+   AND COALESCE(TRIM(t.payee), '') <> ''
+   AND LOWER(TRIM(t.payee)) <> LOWER(TRIM(COALESCE(ri.memo, '')))
+   AND LOWER(TRIM(t.payee)) <> LOWER(TRIM(COALESCE(ri.payee, '')))
+ ORDER BY ri.accepted_txn_id;
+
+INSERT INTO rename_examples(kind, txn_id, review_id, text, extra, label, created_at)
+SELECT 'action', it.id, ri.id, COALESCE(ri.memo, ''), COALESCE(ri.action, ''),
+       it.action, COALESCE(ri.created_at, datetime('now'))
+  FROM review_items ri JOIN investment_transactions it ON it.id = ri.accepted_txn_id
+ WHERE ri.state = 'accepted' AND ri.label = 'NEW' AND COALESCE(ri.is_investment, 0) = 1
+   AND COALESCE(TRIM(it.action), '') <> ''
+ ORDER BY ri.accepted_txn_id;
+
+DROP TABLE IF EXISTS rename_node_payees;
+DROP TABLE IF EXISTS rename_nodes;
+DROP TABLE IF EXISTS rename_token_freq;
+DROP TABLE IF EXISTS action_node_labels;
+DROP TABLE IF EXISTS action_nodes;
+DROP TABLE IF EXISTS action_token_freq;
+DELETE FROM rename_meta WHERE key = 'ranking_version';
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -1589,6 +1853,13 @@ MIGRATIONS: list[str] = [
     _V51,
     _V52,
     _V53,
+    _V54,
+    _V55,
+    _V56,
+    _V57,
+    _V58,
+    _V59,
+    _V60,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

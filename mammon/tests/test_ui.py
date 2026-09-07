@@ -2321,8 +2321,11 @@ def test_display_prefs_defaults_reproduce_current_look(qapp):
     from mammon.ui import prefs, style
 
     assert prefs.theme() == style.DEFAULT_THEME == "light"
-    assert prefs.font_family() == style.DEFAULT_FONT_FAMILY == "Segoe UI"
-    assert prefs.font_size() == style.DEFAULT_FONT_SIZE == 9
+    # Compared against the constants, not literals: the default font is chosen
+    # per platform (Segoe UI on Windows, the system face on macOS, DejaVu on
+    # Linux), so a hardcoded name here would fail the suite everywhere but one OS.
+    assert prefs.font_family() == style.DEFAULT_FONT_FAMILY
+    assert prefs.font_size() == style.DEFAULT_FONT_SIZE
     assert prefs.row_shading() is True
     assert prefs.alt_row_color() == style.ALT_ROW == "#f4f6f9"
     assert prefs.negative_color() == style.RED == "#c0392b"
@@ -6080,9 +6083,11 @@ def _press_delete(panel):
 def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
     """The Delete key discards the selected pending review row.
 
-    In the DEFAULT visibility ("Pending + accepted") a discarded row is retired
-    IN PLACE -- it stays on screen, greyed and no longer actionable -- so the
-    user can see what they threw away. What must drop is its PENDING status.
+    A discarded row LEAVES the list, in every visibility mode. Discard deletes
+    its ``review_items`` row (so re-downloading the range offers it again), and
+    greying a row the database no longer holds would put the screen at odds with
+    a re-query -- the same disagreement the greying was introduced to fix,
+    pointed the other way. Accepted rows are what stay visible and grey.
     """
     from mammon import import_review
     from mammon.ui.import_review_widget import ImportReviewPanel
@@ -6091,14 +6096,12 @@ def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
     panel = ImportReviewPanel(conn, chk)             # auto-loads persisted pending
     assert len(panel._entries) == 2
     panel.table.selectRow(0)
-    killed = panel._entries[0].mapped.transaction_id
     _press_delete(panel)
 
     still_listed = [e.mapped.transaction_id for e in panel._entries]
-    assert still_listed == [killed, "B"]             # retired in place, not removed
-    discarded = panel._entries[0]
-    assert discarded.state == "discarded" and discarded.is_actioned
+    assert still_listed == ["B"]                     # removed, not retired
     assert import_review.count_pending(conn, chk) == 1
+    assert conn.execute("SELECT COUNT(*) FROM review_items").fetchone()[0] == 1
     # and the selection advanced to the row that still needs action
     assert panel.current_entry().mapped.transaction_id == "B"
 

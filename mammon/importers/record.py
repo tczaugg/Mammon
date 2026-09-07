@@ -54,7 +54,15 @@ class NormalizedTxn:
     split_num: int = 0
     split_den: int = 0
 
-    # cash splits: list of (category, amount_cents, memo)
+    # First-class tags carried by the WHOLE transaction. QIF states at most one
+    # (the `/Class` suffix on the L line), but the model is many-per-row, so a
+    # source that can express several needs no change here.
+    tags: list = field(default_factory=list)
+
+    # cash splits: list of (category, amount_cents, memo, tag). ``tag`` is the
+    # leg's OWN tag ('' when untagged) -- Quicken tags a split leg to attribute
+    # part of a payment to a project, and folding those onto the parent would
+    # credit the whole amount to every tag in the split.
     splits: list = field(default_factory=list)
 
     @property
@@ -239,12 +247,29 @@ def identity_key(account_id, date, amount_cents, payee, memo) -> tuple:
 
 
 def clean_category(raw: str) -> str:
-    """Strip a QIF class suffix ('Category:Sub/Class' -> 'Category:Sub') and
-    surrounding whitespace. A transfer '[Account]' must be handled by the caller
-    before this."""
+    """The category half of a QIF category field ('Category:Sub/Tag' ->
+    'Category:Sub'), whitespace trimmed. A transfer '[Account]' must be handled
+    by the caller before this.
+
+    This DISCARDS the tag. Use :func:`split_category_tag` wherever the tag is
+    wanted -- dropping it here is what silently lost every Quicken tag on
+    import, so a caller that ignores the second half should mean to."""
+    return split_category_tag(raw)[0]
+
+
+def split_category_tag(raw: str) -> tuple[str, str]:
+    """Split a QIF category field into ``(category, tag)``.
+
+    Quicken writes a tag (historically a 'class') as a suffix on the category:
+    ``Business:Research/Rig 8`` is the category ``Business:Research`` tagged
+    ``Rig 8``. Both halves are trimmed; a field with no ``/`` yields an empty
+    tag. Only the FIRST ``/`` separates -- a tag may itself contain one, and
+    Quicken's own nested-class form is ``Category/Tag:Subtag``, so everything
+    after the first slash belongs to the tag."""
     if not raw:
-        return ""
-    return raw.split("/", 1)[0].strip()
+        return "", ""
+    head, sep, tail = raw.partition("/")
+    return head.strip(), tail.strip() if sep else ""
 
 
 def decimal_text(value) -> str:

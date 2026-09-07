@@ -90,13 +90,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
-from mammon import reports
+from mammon import ledger, reports
 from mammon.ui.models import fmt_cents
 from mammon.ui.report_filters import (
     PERIOD_DEFAULT,
-    PERIOD_PRESETS,
     CustomizeDialog,
     customize_button,
+    make_period_combo,
     resolve_period,
 )
 from mammon.ui.report_saved_filters import (
@@ -179,13 +179,42 @@ def income_expense_rows(report: "reports.IncomeExpenseReport") -> list[ReportRow
     return rows
 
 
+# The Account-Balance report is a print/export table, so its rows follow the LEFT
+# SIDEBAR's account grouping rather than the ledger's flat sort_order -- the printed
+# report then reads in the same order as the account bar the user is looking at.
+# This list MUST mirror the type sequence of widgets._BAR_GROUPS (Banking, then
+# Credit Card, then Investing, then Property & Debt); a drift-guard test
+# (test_report_table_defects) fails if the two disagree. INVESTMENT_LIKE_TYPES is
+# read from the ledger so the "Investing" group cannot drift here. Within a group
+# the rows keep the ledger's own sort_order/name sequence, because the reorder is a
+# STABLE sort on the already-ordered report rows.
+_SIDEBAR_TYPE_ORDER = ["checking", "savings", "cash",     # Banking
+                       "credit",                          # Credit Card
+                       *ledger.INVESTMENT_LIKE_TYPES,     # Investing
+                       "asset", "liability"]              # Property & Debt
+
+
+def _balance_type_rank(account_type: str) -> int:
+    """The sidebar-group rank for an account type; unknown types sort last (the
+    account bar's 'Other' group), matching ``widgets.AccountBar.refresh``."""
+    try:
+        return _SIDEBAR_TYPE_ORDER.index(account_type)
+    except ValueError:
+        return len(_SIDEBAR_TYPE_ORDER)
+
+
 def account_balances_rows(report: "reports.BalanceReport") -> list[ReportRow]:
     """Project a :class:`~mammon.reports.BalanceReport` into flat rows: one line
     per account (section = account type, valued the way the account bar values
-    it), then the net-worth total. Pure — no valuation happens here."""
-    rows: list[ReportRow] = []
-    for ab in report.rows:
-        rows.append(ReportRow(ab.type, ab.name, ab.cents))
+    it), then the net-worth total. Pure — no valuation happens here.
+
+    Rows are re-ordered to match the LEFT SIDEBAR's account grouping (see
+    :data:`_SIDEBAR_TYPE_ORDER`); a stable sort preserves the report's own
+    sort_order/name order within each group.
+    """
+    ordered = sorted(report.rows, key=lambda ab: _balance_type_rank(ab.type))
+    rows: list[ReportRow] = [ReportRow(ab.type, ab.name, ab.cents)
+                             for ab in ordered]
     rows.append(ReportRow("Total", "Net Worth", report.total))
     return rows
 
@@ -258,7 +287,35 @@ def _fmt_pct(pct) -> str:
     return "" if pct is None else "%+.1f%%" % pct
 
 
-def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -> list[ReportRow]:
+# Click-to-sort keys for the flat Investment Performance report, mapping the
+# clicked column's sort key to a key function over a HoldingPerformance. Account ->
+# account then ticker; Ticker -> ticker alone; Gain/Loss $ -> the (period) gain;
+# Gain/Loss % -> the (period) percent. Unpriced holdings (no gain/percent) sort as
+# zero so they cluster at one end rather than scatter. Sorting is a pure DISPLAY
+# reshuffle of already-computed rows (no SQL, no money arithmetic -- amounts are
+# only compared, never summed), reusing the window's sort_key/sort_desc seam (the
+# same one the Itemize tree uses, see _TXN_SORT_KEYS / _on_tree_sort).
+_HOLDING_SORT_KEYS = {
+    "account": lambda h: ((h.account_name or "").lower(), (h.symbol or "").lower()),
+    "ticker":  lambda h: (h.symbol or "").lower(),
+    "gain":    lambda h: h.display_gain if h.display_gain is not None else 0,
+    "pct":     lambda h: h.display_pct if h.display_pct is not None else 0,
+}
+
+
+def _sorted_holdings(holdings, sort_key, sort_desc):
+    """Order the per-holding line items for display under the active sort, or
+    return them untouched when no sort is active. Only the security line items
+    move; the Portfolio totals are appended afterward and never reorder."""
+    keyfn = _HOLDING_SORT_KEYS.get(sort_key)
+    if keyfn is None:
+        return holdings
+    return sorted(holdings, key=keyfn, reverse=sort_desc)
+
+
+def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *,
+                                sort_key: str = None,
+                                sort_desc: bool = False) -> list[ReportRow]:
     """Project an :class:`~mammon.reports.InvestmentPerformanceReport` into flat
     rows aligned to :data:`INVESTMENT_PERFORMANCE_COLUMNS`: one line per
     currently-held security carrying its account, its ticker (with share count),
@@ -276,17 +333,25 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -
     realized gain and income still land in the Portfolio totals, which the report
     computes over every holding; the per-position detail lives in the pure report,
     the CSV/HTML export's source, and the ``capital_gains`` tool.
+
+    ``sort_key``/``sort_desc`` reorder the per-holding line items (the same seam
+    the Itemize tree uses): a clickable header re-projects with the active sort.
+    The Gain/Loss columns render the report's period-bounded gain when it was built
+    for a window (``display_gain``/``display_pct``), and the inception-to-date
+    unrealized gain otherwise -- a report opened without a start behaves exactly as
+    before.
     """
     rows: list[ReportRow] = []
-    for h in report.holdings:
-        if not h.is_open:
-            continue
+    holdings = [h for h in report.holdings if h.is_open]
+    if sort_key:
+        holdings = _sorted_holdings(holdings, sort_key, sort_desc)
+    for h in holdings:
         ticker = "%s (%s sh)" % (h.symbol, _fmt_qty(h.quantity))
-        gl = "" if h.unrealized_pl is None else fmt_cents(h.unrealized_pl)
+        gl = "" if h.display_gain is None else fmt_cents(h.display_gain)
         rows.append(ReportRow(
             h.account_name, h.symbol, h.market_value,
             cells=[h.account_name, ticker, fmt_cents(h.market_value),
-                   gl, _fmt_pct(h.pct_return)]))
+                   gl, _fmt_pct(h.display_pct)]))
 
     # Portfolio totals. The market-value line doubles as the portfolio Gain/Loss
     # summary (its unrealized dollars and percent); the remaining totals each name a
@@ -295,11 +360,15 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport") -
         "Portfolio", "Cost Basis", report.total_cost_basis,
         cells=["Portfolio", "Cost Basis", fmt_cents(report.total_cost_basis),
                "", ""]))
+    # The Market Value line is the headline gain: the sum of the per-holding gains
+    # shown above, so it reconciles with them -- period-bounded when the report was
+    # built for a window, lifetime otherwise. The separate lifetime breakdown lines
+    # (Unrealized / Realized / Dividend / Return of Capital) below stay as-is.
     rows.append(ReportRow(
         "Portfolio", "Market Value", report.total_market_value,
         cells=["Portfolio", "Market Value", fmt_cents(report.total_market_value),
-               fmt_cents(report.total_unrealized_pl),
-               _fmt_pct(report.pct_return)]))
+               fmt_cents(report.display_total_gain),
+               _fmt_pct(report.display_total_pct)]))
     rows.append(ReportRow(
         "Portfolio", "Unrealized Gain/Loss", report.total_unrealized_pl,
         cells=["Portfolio", "Unrealized Gain/Loss", "",
@@ -381,7 +450,48 @@ def _payee_memo(line: "reports.TxnLine") -> str:
     return payee
 
 
-def itemize_tree_rows(tree: "reports.ItemizedTree") -> list[TreeRow]:
+# Click-to-sort keys for the Itemize drill-down. Each maps a clicked column to a
+# (primary, secondary) pair of extractors over a reports.TxnLine, exactly as the
+# defect specifies: Date -> 2nd key payee, Payee -> 2nd key date, Amount -> 2nd key
+# date. Sorting is a pure DISPLAY reshuffle of already-computed rows (no SQL, no
+# money arithmetic -- amounts are only compared, never summed), so it lives in this
+# projector rather than the domain tree; the tree's default account/date leaf order
+# is preserved when sort_key is None.
+_TXN_SORT_KEYS = {
+    "date":   (lambda l: l.date, lambda l: (l.description or "").lower()),
+    "payee":  (lambda l: (l.description or "").lower(), lambda l: l.date),
+    "amount": (lambda l: l.amount_cents, lambda l: l.date),
+}
+
+
+def _sorted_children(node, sort_key, sort_desc) -> list:
+    """Order one grouping node's children for display under the active sort.
+
+    A group whose children are transaction leaves sorts by the clicked column,
+    with the specified secondary key. The TRANSFERS section's counterparty nodes
+    stay in their incoming ALPHABETICAL order EXCEPT when Amount is the sort key,
+    where they re-sort by their rolled-up net -- "transfers stay sorted
+    alphabetically unless Amount is the sort key". Ordinary category / sub-category
+    grouping nodes keep their alphabetical order always. The secondary key is
+    applied in a first stable pass so a descending primary never scrambles ties.
+    """
+    children = node.children
+    if not sort_key or not children:
+        return children
+    if all(c.kind == "txn" for c in children):
+        primary, secondary = _TXN_SORT_KEYS[sort_key]
+        ordered = sorted(children, key=lambda c: secondary(c.line))
+        ordered.sort(key=lambda c: primary(c.line), reverse=sort_desc)
+        return ordered
+    if all(c.kind == "transfer" for c in children) and sort_key == "amount":
+        ordered = sorted(children, key=lambda c: c.label.lower())
+        ordered.sort(key=lambda c: c.net_cents, reverse=sort_desc)
+        return ordered
+    return children
+
+
+def itemize_tree_rows(tree: "reports.ItemizedTree", *,
+                      sort_key: str = None, sort_desc: bool = False) -> list[TreeRow]:
     """Project an :class:`~mammon.reports.ItemizedTree` into a depth-tagged list of
     :class:`TreeRow`\\s: each section (INCOME / EXPENSES / TRANSFERS), then its
     categories, their sub-categories and "Other" nodes, and finally the individual
@@ -392,6 +502,10 @@ def itemize_tree_rows(tree: "reports.ItemizedTree") -> list[TreeRow]:
     summing. Grouping nodes carry their label in the Category column and their net
     in Amount; transaction leaves carry the date, payee/memo and their own amount,
     with a blank Category cell so the tree structure reads down the first column.
+
+    ``sort_key`` (``"date"`` / ``"payee"`` / ``"amount"``) re-orders the transaction
+    leaves within each open group per the clicked column; ``None`` keeps the tree's
+    default account/date order. See :func:`_sorted_children` for the transfer rule.
     """
     from mammon.ui.models import fmt_date
 
@@ -411,7 +525,7 @@ def itemize_tree_rows(tree: "reports.ItemizedTree") -> list[TreeRow]:
             depth, node.kind,
             [node.label, "", "", fmt_cents(node.net_cents)],
             node.net_cents, expanded=is_section, bold=is_section))
-        for child in node.children:
+        for child in _sorted_children(node, sort_key, sort_desc):
             walk(child, depth + 1)
 
     for section in tree.sections:
@@ -610,6 +724,15 @@ class ReportSpec:
     show_hidden_toggle: bool = True
     columns: list = None
     is_tree: bool = False
+    # Size the first (text) column to its contents so long values are not clipped
+    # -- By Payee sets this so a full payee name shows without a manual drag.
+    fit_first_column: bool = False
+    # Clickable-header sort for a FLAT report: ``{column_index: sort_key}`` naming
+    # which columns sort and to which key the projector understands. ``None`` (the
+    # default) leaves the header inert. The projector must accept
+    # ``sort_key``/``sort_desc`` (as ``investment_performance_rows`` does); this
+    # reuses the same instance-level sort seam the Itemize tree uses.
+    sortable: dict = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -661,9 +784,12 @@ def _run_transactions(conn, f):
 
 
 def _run_investment_performance(conn, f):
-    # A per-holding snapshot valued as of the "To" date; the account checklist
+    # A per-holding snapshot valued as of the "To" date, with Gain/Loss bounded to
+    # the resolved period [From, To] -- so 'Last 3 years' and 'Last 10 years' report
+    # different gains, not the same inception-to-date figure. The account checklist
     # filters it, and only investment accounts contribute holdings.
     return reports.investment_performance(conn, f.end_iso(),
+                                          start=f.start_iso(),
                                           account_ids=f.selected_account_ids(),
                                           include_hidden=f.include_hidden())
 
@@ -681,20 +807,35 @@ def _run_itemize(conn, f):
                                 top_level_names=f.selected_categories())
 
 
-CASH_FLOW_SPEC = ReportSpec("Cash Flow", _run_cash_flow, cash_flow_rows)
+# Cash Flow and Income vs Expense are deliberately BOTH kept -- they are not the
+# same table: Cash Flow adds a TRANSFERS section for money crossing the selected
+# account set and its Net INCLUDES those transfers (did cash in these accounts rise
+# or fall), while Income vs Expense excludes transfers entirely and its Net is
+# income + expense only (did I earn more than I spent). Cash Flow's first column is
+# therefore "Direction" (Income / Expense / Transfers / Net), not the shared
+# "Section", to name what that column actually distinguishes.
+CASH_FLOW_SPEC = ReportSpec("Cash Flow", _run_cash_flow, cash_flow_rows,
+                            columns=["Direction", "Category / Account", "Amount"])
 INCOME_EXPENSE_SPEC = ReportSpec("Income vs Expense", _run_income_expense,
                                  income_expense_rows)
 ACCOUNT_BALANCES_SPEC = ReportSpec("Account Balances", _run_account_balances,
-                                   account_balances_rows, show_accounts=False)
+                                   account_balances_rows, show_accounts=False,
+                                   columns=["Account Type", "Category / Account",
+                                            "Amount"])
 BY_PAYEE_SPEC = ReportSpec("By Payee", _run_by_payee, payee_rows,
-                           columns=["Payee", "Net Amount"])
+                           columns=["Payee", "Net Amount"], fit_first_column=True)
 BY_TAG_SPEC = ReportSpec("By Tag", _run_by_tag, payee_rows)
 TRANSACTIONS_SPEC = ReportSpec("Transactions", _run_transactions, listing_rows,
                                columns=TRANSACTIONS_COLUMNS)
+# Sortable by the four orders the user asked for: Account (col 0) -> account then
+# ticker, Ticker (col 1) -> ticker alphabetical, Gain/Loss $ (col 3) -> period
+# gain, Gain/Loss % (col 4) -> period percent. Amount (col 2) is left inert.
 INVESTMENT_PERFORMANCE_SPEC = ReportSpec("Investment Performance",
                                          _run_investment_performance,
                                          investment_performance_rows,
-                                         columns=INVESTMENT_PERFORMANCE_COLUMNS)
+                                         columns=INVESTMENT_PERFORMANCE_COLUMNS,
+                                         sortable={0: "account", 1: "ticker",
+                                                   3: "gain", 4: "pct"})
 ITEMIZE_SPEC = ReportSpec("Itemize by Category", _run_itemize, itemize_tree_rows,
                           show_hidden_toggle=False, columns=TREE_COLUMNS,
                           is_tree=True)
@@ -723,6 +864,14 @@ class ReportWindow(QDialog):
         # (Itemize's Category/Amount). Table, CSV, HTML and PDF all read this.
         self.columns = list(self.spec.columns)
         self._rows: list[ReportRow] = []
+        # Clickable-header sort state, shared by the Itemize drill-down tree and any
+        # flat report that declares ``spec.sortable`` (Investment Performance): the
+        # clicked column's key and direction, plus the last pure report object so a
+        # header click can re-project without re-querying the ledger. See
+        # _on_tree_sort / _on_table_sort.
+        self._sort_key = None
+        self._sort_desc = False
+        self._report = None
 
         start, end = _default_range(conn)
         # The customization/filter controls (date range, accounts, the
@@ -749,12 +898,10 @@ class ReportWindow(QDialog):
         self.gear_button = customize_button(self.customize_dialog, self)
 
         # -- Period dropdown: one preset picker every report shares, on top ----
-        self.period_combo = QComboBox()
-        self.period_combo.setToolTip("Report period")
-        for label, key in PERIOD_PRESETS:
-            self.period_combo.addItem(label, key)
-        self.period_combo.setCurrentIndex(
-            self.period_combo.findData(PERIOD_DEFAULT))
+        # Built by the shared factory so its width (sized for "Earliest to date")
+        # matches the chart windows'; the currentIndexChanged connect below runs
+        # AFTER this, so seeding the default here fires no refresh.
+        self.period_combo = make_period_combo()
         period_row = QHBoxLayout()
         period_row.addWidget(QLabel("Period:"))
         period_row.addWidget(self.period_combo)
@@ -797,6 +944,13 @@ class ReportWindow(QDialog):
             header.setSectionResizeMode(0, QHeaderView.Stretch)
             for i in range(1, len(self.columns)):
                 header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+            # Click a column header to sort the transactions within each open group
+            # (Date / Payee / Amount). The tree is populated by hand, not by Qt's
+            # own model sort, so we drive the ordering through itemize_tree_rows;
+            # the indicator is cosmetic. Category (col 0) is the tree itself.
+            header.setSectionsClickable(True)
+            header.setSortIndicatorShown(True)
+            header.sectionClicked.connect(self._on_tree_sort)
             self._body_widget = self.tree
         else:
             self.table = QTableWidget(0, len(self.columns))
@@ -804,7 +958,20 @@ class ReportWindow(QDialog):
             self.table.setEditTriggers(QTableWidget.NoEditTriggers)
             self.table.setSelectionBehavior(QTableWidget.SelectRows)
             self.table.horizontalHeader().setStretchLastSection(True)
+            if self.spec.fit_first_column:
+                # By Payee: fit the Payee column to its widest name so no payee is
+                # truncated on open; the trailing amount column still stretches.
+                self.table.horizontalHeader().setSectionResizeMode(
+                    0, QHeaderView.ResizeToContents)
             self.table.verticalHeader().setVisible(False)
+            if self.spec.sortable:
+                # Drive ordering by hand through the projector (Qt's own model sort
+                # stays off) so the Portfolio totals never move; the indicator is
+                # cosmetic. Same seam as the tree, see _on_table_sort.
+                header = self.table.horizontalHeader()
+                header.setSectionsClickable(True)
+                header.setSortIndicatorShown(True)
+                header.sectionClicked.connect(self._on_table_sort)
             self._body_widget = self.table
 
         self.export_button = QPushButton("Export CSV…")
@@ -849,10 +1016,21 @@ class ReportWindow(QDialog):
         and ``project`` flattens the result — this method does no SQL, no math.
         """
         report = self.spec.run(self.conn, self.filters)
-        self._rows = self.spec.project(report)
+        self._report = report
         if self.spec.is_tree:
+            # The tree projector takes the active column sort; flat projectors do
+            # not, so only this branch threads it (spec.project is itemize_tree_rows).
+            self._rows = self.spec.project(report, sort_key=self._sort_key,
+                                           sort_desc=self._sort_desc)
             self._populate_tree(self._rows)
+        elif self.spec.sortable:
+            # A flat report with clickable-header sort threads the active sort into
+            # its projector, just like the tree branch above.
+            self._rows = self.spec.project(report, sort_key=self._sort_key,
+                                           sort_desc=self._sort_desc)
+            self._populate(self._rows)
         else:
+            self._rows = self.spec.project(report)
             self._populate(self._rows)
 
     def _populate(self, rows):
@@ -865,7 +1043,7 @@ class ReportWindow(QDialog):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(i, col, item)
 
-    def _populate_tree(self, rows):
+    def _populate_tree(self, rows, expanded_paths=None):
         """Rebuild the drill-down tree from the flat depth-tagged projection.
 
         The projection is a pre-order list of :class:`TreeRow`\\s; nesting is
@@ -873,13 +1051,17 @@ class ReportWindow(QDialog):
         smaller depth). The last column (Amount) is right-aligned and tinted red
         when negative; section and total rows render bold. No money math here — the
         cells are already formatted by :func:`itemize_tree_rows`.
+
+        ``expanded_paths`` (a set of column-0 label tuples from
+        :meth:`_tree_expanded_paths`) restores which groups were open across a
+        re-sort; ``None`` uses each row's default (sections open, rest collapsed).
         """
         self.tree.clear()
         last = len(self.columns) - 1
         red = QBrush(QColor("#c0392b"))
         bold = QFont()
         bold.setBold(True)
-        stack: list = []  # (depth, item)
+        stack: list = []  # (depth, item, path)
         for r in rows:
             item = QTreeWidgetItem(list(r.cells))
             item.setTextAlignment(last, Qt.AlignRight | Qt.AlignVCenter)
@@ -890,12 +1072,82 @@ class ReportWindow(QDialog):
                     item.setFont(col, bold)
             while stack and stack[-1][0] >= r.depth:
                 stack.pop()
+            path = (stack[-1][2] if stack else ()) + (r.cells[0],)
             if stack:
                 stack[-1][1].addChild(item)
             else:
                 self.tree.addTopLevelItem(item)
-            item.setExpanded(r.expanded)
-            stack.append((r.depth, item))
+            if expanded_paths is None:
+                item.setExpanded(r.expanded)
+            else:
+                item.setExpanded(path in expanded_paths)
+            stack.append((r.depth, item, path))
+
+    def _tree_expanded_paths(self) -> set:
+        """The column-0 label paths of the currently-expanded tree items.
+
+        A re-sort never renames or reorders the grouping nodes (only the leaf
+        transactions and — under Amount — the transfer counterparties move), so a
+        label path is a stable identity for restoring the user's open groups.
+        """
+        paths: set = set()
+
+        def walk(item, prefix):
+            path = prefix + (item.text(0),)
+            if item.isExpanded():
+                paths.add(path)
+            for i in range(item.childCount()):
+                walk(item.child(i), path)
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i), ())
+        return paths
+
+    def _on_tree_sort(self, col: int) -> None:
+        """Sort the transactions within each open group by the clicked column.
+
+        Date -> (date, payee), Payee -> (payee, date), Amount -> (amount, date); a
+        second click on the same column toggles ascending/descending. Transfer
+        counterparty nodes stay alphabetical unless Amount is the key. Column 0
+        (Category) is the tree structure itself and is not a sort key. Re-projects
+        the cached report (no ledger re-read) and keeps the open groups open.
+        """
+        key = {1: "date", 2: "payee", 3: "amount"}.get(col)
+        if key is None or self._report is None:
+            return
+        if self._sort_key == key:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_key, self._sort_desc = key, False
+        order = Qt.DescendingOrder if self._sort_desc else Qt.AscendingOrder
+        self.tree.header().setSortIndicator(col, order)
+        expanded = self._tree_expanded_paths()
+        self._rows = self.spec.project(self._report, sort_key=self._sort_key,
+                                       sort_desc=self._sort_desc)
+        self._populate_tree(self._rows, expanded_paths=expanded)
+
+    def _on_table_sort(self, col: int) -> None:
+        """Sort a flat report's rows by the clicked column, reusing the very same
+        sort_key/sort_desc mechanism as the Itemize tree (:meth:`_on_tree_sort`).
+
+        The spec's ``sortable`` map says which columns sort and to which key; a
+        column outside it is inert (Amount). A second click on the same column
+        toggles ascending/descending. Re-projects the cached report (no ledger
+        re-read) so only the display order changes; the Portfolio totals, appended
+        by the projector after the sorted line items, never move.
+        """
+        key = (self.spec.sortable or {}).get(col)
+        if key is None or self._report is None:
+            return
+        if self._sort_key == key:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_key, self._sort_desc = key, False
+        order = Qt.DescendingOrder if self._sort_desc else Qt.AscendingOrder
+        self.table.horizontalHeader().setSortIndicator(col, order)
+        self._rows = self.spec.project(self._report, sort_key=self._sort_key,
+                                       sort_desc=self._sort_desc)
+        self._populate(self._rows)
 
     # -- period preset dropdown ----------------------------------------------
     def _on_period(self, index) -> None:
