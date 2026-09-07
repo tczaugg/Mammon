@@ -312,6 +312,35 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   `QMessageBox.question` seam, and it emits `changed` so open registers and the By
   Tag report refresh.
 
+### 5.1c Register Undo/Redo
+- The register has multi-level Undo and Redo for edits the user makes there:
+  adding a transaction, editing a transaction's fields, deleting a transaction,
+  editing splits, and creating / editing / deleting a transfer. The Edit menu
+  carries **Undo** (Ctrl+Z) and **Redo** (Ctrl+Y and Ctrl+Shift+Z); both items
+  enable/disable from the stack and show what they would reverse (e.g. "Undo Add
+  transaction", "Redo Delete transfer").
+- **No second write path.** Undo/redo does not touch SQL. It captures a snapshot
+  of the affected transaction(s) and REPLAYS the inverse THROUGH the same
+  `mammon.ledger` verbs the forward edit used (`add_transaction`,
+  `update_transaction`, `delete_transaction`, `create_transfer`, `set_splits`,
+  `clear_splits`). So every transfer/split/checkpoint invariant stays enforced in
+  the one place it already lives, and undoing a transfer inverts BOTH mirror legs
+  together for free (delete removes both sides; `update_transaction` mirrors
+  date/amount/payee/memo to the pair) — see 5.2.
+- The stack is **in-memory and session-scoped**, one history per open register
+  (`mammon/undo.py`, hung off the register's `RegisterModel`). Nothing is
+  persisted; there is no schema change. Closing the register or the app clears it.
+- **Identity churn.** The ledger allocates a fresh row id on every insert, so
+  undoing a create (delete) then redoing (recreate) yields a different row id.
+  The manager keeps a small remap table so a later stack entry that referenced
+  the old id still resolves to whatever row currently stands in for it.
+- **Deliberate limitations.** Converting a plain transaction into a transfer, or
+  re-pointing a transfer at a different account, have no clean ledger inverse;
+  they are treated as a barrier that drops the redo stack rather than recording a
+  step that could not be cleanly reversed. Batch (multi-row) edits are likewise a
+  barrier in this version — single-row add / edit / delete / transfer / split are
+  the undoable acts. A new edit always clears the redo stack.
+
 ### 5.2 Transfers between accounts (FIRST PRIORITY)
 - Classic Quicken behavior (user confirmed Q1): a transfer is one transaction
   whose Category is "[Other Account]". Entering it AUTO-CREATES a linked mirror

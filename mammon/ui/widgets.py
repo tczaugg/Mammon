@@ -12,7 +12,7 @@ try:                                       # PyQt5 >= 5.11 ships sip as a submod
     from PyQt5 import sip
 except ImportError:                        # older PyQt5 exposes a top-level module
     import sip
-from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics
+from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QActionGroup, QApplication,
     QCheckBox, QColorDialog,
@@ -1648,8 +1648,13 @@ class RegisterWidget(QWidget):
         if txn["transfer_account_id"] is not None and not txn.get("is_split"):
             QMessageBox.information(self, "Split", "A transfer cannot be split.")
             return
+        undo_before = self.model.undo_stack.capture(txn["id"])
         dlg = SplitDialog(self.model, row, parent=self)
         if dlg.exec_() == QDialog.Accepted:
+            # Record the split change for Undo (the set_splits ran inside the
+            # dialog, through the ledger); a no-op change records nothing.
+            self.model.undo_stack.record_edit(
+                txn["id"], undo_before, label="Edit splits")
             self.model.reload()
             self.model.committed.emit()
 
@@ -6311,8 +6316,20 @@ class MainWindow(QMainWindow):
         menu.addAction("Quit", self.close)
 
         edit = self.menuBar().addMenu("&Edit")
+        self.act_undo = edit.addAction("Undo", self._undo_current)
+        self.act_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        self.act_redo = edit.addAction("Redo", self._redo_current)
+        # Both the Windows redo (Ctrl+Y) and the common Ctrl+Shift+Z bind to redo.
+        self.act_redo.setShortcuts(
+            [QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        edit.addSeparator()
+        # The Undo/Redo labels and enabled state track the focused register's
+        # stack; refresh them whenever the menu opens (and on every write, wired
+        # in open_register, so the shortcuts enable without opening the menu).
+        edit.aboutToShow.connect(self._sync_edit_actions)
         find_act = edit.addAction("Find Transactions…", self._find_transactions_dialog)
         find_act.setShortcut("Ctrl+F")
+        self._sync_edit_actions()
 
         view = self.menuBar().addMenu("&View")
         self._one_line_act = view.addAction(
@@ -6374,6 +6391,42 @@ class MainWindow(QMainWindow):
         # off the Investing tab, which Mammon does not have.)
         reports.addAction("Asset Allocation…", self._allocation_dialog)
         reports.addAction("Target && Drift…", self._rebalance_dialog)
+
+    # ---- undo / redo ------------------------------------------------------
+    def _current_undo_model(self):
+        """The undo stack of the register on screen, or None. Investment and
+        crypto registers have no stack yet, so this returns None for them and
+        the Edit menu's Undo/Redo stay disabled."""
+        reg = self._registers.get(getattr(self, "_current_account", None))
+        model = getattr(reg, "model", None)
+        return model if getattr(model, "can_undo", None) is not None else None
+
+    def _undo_current(self):
+        model = self._current_undo_model()
+        if model is not None and model.can_undo():
+            model.undo()
+
+    def _redo_current(self):
+        model = self._current_undo_model()
+        if model is not None and model.can_redo():
+            model.redo()
+
+    def _sync_edit_actions(self):
+        """Enable/disable Undo/Redo and show what they would reverse, from the
+        focused register's stack state."""
+        act_undo = getattr(self, "act_undo", None)
+        act_redo = getattr(self, "act_redo", None)
+        if act_undo is None or act_redo is None:
+            return
+        model = self._current_undo_model()
+        can_undo = bool(model is not None and model.can_undo())
+        can_redo = bool(model is not None and model.can_redo())
+        act_undo.setEnabled(can_undo)
+        act_redo.setEnabled(can_redo)
+        ulabel = model.undo_label() if can_undo else None
+        rlabel = model.redo_label() if can_redo else None
+        act_undo.setText(f"Undo {ulabel}" if ulabel else "Undo")
+        act_redo.setText(f"Redo {rlabel}" if rlabel else "Redo")
 
     # ---- database backup --------------------------------------------------
     def _start_autobackup(self):
@@ -6946,6 +6999,9 @@ class MainWindow(QMainWindow):
             # re-selects the edited row.
             widget.changed.connect(
                 lambda _aid=account_id: self._refresh_all(exclude_account_id=_aid))
+            # Keep the Edit menu's Undo/Redo in step after every write, so their
+            # shortcuts enable/disable without needing the menu opened first.
+            widget.changed.connect(self._sync_edit_actions)
             # The register's account toolbar defers every action to the window,
             # which owns the dialogs and the cross-account refresh.
             tb = getattr(widget, "toolbar", None)
@@ -6996,6 +7052,7 @@ class MainWindow(QMainWindow):
                 widget.scroll_to_newest()
         self.accounts.select_account(account_id)
         self._current_account = account_id
+        self._sync_edit_actions()
         return widget
 
     def _set_register_view_mode(self, mode: str) -> None:

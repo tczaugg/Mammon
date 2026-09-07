@@ -20,7 +20,7 @@ from PyQt5.QtCore import (QAbstractTableModel, QDate, QModelIndex, Qt, QTimer,
 from PyQt5.QtGui import QBrush, QColor
 
 from mammon import (categorize, category_tree, crypto, import_review,
-                    investments, ledger)
+                    investments, ledger, undo)
 from mammon.ui import style
 
 
@@ -310,6 +310,10 @@ class RegisterModel(QAbstractTableModel):
         super().__init__(parent)
         self.conn = conn
         self.account_id = account_id
+        # Session-scoped undo/redo for this register. Records the inverse of each
+        # edit and replays it THROUGH the ledger (no second write path); see
+        # mammon/undo.py. Ctrl+Z / Ctrl+Y are wired to model.undo()/redo().
+        self.undo_stack = undo.UndoManager(conn)
         self._rows: list[dict] = []
         # Tag identity colors (casefolded name -> #rrggbb) and split-leg tag names
         # by parent txn id, both refreshed on reload so the Tag cell can paint a
@@ -1209,15 +1213,18 @@ class RegisterModel(QAbstractTableModel):
             payee = (v.get("payee") or "").strip() or None
             if target is not None and net != 0:
                 if net < 0:  # money out of this account
-                    ledger.create_transfer(self.conn, self.account_id, target, date,
-                                           -net, memo=v.get("memo") or None,
-                                           num=v.get("num") or None, cleared=cleared,
-                                           payee=payee)
+                    from_id, to_id = ledger.create_transfer(
+                        self.conn, self.account_id, target, date,
+                        -net, memo=v.get("memo") or None,
+                        num=v.get("num") or None, cleared=cleared,
+                        payee=payee)
                 else:        # money into this account
-                    ledger.create_transfer(self.conn, target, self.account_id, date,
-                                           net, memo=v.get("memo") or None,
-                                           num=v.get("num") or None, cleared=cleared,
-                                           payee=payee)
+                    from_id, to_id = ledger.create_transfer(
+                        self.conn, target, self.account_id, date,
+                        net, memo=v.get("memo") or None,
+                        num=v.get("num") or None, cleared=cleared,
+                        payee=payee)
+                self.undo_stack.record_add([from_id, to_id], transfer=True)
             else:
                 user_typed_cat = bool(category) and target is None
                 if user_typed_cat:
@@ -1239,6 +1246,8 @@ class RegisterModel(QAbstractTableModel):
                 # A category the USER typed is an override that teaches history.
                 if user_typed_cat and payee:
                     categorize.record_user_categorization(self.conn, payee, cid)
+                if self._last_new_id is not None:
+                    self.undo_stack.record_add([self._last_new_id])
         except (ValueError, KeyError) as exc:
             self.error.emit(str(exc))
             return False
@@ -1308,6 +1317,7 @@ class RegisterModel(QAbstractTableModel):
                     "A transfer's Category must be an [Account]; delete and "
                     "re-enter it to make it a plain category.")
                 return False
+        undo_before = self.undo_stack.capture(txn["id"])
         try:
             ledger.update_transaction(self.conn, txn["id"], **fields)
             if convert_target is not None:
@@ -1319,6 +1329,9 @@ class RegisterModel(QAbstractTableModel):
         except (ValueError, KeyError) as exc:
             self.error.emit(str(exc))
             return False
+        # A convert/retarget is detected as a structural change and drops the redo
+        # stack rather than recording a step it could not cleanly invert.
+        self.undo_stack.record_edit(txn["id"], undo_before)
         self.reload()
         self.committed.emit()
         return True
@@ -1327,7 +1340,47 @@ class RegisterModel(QAbstractTableModel):
         txn = self.txn_at(row)
         if not txn:
             return False
+        # A transfer deletes BOTH mirror legs, so snapshot both before deleting so
+        # Undo can recreate the whole transfer. Read the pair id from the ledger
+        # (authoritative) rather than the projected view row.
+        full = ledger.get_transaction(self.conn, txn["id"])
+        is_transfer = full is not None and full["transfer_account_id"] is not None
+        ids = [int(txn["id"])]
+        if is_transfer and full["transfer_pair_id"] is not None:
+            ids.append(int(full["transfer_pair_id"]))
+        snaps = self.undo_stack.capture_many(ids)
         ledger.delete_transaction(self.conn, txn["id"])
+        self.undo_stack.push_delete(snaps, transfer=is_transfer)
+        self.reload()
+        self.committed.emit()
+        return True
+
+    # ---- undo / redo (Ctrl+Z / Ctrl+Y, wired from the Edit menu) -------------
+    def can_undo(self) -> bool:
+        return self.undo_stack.can_undo()
+
+    def can_redo(self) -> bool:
+        return self.undo_stack.can_redo()
+
+    def undo_label(self):
+        return self.undo_stack.undo_label()
+
+    def redo_label(self):
+        return self.undo_stack.redo_label()
+
+    def undo(self) -> bool:
+        """Reverse the most recent register edit, replaying its inverse through
+        the ledger, then refresh. ``committed`` also refreshes any OTHER open
+        register, so a transfer's mirror side updates too."""
+        if not self.undo_stack.undo():
+            return False
+        self.reload()
+        self.committed.emit()
+        return True
+
+    def redo(self) -> bool:
+        if not self.undo_stack.redo():
+            return False
         self.reload()
         self.committed.emit()
         return True
@@ -1366,6 +1419,11 @@ class RegisterModel(QAbstractTableModel):
                 changed += 1
             else:
                 skipped += 1
+        # A batch is one act, not individually undoable in this version: it is a
+        # barrier that drops the redo stack (so a stale redo cannot replay across
+        # it) while leaving earlier undo history intact.
+        if changed:
+            self.undo_stack.barrier()
         self.reload()
         self.committed.emit()
         return changed, skipped
@@ -1500,6 +1558,7 @@ class RegisterModel(QAbstractTableModel):
         if not txn:
             return False
         before = self._sound_snapshot(txn["id"])
+        undo_before = self.undo_stack.capture(txn["id"])
         try:
             fn(txn)
         except (ValueError, KeyError) as exc:
@@ -1512,6 +1571,10 @@ class RegisterModel(QAbstractTableModel):
         # ignore, which costs you the signal for real saves too.
         if self._sound_snapshot(txn["id"]) != before:
             self.transactionSaved.emit(int(txn["id"]))
+        # Record the inverse for Undo. A no-op write records nothing; a transfer
+        # convert/retarget (which has no clean ledger inverse) drops the redo
+        # stack instead of pushing a bad step (see undo.record_edit).
+        self.undo_stack.record_edit(txn["id"], undo_before)
         if defer_reload:
             # One pending reload at a time. Several edits committed in the same
             # turn (or a reload that itself triggers another write) would
