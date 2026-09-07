@@ -17,11 +17,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QStandardPaths, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -248,6 +248,20 @@ class ImportReviewPanel(QWidget):
                   self.undo_all_btn):
             bar.addWidget(b)
         bar.addStretch()
+        # Load Amazon invoice itemization (cash accounts only). Reads a
+        # time-tagged invoice file from the user's Downloads folder and runs a
+        # review session that itemizes each order into per-item split legs
+        # (requirement A6/A8). Hidden on investment accounts, which have no
+        # item-split concept. The register also offers the same action from its
+        # gear menu, so this stays reachable when the panel is otherwise empty.
+        self.load_amazon_btn = QPushButton("Load Amazon Invoices…")
+        self.load_amazon_btn.setToolTip(
+            "Load a time-tagged Amazon invoice file (from your Downloads folder) "
+            "and review each order as an itemized split against this account. "
+            "Nothing is stored -- the file can be re-loaded any time.")
+        self.load_amazon_btn.clicked.connect(self.load_amazon_invoices)
+        self.load_amazon_btn.setVisible(not self.is_investment)
+        bar.addWidget(self.load_amazon_btn)
         box.addLayout(bar)
 
         # Right-click a row -> Manual Match… (hand-pick the existing register line).
@@ -298,6 +312,51 @@ class ImportReviewPanel(QWidget):
             self.show()
         else:
             self.hide()
+
+    def load_amazon_invoices(self, path: "Optional[str]" = None) -> int:
+        """Load a time-tagged Amazon invoice file and run an itemization review.
+
+        Reads the file on demand (nothing is stored -- requirement A6), classifies
+        each order into a NEW or MATCHING review row through
+        :func:`import_review.build_amazon_review` (the sole review-flow writer),
+        and shows the resulting rows in this panel. The proposed per-item split
+        rides on each row transiently; accepting it later writes the legs through
+        the Amazon accept path. Returns the number of review rows produced.
+
+        The file dialog defaults to the user's Downloads folder, where the
+        webSlinger Amazon script drops its report. ``path`` bypasses the dialog
+        (tests / callers that already have a file)."""
+        if self.is_investment:
+            return 0
+        if path is None:
+            downloads = QStandardPaths.writableLocation(
+                QStandardPaths.DownloadLocation) or ""
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load Amazon Invoices", downloads,
+                "Amazon invoice export (*.json);;All files (*)")
+            if not path:
+                return 0
+        try:
+            entries = import_review.build_amazon_review(
+                self.conn, self.account_id, path)
+        except Exception as exc:             # pragma: no cover - UI error path
+            QMessageBox.warning(
+                self, "Load Amazon Invoices",
+                "Could not read that invoice file:\n%s" % exc)
+            return 0
+        if not entries:
+            QMessageBox.information(
+                self, "Load Amazon Invoices",
+                "No card charges to reconcile were found in that file.\n"
+                "Orders fully covered by a gift-card balance (and refunds) "
+                "create no card charge.")
+            return 0
+        # Reveal BEFORE populating: set_entries selects row 0 and emits
+        # row_selected, and the register's handler acts on it only when the panel
+        # is already visible (a MATCHING row then highlights its register line).
+        self.show()
+        self.set_entries(entries)
+        return len(entries)
 
     def has_pending(self) -> bool:
         """True while any row is still un-actioned (nothing committed yet)."""
@@ -581,6 +640,29 @@ class ImportReviewPanel(QWidget):
         self._remove_and_advance(i, txn_id=txn_id)
         return txn_id
 
+    def accept_amazon_index(self, i: int) -> int:
+        """Accept an Amazon itemization row at ``i``, then drop it and advance.
+
+        A MATCHING row REPLACES its existing register line's splits/categories
+        with the invoice's per-item split (requirement A8); a NEW row posts a
+        fresh card charge carrying that split. Both write through the Amazon
+        accept path in :mod:`import_review` (``ledger.set_splits`` /
+        ``ledger.add_transaction``) -- no second write path. Amazon rows are never
+        persisted to ``review_items``, so acceptance always removes the row."""
+        entry = self._entries[i]
+        if getattr(entry, "amazon_alloc", None) is None:
+            raise ValueError("row %d carries no Amazon allocation" % i)
+        if entry.is_matching:
+            txn_id = import_review.accept_amazon_match(self.conn, entry)
+        else:
+            txn_id = import_review.accept_amazon_new(
+                self.conn, self.account_id, entry)
+        self.transactionSaved.emit()
+        # Refresh the register FIRST (its reload resets the view); only then drop.
+        self.changed.emit()
+        self._remove_and_advance(i, txn_id=txn_id, drop=True)
+        return txn_id
+
     def discard_index(self, i: int) -> None:
         """Discard the pending row at ``i`` without adding it to the register.
         A persisted row is DELETED, so downloading the same range again brings it
@@ -662,7 +744,12 @@ class ImportReviewPanel(QWidget):
         # discard_index has always guarded this; accept did not.
         if getattr(entry, "is_actioned", False):
             return
-        if entry.is_matching:
+        # An Amazon itemization row (transient, carries its own multi-leg split)
+        # is accepted through the Amazon split writer whether NEW or MATCHING --
+        # never through the single-category NEW pending-row path.
+        if getattr(entry, "amazon_alloc", None) is not None:
+            self.accept_amazon_index(self._selected_index())
+        elif entry.is_matching:
             self.accept_index(self._selected_index())
         else:
             # NEW rows -- cash AND investment -- are committed from the
@@ -670,12 +757,41 @@ class ImportReviewPanel(QWidget):
             self.accept_new_requested.emit(entry)
 
     # ---- bulk operations --------------------------------------------------
+    def _has_amazon_pending(self) -> bool:
+        """Whether the in-memory list holds any un-actioned Amazon itemization
+        row. Such rows are transient (never in ``review_items``), so the DB-based
+        bulk helpers cannot see them."""
+        return any(getattr(e, "amazon_alloc", None) is not None
+                   and not getattr(e, "is_actioned", False)
+                   for e in self._entries)
+
     def _on_accept_all(self):
+        # Transient Amazon rows live only in memory, so accept_all (which reads
+        # review_items) cannot see them -- accept each in place through the Amazon
+        # split writer instead. accept_amazon_index drops the row it accepts, so
+        # re-scan from the front each pass.
+        if self._has_amazon_pending():
+            while True:
+                i = next((j for j, e in enumerate(self._entries)
+                          if getattr(e, "amazon_alloc", None) is not None
+                          and not getattr(e, "is_actioned", False)), None)
+                if i is None:
+                    break
+                self.accept_amazon_index(i)
+            return
         import_review.accept_all(self.conn, self.account_id)
         self.reload_pending()
         self.changed.emit()
 
     def _on_discard_all(self):
+        # Transient Amazon rows aren't in review_items: discarding them just
+        # clears the in-memory list (the file can be re-loaded to bring them
+        # back), so there is nothing to delete and no confirmation to ask.
+        if self._has_amazon_pending():
+            self.set_entries([])
+            self.hide()
+            self.row_selected.emit(None)
+            return
         if import_review.count_pending(self.conn, self.account_id) == 0:
             return
         resp = QMessageBox.question(

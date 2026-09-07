@@ -2733,8 +2733,9 @@ A companion utility set (not the core ledger app):
     one. The tool filters by card, not by account, so pointing it at the other
     account's scrape picks them up.
 
-- Amazon invoice ITEMIZATION (`mammon/importers/amazon_items.py`, phase-1 core
-  IMPLEMENTED; review/UI wiring is a later phase). Where §7.2's CSV tool only
+- Amazon invoice ITEMIZATION (`mammon/importers/amazon_items.py` phase-1 core +
+  `mammon/import_review.py` phase-2 review integration, both IMPLEMENTED; see
+  §7.2a for the review/UI wiring). Where §7.2's CSV tool only
   names the items in a memo, this turns one matched card charge into a proper
   SPLIT - one leg per item - so each purchase lands in the right category. It is
   a pure, offline core: it reads the webSlinger invoice report file (the
@@ -2748,7 +2749,7 @@ A companion utility set (not the core ledger app):
   Data flow: invoice file in Downloads -> `load_invoice_orders` -> `Order`
   records (cents fields; LIST prices index-aligned with de-duplicated item
   titles) -> `allocate_order` / `allocate_charges` -> `ChargeAllocation`
-  (per-item split legs + offsets) -> [phase 2] review rows -> ledger.
+  (per-item split legs + offsets) -> review rows (§7.2a) -> ledger.
 
   The proportional-allocation rule (locked; integer cents throughout, no floats,
   `ROUND_HALF_UP` at the cents boundary during money parsing):
@@ -2787,6 +2788,56 @@ A companion utility set (not the core ledger app):
     it overrides no learned rule and proposes nothing the data has not shown.
   - **Refunds are out of scope** (not on an invoice; handled manually). The
     allocator rejects a credit outright.
+
+### 7.2a Amazon invoice itemization: review integration (phase 2, IMPLEMENTED)
+
+Phase 1 (§7.2) parses an invoice and allocates the split; phase 2 wires that into
+the register's import-review flow (`mammon/import_review.py`, the SOLE review-flow
+writer) so the item legs actually reach the ledger. Locked behavior:
+
+- **Loading is on demand and never stored (requirement A6).** The cash register
+  offers a `Load Amazon Invoices…` action (gear menu, and a button on the
+  `ImportReviewPanel` — cash accounts only; investment/crypto registers share the
+  panel but hide it). It opens a file picker defaulting to the user's Downloads
+  folder — where the webSlinger Amazon script drops its time-tagged report — and
+  calls `import_review.build_amazon_review`, which reads the file ON DEMAND and
+  returns in-memory review rows. Amazon data is NEVER persisted: the proposed
+  per-item split rides on `ReviewEntry.amazon_alloc` (transient), no `review_items`
+  row records it, and `persist_entries` neither reads nor writes it. The same file
+  can be re-loaded across sessions.
+- **Each order becomes one card review row, classified NEW or MATCHING
+  (requirement A8).** `_find_amazon_match` mirrors `_find_match`'s date+amount tier
+  — same signed cents within +/- `DEFAULT_WINDOW_DAYS`, closest date first — and
+  ADDS a payee gate: the register line must already read as Amazon
+  (`payee LIKE '%amazon%'`), so an unrelated same-day, same-amount charge is never
+  silently itemized. A whole-transaction transfer is excluded (a transfer cannot
+  be split), and a line already claimed by an earlier order in the same load is
+  skipped.
+- **A MATCH updates the existing charge's splits; it never duplicates.**
+  `accept_amazon_match` replaces the matched register line's splits/categories with
+  the invoice's per-item split via `ledger.set_splits`, leaving its date and amount
+  (the user's already-accepted line) untouched, and fills the payee only if it was
+  blank. `accept_amazon_new` posts a fresh `Amazon` card charge carrying the split
+  via `ledger.add_transaction` + `ledger.set_splits`. A lone-leg order (one item,
+  no offset) collapses to a plain categorised transaction, since a split needs two
+  legs. Because the accept re-derives nothing from storage, re-loading the file
+  after a NEW accept re-classifies the now-existing charge as MATCHING, so a second
+  pass updates rather than duplicates.
+- **Item legs default to `household` (requirement A1).** `build_amazon_review`
+  passes `default_category_order`'s head (`household`) as the item-leg category, a
+  sensible default the user can correct; the offsets keep the `gift cards` /
+  `reward points` categories from §7.2. The fallback dropdown ordering
+  (`household`, then the user's past-Amazon categories) never overrides a learned
+  rule.
+- **Orders with no card charge create no review row.** An order fully covered by a
+  gift-card balance (`charged_cents == 0`) and refunds (out of scope, A7) are
+  skipped — there is nothing to reconcile on the card register.
+- **No second write path.** `import_review` stays the sole review-flow writer and
+  `ledger` the sole transaction writer; every Amazon accept funnels through
+  `ledger.add_transaction` / `ledger.set_splits`. The UI stays a thin projection:
+  the panel opens the file dialog and calls the domain build/accept functions,
+  holding no SQL and no money math, and routes accept to the Amazon path by the
+  presence of `amazon_alloc` on the row.
 
 ### 7.3 The MCP server: asking an LLM about the ledger (roadmap item 3)
 - `python -m mammon.mcp_server [--db PATH] [--transport stdio|streamable-http|sse]`
