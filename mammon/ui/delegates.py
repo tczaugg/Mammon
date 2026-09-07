@@ -163,6 +163,14 @@ def make_date_edit(parent=None, iso: str = "", *, blank_ok: bool = False):
     the calendar) and cannot hold a non-date, so nothing downstream has to defend
     against one. ``blank_ok`` allows an empty value via a sentinel minimum date,
     for the few optional dates.
+
+    With no ``iso`` an unbound field opens on TODAY and stays typeable -- never
+    the Qt sentinel minimum (1752-09-14), which renders as blank AND refuses
+    keystrokes. A ``blank_ok`` field also defaults to today; the sentinel is only
+    ever reached by the user clearing the field, and ``date_edit_iso`` maps that
+    back to "". A caller that needs a field blank ON OPEN -- a date FILTER, where
+    today would hide all history -- opts in explicitly with
+    ``setDate(edit.minimumDate())`` after building it; an entry field never should.
     """
     from mammon.ui.models import qt_date_format
     edit = QDateEdit(parent) if parent is not None else QDateEdit()

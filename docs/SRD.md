@@ -2298,6 +2298,14 @@ money movement.
   They are all built by `ui/delegates.make_date_edit`, read back through
   `date_edit_iso`. A `QDateEdit` cannot hold a non-date, so nothing downstream
   has to defend against one.
+- **An unbound date field opens on TODAY and is typeable.** With no initial value
+  `make_date_edit` sets the widget to the current date, never the Qt sentinel
+  minimum (1752-09-14) — which rendered as blank AND refused keystrokes, so a
+  field defaulted to it looked broken. A `blank_ok` field also opens on today; the
+  sentinel is reached only when the user clears the field, which `date_edit_iso`
+  reports as `""`. The one deliberate exception is a field that must be blank ON
+  OPEN — a date FILTER, where today would hide all history — which opts in with
+  `setDate(edit.minimumDate())` after building; an ENTRY field never does.
 - Changing the preference **reaches windows already open**:
   `ui/delegates.refresh_date_format` re-stamps every date editor under the main
   window, and displayed dates re-render through `fmt_date`.
@@ -2316,9 +2324,13 @@ money movement.
 - **The new-account dialog's opening date is a date editor too.** Its optional
   opening-date field was the last holdout — a bare `QLineEdit` with a hardcoded
   `YYYY-MM-DD` placeholder read raw, so it ignored the preference and only accepted
-  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso` (blank
-  → `None`), like the reconcile setup: the DISPLAY honors the setting while the
-  stored/returned value stays ISO `YYYY-MM-DD`.
+  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso`, like
+  the reconcile setup: the DISPLAY honors the setting while the stored/returned
+  value stays ISO `YYYY-MM-DD`. It **opens on today** and is immediately typeable;
+  the first `make_date_edit(blank_ok=True)` port pinned it to the sentinel minimum,
+  which rendered blank and refused input, so the field looked broken. `blank_ok` is
+  retained only so the user can clear the field back to `None`; the visible default
+  is today.
 
 ### 5.11 Reconcile against a statement
 - Two-pane workspace (debits left, credits right) after a setup dialog that

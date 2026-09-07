@@ -3906,13 +3906,15 @@ class NewAccountDialog(QDialog):
         self.opening = QDoubleSpinBox()
         self.opening.setRange(-1_000_000_000, 1_000_000_000)
         self.opening.setDecimals(2)
-        # Optional opening date: a calendar-backed editor shown in the user's
-        # date-format preference (never a hardcoded YYYY-MM-DD), read back to ISO
-        # by date_edit_iso -- like ReconcileStartDialog. blank_ok + starting at the
-        # sentinel minimum keeps it empty until the user sets one, so an omitted
-        # opening date stays None.
+        # Opening date: a calendar-backed editor shown in the user's date-format
+        # preference (never a hardcoded YYYY-MM-DD), read back to ISO by
+        # date_edit_iso. It defaults to and DISPLAYS today (the make_date_edit
+        # chokepoint) so the field is immediately typeable -- it must never open on
+        # the Qt sentinel minimum, which read as blank AND refused every keystroke
+        # (the bug this replaced). blank_ok is kept so the user can still clear it
+        # to leave the opening date unset (date_edit_iso -> "" -> None); the
+        # VISIBLE default is today.
         self.opening_date = make_date_edit(blank_ok=True)
-        self.opening_date.setDate(self.opening_date.minimumDate())
         form.addRow("Name", self.name)
         form.addRow("Type", self.type)
         form.addRow("Opening balance", self.opening)
