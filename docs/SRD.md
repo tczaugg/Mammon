@@ -1894,6 +1894,29 @@ direction and the Portfolio totals never move.
 - The investment-action prediction lives in `import_review.predict_action`, not
   in the register model, so the bulk and single paths cannot drift apart again.
 
+### 5.5l Accepting a NEW row creates the category you typed
+- **A category typed into the pending row and confirmed is CREATED on accept.**
+  When the user types a brand-new category into the register's editable pending
+  row, confirms the "Create new category?" prompt, and Accepts the NEW review
+  row, the accept path (`import_review_widget.PendingRowController.accept_new`)
+  resolves the buffered text through `import_review.resolve_or_create_category`,
+  a thin get-or-create wrapper over `ledger.resolve_category` — the single writer
+  of category rows. Previously accept used the LOOKUP-ONLY
+  `category_id_for_name`, which returns `None` for unknown text, so a freshly
+  typed category was silently dropped and the transaction posted with no
+  category; the user had to re-add it by hand afterward.
+- **Only an ACCEPTED row invents a category, never a previewed one.**
+  `category_id_for_name` stays lookup-only and is still what `predict_fields`
+  uses while a row is merely being previewed — a category is only ever minted at
+  the commit point, from text the user typed and confirmed.
+- **Transfer detection still wins, and blank invents nothing.** A `[Account]`
+  category names a transfer target and is resolved first
+  (`transfer_account_id_for_name`); only when the text is neither a transfer
+  target nor blank is a category get-or-created. `ledger.resolve_category`
+  reuses an existing category case-insensitively and creates each missing
+  `Parent:Child` level, so accept never forks a near-duplicate. Regression:
+  `test_review_new_category.py`.
+
 ### 5.5e Historical quote backfill
 - Get Quotes carries **"Also fetch monthly history back to each holding's first
   transaction"**. Ticked, it calls `investments.fetch_quote_history`, which asks

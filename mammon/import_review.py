@@ -68,6 +68,7 @@ __all__ = [
     "predict_action",
     "predict_fields",
     "category_id_for_name",
+    "resolve_or_create_category",
     "category_name_for_id",
     "persist_entries",
     "load_pending",
@@ -1045,6 +1046,32 @@ def category_id_for_name(conn, name) -> Optional[int]:
         if cpath and _MULTISPACE.sub(" ", str(cpath).strip()).lower() == key:
             return int(cat["id"])
     return None
+
+
+def resolve_or_create_category(conn, name) -> Optional[int]:
+    """Get-or-create a category id from a name typed into a review row that the
+    user is ACCEPTING.
+
+    Unlike :func:`category_id_for_name` (lookup-only, used while merely
+    previewing/predicting -- we never invent a category for an unaccepted row),
+    this defers to :func:`ledger.resolve_category`, the SINGLE writer of category
+    rows. When the user types a brand-new category into the register's pending
+    row and confirms it, accept must both CREATE that category and assign it to
+    the resulting transaction -- the lookup-only path returned ``None`` for
+    unknown text, so the category was silently dropped and the user had to re-add
+    it by hand. ``ledger.resolve_category`` reuses an existing category
+    case-insensitively and creates each missing 'Parent:Child' level. Returns
+    ``None`` for a blank name; the caller resolves a bracketed ``[Account]``
+    transfer target FIRST, so this is normally reached only for a plain
+    category. Bracketed text is refused outright anyway: it names the transfer
+    namespace, so an UNKNOWN ``[Account]`` (one that resolves to no account)
+    must stay uncategorized, never mint a literal ``[Name]`` category row."""
+    s = str(name or "").strip()
+    if not s:
+        return None
+    if s.startswith("[") and s.endswith("]"):
+        return None
+    return ledger.resolve_category(conn, s)
 
 
 def transfer_account_id_for_name(conn, name) -> Optional[int]:

@@ -620,10 +620,19 @@ class ImportReviewPanel(QWidget):
         # A '[Account]' category names a transfer target: resolve it to an
         # account id so save_new creates the double-entry (and learns the
         # statement text -> account mapping). Otherwise it is a plain category.
+        # Transfer detection takes precedence over category creation; only when
+        # the text is neither a transfer target nor blank is a category resolved.
         transfer_account_id = import_review.transfer_account_id_for_name(
             self.conn, cat_text)
+        # Accept is the commit point: a category the user typed and confirmed
+        # here must be CREATED and assigned, not silently dropped. The old
+        # lookup-only resolve returned None for a brand-new name, so the register
+        # posted the row with no category and the user had to re-add it by hand.
+        # resolve_or_create_category routes through ledger.resolve_category (the
+        # sole writer of category rows), so this stays the single write path.
         category_id = (None if transfer_account_id is not None
-                       else import_review.category_id_for_name(self.conn, cat_text))
+                       else import_review.resolve_or_create_category(
+                           self.conn, cat_text))
         txn_id = import_review.save_new(
             self.conn, self.account_id, m,
             payee=values.get("payee"), category_id=category_id,
