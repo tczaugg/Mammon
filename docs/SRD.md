@@ -82,6 +82,14 @@ One SQLite database. Core tables:
 - holdings(id, account_id, symbol, name, quantity, cost_basis) - investment
   positions.
 - price_history(id, symbol, date, close_price, source) - per-holding quotes.
+- asset_values(id, account_id, date, value_cents, source, note,
+  UNIQUE(account_id, date)) - the dated MARKET-VALUE series for a non-investment
+  `asset` account (schema v42), shaped like `price_history` is for securities and
+  kept separate from the account's ledger balance (its cost basis). `value_cents`
+  is signed integer cents; `date` is ISO YYYY-MM-DD; `source` distinguishes a
+  hand-entered `manual` value from a fetched `zillow` one. Net worth reads the
+  LATEST value on or before the as-of date through `investments.display_balance`.
+  Written only by `mammon/asset_values.py`; the zEstimate wiring is 5.8e.
 - investment_transactions(id, account_id, date, action[Buy|Sell|Div|ReinvDiv|
   IntInc|...], symbol, quantity, price, amount, commission, memo) - lot-level
   investment activity (kept distinct from cash transactions).
