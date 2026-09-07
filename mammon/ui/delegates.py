@@ -7,8 +7,9 @@ from PyQt5.QtCore import (QDate, QEvent, QPersistentModelIndex, QRect, QSize,
                           QStringListModel, Qt, QTimer)
 from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
-    QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QHeaderView,
-    QInputDialog, QLineEdit, QMessageBox, QStyledItemDelegate, QWidget,
+    QApplication, QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QHeaderView,
+    QInputDialog, QLineEdit, QMessageBox, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QWidget,
 )
 
 from mammon.ui import style
@@ -499,6 +500,76 @@ def classification_zones(rect):
     return {"category": cat, "memo": memo, "tag": tag}
 
 
+def _text_width(fm, text) -> int:
+    """Width of ``text`` in ``fm``, across Qt versions (horizontalAdvance is the
+    non-deprecated spelling of the old width())."""
+    adv = getattr(fm, "horizontalAdvance", None)
+    return adv(text) if adv else fm.width(text)
+
+
+def paint_tag_swatches(painter, rect, swatches, *, text_color) -> None:
+    """Paint ``square name`` pairs left to right inside ``rect`` for a list of
+    ``(name, color)`` tuples -- a filled color square then the tag name, or the
+    name alone when the tag has no color. Shared by the one-line
+    :class:`TagDelegate` and the two-line payee tag zone so both draw the same
+    chips. Clips to ``rect``; a name that would overflow is elided."""
+    if not swatches:
+        return
+    fm = painter.fontMetrics()
+    side = max(6, min(10, rect.height() - 2))
+    x = rect.left()
+    y = rect.top()
+    h = rect.height()
+    right = rect.right()
+    for name, color in swatches:
+        if x >= right:
+            break
+        if color:
+            box = QRect(x, y + (h - side) // 2, side, side)
+            painter.fillRect(box, QColor(color))
+            painter.setPen(QColor(style.line_color()))
+            painter.drawRect(box)
+            x += side + 3
+        avail = right - x
+        if avail <= 0:
+            break
+        shown = fm.elidedText(name, Qt.ElideRight, avail)
+        painter.setPen(text_color)
+        painter.drawText(QRect(x, y, avail, h),
+                         int(Qt.AlignLeft | Qt.AlignVCenter), shown)
+        x += _text_width(fm, shown) + 8
+
+
+class TagDelegate(QStyledItemDelegate):
+    """The one-line register Tag cell: a small colored square before each tag
+    name. Colors are the tag's own identity color (``ledger.tag_colors``, surfaced
+    by ``RegisterModel.TAG_COLORS_ROLE``), and the chip set is the UNION of the
+    row's own tags and its split legs' tags -- so a split whose legs are tagged
+    shows each leg color on the collapsed row, without double-counting. With no
+    tags it is the plain default delegate, so an uncolored register is unchanged.
+    (In two-line mode the Tag COLUMN is hidden and the tag paints on the payee's
+    second line instead, so this delegate and that path never both fire.)"""
+
+    def paint(self, painter, option, index):
+        swatches = index.data(RegisterModel.TAG_COLORS_ROLE) or []
+        if not swatches:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""                       # base paints background/selection only
+        widget = opt.widget
+        st = widget.style() if widget else QApplication.style()
+        st.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        selected = bool(opt.state & QStyle.State_Selected)
+        text_color = (opt.palette.highlightedText().color() if selected
+                      else opt.palette.text().color())
+        cell = st.subElementRect(QStyle.SE_ItemViewItemText, opt, widget)
+        painter.save()
+        paint_tag_swatches(painter, cell, swatches, text_color=text_color)
+        painter.restore()
+
+
 class DateDelegate(QStyledItemDelegate):
     """Edit a date cell with a calendar popup, in the user's chosen date format.
     The cell DISPLAYS that format while the model stores/edits ISO YYYY-MM-DD, so
@@ -774,19 +845,27 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
         fm = QFontMetrics(font)
         painter.save()
         painter.setFont(font)
+        muted = QColor(style.muted_color())
         for field, r in self.second_line_rects(option.rect).items():
             if r.width() <= 0:
                 continue
             # a box around every field (filled or not) -- the user's request
             painter.setPen(QColor(style.line_color()))
             painter.drawRect(r.adjusted(0, 0, -1, -1))
+            inner = r.adjusted(self.TEXT_PAD, 0, -self.TEXT_PAD, 0)
+            if field == "tag":
+                # A colored square before each tag name (the row's own tags plus
+                # its split legs', via TAG_COLORS_ROLE), matching the one-line
+                # TagDelegate; the square replaces the old '#' marker.
+                swatches = index.sibling(
+                    index.row(), self._COL["tag"]).data(
+                        RegisterModel.TAG_COLORS_ROLE) or []
+                paint_tag_swatches(painter, inner, swatches, text_color=muted)
+                continue
             text = str(index.sibling(index.row(), self._COL[field]).data(Qt.DisplayRole) or "")
-            if field == "tag" and text:
-                text = f"#{text}"
             if not text:
                 continue
-            inner = r.adjusted(self.TEXT_PAD, 0, -self.TEXT_PAD, 0)
-            painter.setPen(QColor(style.muted_color()))
+            painter.setPen(muted)
             painter.drawText(inner, int(Qt.AlignLeft | Qt.AlignVCenter),
                              fm.elidedText(text, Qt.ElideRight, max(0, inner.width())))
         painter.restore()

@@ -288,6 +288,12 @@ class RegisterModel(QAbstractTableModel):
     # PayeeTwoLineDelegate reads it; every other cell returns "".
     SECOND_LINE_ROLE = Qt.UserRole + 1
 
+    # Custom role on the Tag cell: the (name, color) chips to paint -- the row's
+    # own tags plus its split legs' tags (deduped), each mapped to its identity
+    # color (None when uncolored). The TagDelegate (one-line) and the two-line
+    # payee tag zone both read it; every other cell returns [].
+    TAG_COLORS_ROLE = Qt.UserRole + 2
+
     committed = pyqtSignal()          # a write hit the DB; refresh siblings
     error = pyqtSignal(str)           # a write failed; surface to the user
     # A write that genuinely ALTERED or CREATED a transaction, carrying its id.
@@ -305,6 +311,11 @@ class RegisterModel(QAbstractTableModel):
         self.conn = conn
         self.account_id = account_id
         self._rows: list[dict] = []
+        # Tag identity colors (casefolded name -> #rrggbb) and split-leg tag names
+        # by parent txn id, both refreshed on reload so the Tag cell can paint a
+        # colored square per tag (the row's own tags unioned with its legs').
+        self._tag_colors: dict[str, str] = {}
+        self._leg_tags: dict[int, list[str]] = {}
         self._new: dict = {}          # blank quick-entry buffer
         # A not-yet-accepted "pending" review row: an editable register row a
         # NEW import-review item opens, holding {"entry": ReviewEntry, "buf":
@@ -368,6 +379,8 @@ class RegisterModel(QAbstractTableModel):
     def reload(self):
         self.beginResetModel()
         self._rows = ledger.register_rows(self.conn, self.account_id)
+        self._tag_colors = ledger.tag_colors(self.conn)
+        self._leg_tags = ledger.split_leg_tags_by_txn(self.conn, self.account_id)
         self._view = self._project()
         self._new = {}
         # QuickFill's pre-entered fields for the blank row (see quickfill_fields):
@@ -842,6 +855,11 @@ class RegisterModel(QAbstractTableModel):
                 return self._second_line_text(row)
             return ""
 
+        if role == self.TAG_COLORS_ROLE:
+            if col == self.TAG and not blank and not pending:
+                return self._tag_swatches(row)
+            return []
+
         if role == Qt.DisplayRole:
             if pending:
                 txt = self._pending_text(col)
@@ -936,6 +954,21 @@ class RegisterModel(QAbstractTableModel):
         if r["cleared"]:
             return "c"
         return ""
+
+    def _tag_swatches(self, row) -> list:
+        """The ``(name, color)`` chips the Tag cell paints for this row: the row's
+        own tags, then any tags its SPLIT LEGS carry (deduped case-insensitively),
+        each mapped to its identity color (``None`` when uncolored). The union
+        matches :func:`reports._lines._line_tags`, so a split's per-leg tags
+        surface on the collapsed register row without double-counting."""
+        r = self._view[row]
+        names = list(ledger.parse_tags(r.get("tag") or ""))
+        seen = {n.casefold() for n in names}
+        for n in self._leg_tags.get(r.get("id"), []):
+            if n.casefold() not in seen:
+                seen.add(n.casefold())
+                names.append(n)
+        return [(n, self._tag_colors.get(n.casefold())) for n in names]
 
     def _row_text(self, row, col) -> str:
         r = self._view[row]

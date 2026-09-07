@@ -280,6 +280,29 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   (the substring Find also hits payees/memos), and Reports ▸ By Tag (Window)
   (`reports/tags.py`) totals spending per tag, attributing a line to EACH of its
   tags so overlapping tags can each show the full amount.
+- **Tag colors** (identity, not rank): each tag carries an optional display color
+  (`tags.color`, a `#RRGGBB` hex string, NULL = "not chosen"). The color is per-tag
+  IDENTITY, so a tag keeps the SAME color everywhere -- the register Tag cell paints
+  a small colored square before each tag name (in both one- and two-line view), the
+  split dialog tints a tagged leg's row with its tag color, and the By Tag report
+  colors each row's tag -- instead of color following a chart slice's rank and
+  changing as the ranking moves. A split's per-leg tags surface on the collapsed
+  register row as the UNION of the row's own tags and its legs' tags (the same
+  `reports/_lines._line_tags` union), so leg colors show without double-counting.
+  Every surface reads color through ONE domain accessor, `ledger.tag_colors(conn)`
+  (casefolded name -> hex), keeping `ui/` free of SQL. Colors are written only
+  through `ledger.set_tag_color` (validated `#RRGGBB`), which -- with `rename_tag`
+  and `delete_tag` -- keeps `mammon/ledger` the sole writer of the tags table and
+  its `transactions.tag` cache. A split leg's own single tag round-trips through
+  `ledger.set_splits` (get-or-created by name), so editing a split no longer drops a
+  per-leg tag an import set.
+- **Tag Manager** (Tools ▸ Tag Manager…, mirroring the Category Manager): lists
+  every tag with its color swatch and usage count, and renames a tag (in place,
+  keeping its id so links and color survive), sets or clears its color via a color
+  picker, or deletes it (removing it from every transaction and split leg). A thin
+  `QDialog` over the ledger verbs above; its destructive delete confirms through the
+  `QMessageBox.question` seam, and it emits `changed` so open registers and the By
+  Tag report refresh.
 
 ### 5.2 Transfers between accounts (FIRST PRIORITY)
 - Classic Quicken behavior (user confirmed Q1): a transfer is one transaction

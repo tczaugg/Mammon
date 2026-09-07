@@ -92,6 +92,7 @@ from PyQt5.QtWidgets import (
 
 from mammon import ledger, reports
 from mammon.ui.models import fmt_cents
+from mammon.ui.swatch import color_square_icon
 from mammon.ui.report_filters import (
     PERIOD_DEFAULT,
     CustomizeDialog,
@@ -1036,11 +1037,20 @@ class ReportWindow(QDialog):
     def _populate(self, rows):
         self.table.setRowCount(len(rows))
         last = len(self.columns) - 1
+        # The By Tag report carries a tag NAME per row; color each row's label
+        # cell with that tag's identity color (ledger.tag_colors), so a tag reads
+        # the same here as in the register. The Total row (no tag) is left plain.
+        tag_colors = (ledger.tag_colors(self.conn)
+                      if getattr(self._report, "key", None) == "tag" else None)
         for i, r in enumerate(rows):
             for col, cell in enumerate(_row_cells(r, self.columns)):
                 item = QTableWidgetItem(cell)
                 if col == last:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if tag_colors is not None and col == last - 1 and r.label != "Total":
+                    color = tag_colors.get((r.label or "").casefold())
+                    if color:
+                        item.setIcon(color_square_icon(color))
                 self.table.setItem(i, col, item)
 
     def _populate_tree(self, rows, expanded_paths=None):

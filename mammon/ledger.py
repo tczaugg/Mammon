@@ -15,6 +15,7 @@ both. The "category" of a transfer is virtual -- it renders as "[Other Account]"
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import sqlite3
 from typing import Any, Optional
 
@@ -414,6 +415,150 @@ def transactions_with_tag(
         params.append(account_id)
     sql += " ORDER BY t.date, t.id"
     return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+
+
+# --------------------------------------------------------------------------
+# Tag colors and tag management (the Tag Manager's domain verbs)
+# --------------------------------------------------------------------------
+# A tag carries an optional display color -- a '#RRGGBB' hex string, NULL when
+# unchosen (the ``tags.color`` column, added in migration 54). Color is per-tag
+# IDENTITY: the register cell, the split dialog and the By Tag report all read it
+# through the accessors here, so a tag keeps ONE color everywhere instead of
+# color following a chart slice's rank and changing as the ranking moves. This
+# module stays the SOLE writer of the tags table -- its ``name``, its ``color``
+# and the ``transactions.tag`` cache -- so the Tag Manager holds no SQL and can
+# never let the relational store and the cache diverge.
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def normalize_tag_color(color) -> Optional[str]:
+    """Validate a tag color to canonical lowercase ``#rrggbb``, or ``None`` to
+    clear it. ``None``/``""`` -> ``None``; anything that is not a 6-digit
+    ``#RRGGBB`` hex string raises ``ValueError`` (money and colors are both
+    validated at the domain boundary, never trusted from the UI)."""
+    if color is None:
+        return None
+    c = str(color).strip()
+    if not c:
+        return None
+    if not _HEX_COLOR_RE.match(c):
+        raise ValueError(f"tag color must be '#RRGGBB' hex, got {color!r}")
+    return c.lower()
+
+
+def _refresh_tag_cache(conn: sqlite3.Connection, txn_id: int) -> None:
+    """Recompute the ``transactions.tag`` comma-joined cache from the junction
+    after a rename/delete changed a name or dropped a link. The junction is
+    authoritative; the cache is only its projection (see :func:`_apply_tags`)."""
+    cache = format_tags(get_tags(conn, txn_id)) or None
+    conn.execute("UPDATE transactions SET tag = ? WHERE id = ?", (cache, txn_id))
+
+
+def list_tags(conn: sqlite3.Connection) -> list[dict]:
+    """Every tag, whether or not it is currently attached, as dicts with ``id``,
+    ``name``, ``color`` and a ``usage`` count (transactions carrying it plus
+    split legs tagged with it). Sorted by name NOCASE. Powers the Tag Manager,
+    which -- unlike :func:`all_tags` -- must show even an unused tag so its color
+    can be set before it is applied."""
+    rows = conn.execute(
+        "SELECT g.id AS id, g.name AS name, g.color AS color, "
+        "(SELECT COUNT(*) FROM transaction_tags j WHERE j.tag_id = g.id) "
+        "+ (SELECT COUNT(*) FROM splits s WHERE s.tag_id = g.id) AS usage "
+        "FROM tags g ORDER BY g.name COLLATE NOCASE"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_tag(conn: sqlite3.Connection, tag_id: int) -> Optional[dict]:
+    """One tag as ``{'id', 'name', 'color'}``, or ``None`` when it is gone."""
+    row = conn.execute(
+        "SELECT id, name, color FROM tags WHERE id = ?", (tag_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def tag_colors(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map CASEFOLDED tag name -> its ``#rrggbb`` color, for the tags that have
+    one. Keyed casefolded because ``tags.name`` collates NOCASE, so a renderer
+    resolves a parsed tag name straight through ``.get(name.casefold())``. This is
+    the single accessor the register cell, split dialog and By Tag report read to
+    color a tag, keeping money/colour logic out of ``ui/``."""
+    rows = conn.execute(
+        "SELECT name, color FROM tags WHERE color IS NOT NULL AND color <> ''"
+    ).fetchall()
+    return {r["name"].casefold(): r["color"] for r in rows}
+
+
+def set_tag_color(conn: sqlite3.Connection, tag_id: int, color) -> None:
+    """Set (or clear, with ``color=None``) a tag's display color; validated and
+    committed. Sole writer of ``tags.color``."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    conn.execute("UPDATE tags SET color = ? WHERE id = ?",
+                 (normalize_tag_color(color), tag_id))
+    conn.commit()
+
+
+def rename_tag(conn: sqlite3.Connection, tag_id: int, new_name: str) -> None:
+    """Rename a tag IN PLACE -- keeping its id, so every junction link, split-leg
+    reference and its color survive. Refuses a blank name, a comma (the tag
+    separator would split it into two) and a case-insensitive collision with a
+    DIFFERENT existing tag. Rebuilds the ``transactions.tag`` cache of every
+    transaction carrying it so the register cell shows the new spelling."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    name = (new_name or "").strip()
+    if not name:
+        raise ValueError("a tag needs a name")
+    if "," in name:
+        raise ValueError("a tag name cannot contain a comma")
+    clash = conn.execute(
+        "SELECT id FROM tags WHERE name = ? AND id <> ?", (name, tag_id)).fetchone()
+    if clash is not None:
+        raise ValueError(f"a tag named {name!r} already exists")
+    affected = [r["transaction_id"] for r in conn.execute(
+        "SELECT transaction_id FROM transaction_tags WHERE tag_id = ?", (tag_id,))]
+    conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag_id))
+    for tid in affected:
+        _refresh_tag_cache(conn, tid)
+    conn.commit()
+
+
+def delete_tag(conn: sqlite3.Connection, tag_id: int) -> None:
+    """Delete a tag. Its junction links cascade away and any split legs pointing
+    at it are set NULL (``foreign_keys`` is ON -- see :func:`db.connect`); the
+    ``transactions.tag`` cache of every affected transaction is then rebuilt so
+    the register cell drops the name."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    affected = [r["transaction_id"] for r in conn.execute(
+        "SELECT transaction_id FROM transaction_tags WHERE tag_id = ?", (tag_id,))]
+    conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+    for tid in affected:
+        _refresh_tag_cache(conn, tid)
+    conn.commit()
+
+
+def split_leg_tags_by_txn(conn: sqlite3.Connection,
+                          account_id: int) -> dict[int, list[str]]:
+    """For one account, the tag names carried by SPLIT LEGS, grouped by their
+    parent transaction id: ``{txn_id: [name, ...]}`` in leg order. The register
+    cell unions these into the parent row's own tags so a split's per-leg tags
+    surface on the collapsed row (matching :func:`reports._lines._line_tags`)
+    without a per-row query and without double-counting. Only legs that actually
+    carry a tag appear."""
+    rows = conn.execute(
+        "SELECT s.transaction_id AS tid, g.name AS name "
+        "FROM splits s JOIN tags g ON g.id = s.tag_id "
+        "JOIN transactions t ON t.id = s.transaction_id "
+        "WHERE t.account_id = ? AND s.tag_id IS NOT NULL "
+        "ORDER BY s.transaction_id, s.id",
+        (account_id,),
+    ).fetchall()
+    out: dict[int, list[str]] = {}
+    for r in rows:
+        out.setdefault(r["tid"], []).append(r["name"])
+    return out
 
 
 def set_scheduled(conn: sqlite3.Connection, txn_id: int, scheduled: bool) -> None:
@@ -961,8 +1106,23 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
         raise KeyError(f"no transaction {txn_id}")
     if txn["transfer_account_id"] is not None and not _has_splits(conn, txn_id):
         raise ValueError("a transfer cannot be split")
-    norm = [_split_line(ln) for ln in lines]
-    total = sum(amt for _cat, _taid, amt, _memo in norm)
+    # Each normalized leg is (category_id, transfer_account_id, amount, memo,
+    # tag_id). A leg may carry its own single tag (Quicken tags a split leg to
+    # attribute part of a payment to a project) as ``tag_id`` (already resolved)
+    # or ``tag`` (a name, get-or-created here). Threading it through set_splits is
+    # what lets an edited/re-saved split KEEP a per-leg tag an import wrote,
+    # instead of silently dropping it on the delete+recreate rebuild below.
+    norm = []
+    for ln in lines:
+        cat, taid, amt, memo = _split_line(ln)
+        tg = None
+        if isinstance(ln, dict):
+            if ln.get("tag_id") not in (None, ""):
+                tg = int(ln["tag_id"])
+            elif ln.get("tag"):
+                tg = tag_id(conn, ln["tag"])
+        norm.append((cat, taid, amt, memo, tg))
+    total = sum(amt for _cat, _taid, amt, _memo, _tg in norm)
     target = int(txn["amount"])
     diff = target - total
     if diff != 0:
@@ -974,13 +1134,13 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
         # A transfer leg (transfer_account_id set) is NEVER touched -- only a
         # true uncategorized line absorbs the difference. Fold into an existing
         # uncategorized line if there is one; otherwise append a fresh one.
-        idx = next((i for i, (c, t, _a, _m) in enumerate(norm)
+        idx = next((i for i, (c, t, _a, _m, _tg) in enumerate(norm)
                     if c is None and t is None), None)
         if idx is None:
-            norm.append((None, None, diff, None))
+            norm.append((None, None, diff, None, None))
         else:
-            c, t, a, m = norm[idx]
-            norm[idx] = (c, t, a + diff, m)
+            c, t, a, m, tg = norm[idx]
+            norm[idx] = (c, t, a + diff, m, tg)
     if len(norm) < 2:
         raise ValueError("a split needs at least two lines")
     # Snapshot each existing transfer-split mirror's own per-account
@@ -996,7 +1156,7 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     preserved = _capture_split_mirror_flags(conn, txn_id)
     _delete_split_mirrors(conn, txn_id)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
-    for cat, taid, amt, memo in norm:
+    for cat, taid, amt, memo, tg in norm:
         pair_id = None
         if taid is not None:
             pair_id = _create_split_mirror(conn, txn, taid, amt)
@@ -1008,8 +1168,8 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
                 )
         conn.execute(
             "INSERT INTO splits(transaction_id, category_id, transfer_account_id, "
-            "transfer_pair_id, amount, memo) VALUES (?,?,?,?,?,?)",
-            (txn_id, cat, taid, pair_id, amt, memo),
+            "transfer_pair_id, amount, memo, tag_id) VALUES (?,?,?,?,?,?,?)",
+            (txn_id, cat, taid, pair_id, amt, memo, tg),
         )
     conn.execute("UPDATE transactions SET category_id=NULL WHERE id=?", (txn_id,))
     conn.commit()
@@ -1028,7 +1188,7 @@ def rebalance_splits(conn: sqlite3.Connection, txn_id: int) -> None:
     lines = [
         {"category_id": s["category_id"],
          "transfer_account_id": s["transfer_account_id"],
-         "amount": s["amount"], "memo": s["memo"]}
+         "amount": s["amount"], "memo": s["memo"], "tag_id": s["tag_id"]}
         for s in get_splits(conn, txn_id)
     ]
     set_splits(conn, txn_id, lines)

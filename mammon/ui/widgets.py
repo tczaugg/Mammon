@@ -40,7 +40,7 @@ from mammon.ui.import_review_widget import ImportReviewPanel
 from mammon.ui.delegates import (
     CategoryDelegate, DateDelegate, MoneyDelegate, NoWheelComboBox,
     NoWheelDoubleSpinBox, PayeeCompleter, PayeeTwoLineDelegate, SplitAmountSpinBox,
-    TwoLineHeaderView, _accept_active_completion, accept_category_text,
+    TagDelegate, TwoLineHeaderView, _accept_active_completion, accept_category_text,
     date_edit_iso, make_category_combo, make_date_edit, refresh_date_format,
 )
 from mammon.ui.models import (
@@ -350,6 +350,10 @@ class RegisterWidget(QWidget):
             QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
         self.view.setItemDelegateForColumn(RegisterModel.DATE, DateDelegate(self.view))
         self.view.setItemDelegateForColumn(RegisterModel.CATEGORY, CategoryDelegate(self.view))
+        # One-line Tag cell: a colored square before each tag name (identity color
+        # from ledger.tag_colors, incl. the split-leg union). In two-line mode the
+        # Tag column is hidden and PayeeTwoLineDelegate paints the same chips.
+        self.view.setItemDelegateForColumn(RegisterModel.TAG, TagDelegate(self.view))
         # Money columns need an editor that writes only on a real change: the
         # default one commits on focus-out even when untouched, and the empty half
         # of the Payment/Deposit pair then committed "" -> amount 0.
@@ -4610,7 +4614,10 @@ class SplitDialog(QDialog):
         # may itself be a transfer -- a mortgage principal leg to the house/loan
         # account, a paycheck 401(k) deferral to the retirement account.
         self._cats = list(model.category_choices())
-        self._lines = []            # list of dicts: {frame, cat, amount, memo}
+        # Tag identity colors (casefolded name -> #rrggbb) so a tagged leg row is
+        # tinted with its tag's color, matching the register and By Tag report.
+        self._tag_colors = ledger.tag_colors(self.conn)
+        self._lines = []            # list of dicts: {frame, cat, amount, memo, tag}
 
         self.setWindowTitle("Split transaction")
         outer = QVBoxLayout(self)
@@ -4670,7 +4677,8 @@ class SplitDialog(QDialog):
 
         if existing:
             for s in existing:
-                self.add_line(s["category_label"], s["amount"] / 100.0, s["memo"])
+                self.add_line(s["category_label"], s["amount"] / 100.0, s["memo"],
+                              s["tag"])
         else:
             # Seed line 1 with the transaction's existing single category, so a
             # split started from an already-categorized transaction KEEPS that
@@ -4685,8 +4693,9 @@ class SplitDialog(QDialog):
         self.resize(560, 320)
 
     # ---- line rows --------------------------------------------------------
-    def add_line(self, category="", amount=0.0, memo=""):
+    def add_line(self, category="", amount=0.0, memo="", tag=""):
         frame = QWidget()
+        frame.setObjectName("splitrow")
         h = QHBoxLayout(frame)
         h.setContentsMargins(0, 0, 0, 0)
         # The very same builder the register's category cell uses, so a split
@@ -4716,13 +4725,32 @@ class SplitDialog(QDialog):
         amt.lineEdit().textChanged.connect(lambda *_: self._update_remainder())
         memo_edit = QLineEdit(memo or "")
         memo_edit.setPlaceholderText("memo")
+        # A single tag per leg (Quicken's per-leg tag). Typing a tag tints the row
+        # with that tag's color; an existing color (set in the Tag Manager) is
+        # reused, and a brand-new name is get-or-created on save via set_splits.
+        tag_edit = QLineEdit(tag or "")
+        tag_edit.setPlaceholderText("tag")
+        tag_edit.setMaximumWidth(120)
         remove = QPushButton("Remove")
-        entry = {"frame": frame, "cat": cat, "amount": amt, "memo": memo_edit}
+        entry = {"frame": frame, "cat": cat, "amount": amt, "memo": memo_edit,
+                 "tag": tag_edit}
         remove.clicked.connect(lambda: self._remove_line(entry))
-        for w in (cat, amt, memo_edit, remove):
+        for w in (cat, amt, memo_edit, tag_edit, remove):
             h.addWidget(w)
         self._rows_box.addWidget(frame)
         self._lines.append(entry)
+        tag_edit.textChanged.connect(lambda *_: self._recolor_line(entry))
+        self._recolor_line(entry)
+
+    def _recolor_line(self, entry):
+        """Tint a split leg's row strip with its tag's identity color, or clear
+        the tint when the leg is untagged/uncolored. The stylesheet is scoped to
+        the row's object name so only the strip is colored, not the child
+        editors."""
+        name = entry["tag"].text().strip().casefold()
+        color = self._tag_colors.get(name) if name else None
+        entry["frame"].setStyleSheet(
+            "QWidget#splitrow { background-color: %s; }" % color if color else "")
 
     def _remove_line(self, entry):
         if entry in self._lines:
@@ -4739,7 +4767,8 @@ class SplitDialog(QDialog):
         for e in list(self._lines):
             self._remove_line(e)
         for s in self._prior_split:
-            self.add_line(s["category_label"], s["amount"] / 100.0, s["memo"])
+            self.add_line(s["category_label"], s["amount"] / 100.0, s["memo"],
+                          s["tag"])
         self._update_remainder()
 
     # ---- computed state ---------------------------------------------------
@@ -4759,14 +4788,15 @@ class SplitDialog(QDialog):
             if cents == 0 and not label:
                 continue
             memo = e["memo"].text().strip() or None
+            tag = e["tag"].text().strip() or None
             target = self.model.transfer_target(label) if label else None
             if target is not None:
                 out.append({"category_id": None, "transfer_account_id": target,
-                            "amount": cents, "memo": memo})
+                            "amount": cents, "memo": memo, "tag": tag})
             else:
                 cid = ledger.resolve_category(self.conn, label) if label else None
                 out.append({"category_id": cid, "transfer_account_id": None,
-                            "amount": cents, "memo": memo})
+                            "amount": cents, "memo": memo, "tag": tag})
         return out
 
     def _line_amounts(self):
@@ -6300,6 +6330,7 @@ class MainWindow(QMainWindow):
         tools.addAction("Accounts…", self._accounts_list_dialog)
         tools.addAction("Download Log…", self._download_log_dialog)
         tools.addAction("Category Manager…", self._manage_categories_dialog)
+        tools.addAction("Tag Manager…", self._manage_tags_dialog)
         tools.addAction("Budgets…", self._budgets_dialog)
         tools.addAction("Payee Renaming…", self._rename_rules_dialog)
         # Securities is a FILE-wide operation, not an account one: the same
@@ -7707,6 +7738,15 @@ class MainWindow(QMainWindow):
         register category labels -> refresh the window."""
         from mammon.ui.categories_dialog import CategoriesDialog
         dlg = CategoriesDialog(self.conn, parent=self)
+        dlg.changed.connect(self._refresh_all)
+        dlg.exec_()
+
+    def _manage_tags_dialog(self):
+        """Open the Tag Manager (Tools menu): rename, color, or delete tags. A
+        rename or delete changes register Tag cells and the By Tag report, and a
+        color change repaints their swatches -> refresh the window."""
+        from mammon.ui.tags_dialog import TagsDialog
+        dlg = TagsDialog(self.conn, parent=self)
         dlg.changed.connect(self._refresh_all)
         dlg.exec_()
 
