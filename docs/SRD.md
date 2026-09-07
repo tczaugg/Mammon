@@ -1079,6 +1079,21 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   category, SRD 5.8h); gas that rides an event shows as a `<qty> <SYM>` entry in the
   Fee column. Events are entered by import, so the register is read-only (no inline
   editor to defer out of `setModelData`).
+- **The crypto register carries the same import-review pane as the cash and
+  investment registers.** It mounts an `ImportReviewPanel` below its button row and
+  exposes `show_review` / `reopen_review` / `_sync_review_action`, so the shared
+  MainWindow import and download paths (all guarded on `hasattr(reg, "show_review")`
+  / `reopen_review`) drive a crypto account exactly as they do a cash one, and the
+  gear's `Review…` action enables whenever `review_items` are pending. Previously
+  `CryptoRegisterWidget` mounted no panel and had no `_sync_review_action`, so a
+  crypto import wrote `review_items` (lighting the sidebar's red dot, whose
+  `count_pending` has no account-type filter) but NO widget showed them and the
+  `Review…` action stayed permanently disabled — the pane never appeared and the
+  menu item read as grayed. Because the crypto grid is READ-ONLY (no in-place
+  editable pending row), a NEW row is accepted with the importer's mapped values
+  as-is through the single `import_review` chokepoint, posting into the account's
+  fiat cash sleeve (`transactions`, which `crypto.account_valuation` folds in) — a
+  MATCHING row still points at its existing register line where one can be found.
 - **The holdings window values coins + cash to the account's own balance.**
   `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price | Market Value |
   Gain/Loss from `crypto.holding_values` (priced through the shared `{SYM}-USD`

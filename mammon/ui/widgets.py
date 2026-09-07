@@ -3766,7 +3766,26 @@ class CryptoRegisterWidget(QWidget):
         bar.addWidget(self.balance_label)
         layout.addLayout(bar)
 
+        # Import-review panel, BELOW the button row -- the same surface the cash
+        # and investment registers carry. Imported/downloaded rows land here for
+        # per-row accept/discard before ANYTHING is written. Without it, a crypto
+        # account's review_items lit the sidebar dot but had no widget to mount
+        # them and the Review... action stayed permanently disabled (it is only
+        # ever re-enabled from _sync_review_action, which this class lacked). The
+        # crypto grid is READ-ONLY -- no in-place pending-row editing -- so a NEW
+        # row is accepted with the importer's mapped values as-is rather than
+        # through an editable register line the way the cash register does.
+        from .import_review_widget import ImportReviewPanel
+        self.review_panel = ImportReviewPanel(conn, account_id, self)
+        self.review_panel.changed.connect(self._on_review_changed)
+        self.review_panel.transactionSaved.connect(self._play_accepted)
+        self.review_panel.visibility_changed.connect(self._reload_review)
+        self.review_panel.row_selected.connect(self._on_review_row_selected)
+        self.review_panel.accept_new_requested.connect(self._accept_new_direct)
+        layout.addWidget(self.review_panel)
+
         self._refresh_header()
+        self._sync_review_action()
 
     def _configure_columns(self):
         """Fixed widths for Date + the right-aligned numeric columns, a tight
@@ -3894,6 +3913,75 @@ class CryptoRegisterWidget(QWidget):
         self.view.selectRow(row)
         self.view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
         return True
+
+    # ---- import review ----------------------------------------------------
+    def _play_accepted(self) -> None:
+        """Sound the transaction-accepted chime, if it is switched on."""
+        sounds.play_accepted(prefs.sound_enabled())
+
+    def _on_review_changed(self) -> None:
+        """A reviewed row landed in the account's cash sleeve: reload the grid
+        and re-read the header valuation (its Cash total shifts because the row
+        posted through ledger into ``transactions``, which
+        ``crypto.account_valuation`` folds in), re-sync the Review... action, and
+        tell the register stack the account changed so the sidebar refreshes."""
+        self.model.reload()
+        self._refresh_header()
+        self._sync_review_action()
+        self.changed.emit()
+
+    def _reload_review(self, _mode=None) -> None:
+        """Re-query the review list under the panel's current visibility (the
+        show-history toggle reveals accepted/discarded rows the panel never
+        held)."""
+        entries = import_review.load_review(
+            self.conn, self.account_id, prefs.review_visibility(self.account_id))
+        self.review_panel.set_entries(entries)
+        self._sync_review_action()
+
+    def _on_review_row_selected(self, entry) -> None:
+        """Keep the Review... action in sync as the selection changes, and point
+        at a MATCHING row's existing register line where it can be found. The
+        crypto grid is READ-ONLY, so a NEW row opens no editable pending line the
+        way the cash/investment registers do; it is accepted as mapped."""
+        if (entry is not None and not self.review_panel.isHidden()
+                and getattr(entry, "is_matching", False)
+                and entry.matched_txn_id is not None):
+            self.select_txn(entry.matched_txn_id)
+        self._sync_review_action()
+
+    def _accept_new_direct(self, entry) -> None:
+        """Commit a NEW row through the single import_review chokepoint using the
+        importer's mapped values. There is no editable pending row here to read
+        corrections from (the grid is read-only), so the row posts as mapped."""
+        self.review_panel.accept_new(entry, {})
+
+    def show_review(self, entries):
+        """Load ``entries`` (from import_review.build_review) into the review
+        panel and REVEAL it; an empty list clears any prior review without
+        showing the panel. Mirrors RegisterWidget.show_review so MainWindow's
+        import and download paths -- which guard on ``hasattr(reg,
+        "show_review")`` -- drive a crypto account exactly as they do a cash
+        one."""
+        self.review_panel.set_entries(entries)
+        if entries:
+            self.review_panel.show()
+        else:
+            self.review_panel.hide()
+        self._sync_review_action()
+
+    def reopen_review(self):
+        """Toolbar Review... -> re-show this account's persisted pending review
+        list under its saved visibility (reload_pending shows or hides itself by
+        whether anything still needs action)."""
+        self.review_panel.reload_pending()
+        self._sync_review_action()
+
+    def _sync_review_action(self):
+        """Enable Review... only while the panel holds a pending review."""
+        act = getattr(self.toolbar, "act_review", None)
+        if act is not None:
+            act.setEnabled(self.review_panel.has_pending())
 
 
 # ---------------------------------------------------------------------------
