@@ -254,7 +254,17 @@ class ImportReviewPanel(QWidget):
         # (requirement A6/A8). Hidden on investment accounts, which have no
         # item-split concept. The register also offers the same action from its
         # gear menu, so this stays reachable when the panel is otherwise empty.
-        self.load_amazon_btn = QPushButton("Load Amazon Invoices…")
+        # Parent the button to the panel AT CONSTRUCTION (the ``self`` argument).
+        # ``bar`` is a bare QHBoxLayout not installed on any widget until the
+        # ``box.addLayout(bar)`` below, so a button merely added to it stays
+        # parentless -- and calling setVisible() on a parentless QPushButton makes
+        # Qt briefly realise it as its own TOP-LEVEL window. That stray window
+        # steals focus from a register cell being edited in ANOTHER account,
+        # closing (and committing) that editor before MainWindow.open_register's
+        # leave-guard can see it -- a silent cross-account edit commit. Parented
+        # up front, setVisible only marks it shown-with-the-panel and grabs no
+        # focus (the panel itself is hidden until a load).
+        self.load_amazon_btn = QPushButton("Load Amazon Invoices…", self)
         self.load_amazon_btn.setToolTip(
             "Load a time-tagged Amazon invoice file (from your Downloads folder) "
             "and review each order as an itemized split against this account. "

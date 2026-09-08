@@ -450,6 +450,14 @@ class RegisterWidget(QWidget):
         # Changing how much history to show reloads the list from the DB:
         # the extra rows are accepted/discarded ones the panel never held.
         self.review_panel.visibility_changed.connect(self._reload_review)
+        # Amazon invoice itemization is a CASH-register action: reveal the gear
+        # menu's "Load Amazon Invoices…" (hidden by default so it never shows on
+        # investment/crypto registers) and route it to the review panel, which
+        # owns the file dialog and the build-review call. The panel also carries
+        # its own button; both funnel through the one panel method.
+        self.toolbar.act_load_invoices.setVisible(True)
+        self.toolbar.loadInvoicesRequested.connect(
+            lambda _aid=account_id: self.review_panel.load_amazon_invoices())
         # The Accept button embedded at the end of the pending register row; it
         # and the Enter-key handler both commit the pending row.
         self._accept_btn = None
@@ -586,6 +594,11 @@ class RegisterWidget(QWidget):
         if entry.is_matching and entry.matched_txn_id is not None:
             self._end_pending()
             self.select_txn(entry.matched_txn_id)
+        elif getattr(entry, "amazon_alloc", None) is not None:
+            # An Amazon NEW row carries a multi-leg split that a single-category
+            # pending register row cannot represent; it is accepted from the
+            # review panel itself, so open no pending row for it.
+            self._end_pending()
         elif entry.is_new:
             self._show_pending(entry)
         else:
@@ -4465,6 +4478,10 @@ class AccountToolbar(QToolBar):
     importRequested = pyqtSignal(int)
     downloadRequested = pyqtSignal(int)
     reviewRequested = pyqtSignal(int)
+    # Load an Amazon invoice export and run an itemization review session. Only
+    # the cash register reveals this action (see RegisterWidget.__init__); the
+    # investment/crypto registers share the toolbar but keep it hidden.
+    loadInvoicesRequested = pyqtSignal(int)
     hideRequested = pyqtSignal(int)
     loanSetupRequested = pyqtSignal(int)
     enterPaymentRequested = pyqtSignal(int)
@@ -4502,6 +4519,15 @@ class AccountToolbar(QToolBar):
         self.act_review.setToolTip("Re-open the import-review list for rows "
                                    "awaiting accept or save.")
         self.act_review.setEnabled(False)
+        # Load a downloaded Amazon invoice file and itemize each order into a
+        # per-item split review. Cash-only: the cash RegisterWidget reveals it;
+        # it stays hidden on investment/crypto registers, which share this bar.
+        self.act_load_invoices = self._add("Load Amazon Invoices…",
+                                           self.loadInvoicesRequested)
+        self.act_load_invoices.setToolTip(
+            "Load a time-tagged Amazon invoice file (from Downloads) and review "
+            "each order as an itemized split against this account.")
+        self.act_load_invoices.setVisible(False)
         self.addSeparator()
         self.act_hide = self._add("Hide Account", self.hideRequested)
         # NB: the Accounts… roster lives on the Tools menu (classic), not
