@@ -59,11 +59,19 @@ def create_account(
     opening_date: Optional[str] = None,
     institution: Optional[str] = None,
     note: Optional[str] = None,
+    currency: str = "USD",
 ) -> int:
+    """Create an account. ``currency`` is its native ISO 4217 code, chosen at
+    creation (the New Account dialog offers it) and treated as an immutable
+    account property thereafter -- it is not edited on the account-details dialog.
+    A blank/None currency normalises to the base ``'USD'`` (the schema default),
+    so a caller passing an empty field never writes an invalid code. This is the
+    ONLY insert path for accounts, so it is where currency is set."""
+    ccy = (currency or "USD").strip().upper() or "USD"
     cur = conn.execute(
-        "INSERT INTO accounts(name, type, opening_balance, opening_date, institution, note) "
-        "VALUES (?,?,?,?,?,?)",
-        (name, type, opening_balance, opening_date, institution, note),
+        "INSERT INTO accounts(name, type, opening_balance, opening_date, institution, note, currency) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (name, type, opening_balance, opening_date, institution, note, ccy),
     )
     conn.commit()
     return cur.lastrowid

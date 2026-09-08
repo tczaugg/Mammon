@@ -34,7 +34,9 @@ Non-goals (for now): bill pay, tax-form generation, mobile/web, multi-user.
 One SQLite database. Core tables:
 
 - accounts(id, name, type[checking|savings|credit|cash|investment|asset|liability],
-  currency, opening_balance, opening_date, institution, note, closed_flag)
+  currency, opening_balance, opening_date, institution, note, closed_flag) -
+  `currency` is the account's native ISO 4217 code (TEXT NOT NULL DEFAULT 'USD',
+  the base), chosen at creation and treated as immutable thereafter (see 5.4a).
 - categories(id, name, parent_id, type[income|expense], hidden) - hierarchical,
   Quicken-style "Parent:Child".
 - payees(id, name, normalized_name) - for matching/auto-fill.
@@ -391,6 +393,39 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   payee and memo live on the intermediary account's own register rows. This needs
   no extra field, scales past a handful of payments a month, and reuses the
   transfer machinery that is already tested. See migration 28 in `mammon/db.py`.
+
+### 5.4a Per-account currency (multi-currency)
+Every account has a native currency (`accounts.currency`, ISO 4217, `NOT NULL
+DEFAULT 'USD'`). The base/presentation currency is USD (`fx.BASE_CURRENCY`); an
+account with no explicit currency IS the base. The backend is `mammon/fx.py`: a
+dated `fx_rates` store (Decimal-encoded TEXT rates, direct or derived inverse),
+`convert_cents` (integer cents, `ROUND_HALF_UP`), `net_worth_by_currency`, and a
+`total_in_currency` fold. Money stays integer cents; rates stay Decimal text; no
+floats and no money math in the UI layer.
+
+- **Currency is chosen at CREATION and is immutable.** The New Account dialog
+  offers a currency selector (an editable ISO-4217 combo, defaulting to the base
+  so the all-USD case needs no thought). Creation funnels through the sole account
+  writer `ledger.create_account`, which takes and normalises a `currency`
+  argument — there is no second write path. Changing an account's currency after
+  it holds transactions would silently reinterpret every past amount, so the
+  Account Details dialog shows the currency **read-only** and never writes it back.
+- **Per-account amounts render in the account's own currency.** A base-currency
+  account renders bare (the dense classic look — no symbol clutter); a foreign
+  account is tagged with its currency symbol/code (`ui/models.fmt_amount_ccy`,
+  `currency_symbol`) so its balance is never misread as base dollars. This applies
+  to the account bar / accounts overview per-account balances and to the register
+  header (a foreign register names its currency once, in the title, and shows its
+  ending balance in that currency). Formatting is presentation only — the cents
+  are unconverted.
+- **Net worth folds to the base currency through `mammon.fx`.** The accounts
+  overview / account bar net-worth figure is `fx.total_in_currency(conn,
+  BASE_CURRENCY)`; when a needed rate is missing it falls back to the naive
+  base-currency sum rather than breaking — identical to the figure shown before
+  any foreign account existed, and byte-identical for an all-USD ledger. All the
+  cents arithmetic and rate lookup live in `mammon/fx.py`, not the UI.
+- The app holds no FX credentials; rate fetching is behind the same injectable
+  seam as investment quotes (`fx.fetch_rates`, default yfinance source).
 
 ### 5.5 Auto-categorization from history
 - When a payee recurs, Mammon learns its category and auto-fills/suggests the

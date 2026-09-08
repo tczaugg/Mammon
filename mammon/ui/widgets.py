@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 # The context menu keeps the patchable name; structural chrome does not need it.
 _GearMenu = QMenu
 
-from mammon import (backup, categorize, crypto, db, downloads, import_review,
+from mammon import (backup, categorize, crypto, db, downloads, fx, import_review,
                     investments, ledger, loans, scheduled)
 from mammon import webslinger as webslinger_mod
 from mammon.ui import prefs, sounds, style
@@ -45,8 +45,8 @@ from mammon.ui.delegates import (
 )
 from mammon.ui.models import (
     AccountsModel, CryptoRegisterModel, InvestmentRegisterModel, RegisterFilter,
-    RegisterModel, SearchResultsModel, fmt_cents, fmt_date, fmt_money, fmt_qty,
-    parse_amount,
+    RegisterModel, SearchResultsModel, fmt_amount_ccy, fmt_cents, fmt_date,
+    fmt_money, fmt_qty, parse_amount,
 )
 
 # classic account groupings (account type -> section box)
@@ -79,6 +79,14 @@ _BAR_GROUPS = [
 # gave the user no way to create a crypto account at all.
 _ACCOUNT_TYPES = ["checking", "savings", "credit", "cash",
                   "investment", "crypto", "asset", "liability"]
+
+# The currencies the New Account dialog offers by default (base first). The combo
+# is EDITABLE, so any other ISO 4217 code can still be typed -- this is only a
+# convenient shortlist, not a whitelist. Currency is chosen once, at creation,
+# and treated as an immutable account property thereafter (see
+# ledger.create_account); the account-details dialog shows it read-only.
+_CURRENCY_CODES = [fx.BASE_CURRENCY, "EUR", "GBP", "CAD", "AUD", "JPY", "CHF",
+                   "CNY", "MXN", "INR", "BRL", "SEK", "NOK", "NZD"]
 
 
 def _text_width(fm: QFontMetrics, text: str) -> int:
@@ -1388,7 +1396,14 @@ class RegisterWidget(QWidget):
         return True
 
     def _refresh_header(self):
-        self.header.setText(self.model.account_name())
+        # A foreign-currency register states its currency once, in the title, so
+        # the bare amounts below read in the right unit; a base-currency account
+        # keeps its plain name (unchanged for the all-USD ledger).
+        ccy = self.model.account_currency()
+        name = self.model.account_name()
+        if ccy and ccy != fx.BASE_CURRENCY:
+            name = f"{name}  ({ccy})"
+        self.header.setText(name)
         # An ASSET register's running balance is a COST BASIS -- what was paid
         # plus the improvements posted against it -- and labelling it "Ending
         # Balance" beside a decades-old purchase price states a number nobody
@@ -1399,7 +1414,7 @@ class RegisterWidget(QWidget):
             self.balance_label.setText(self._asset_balance_text())
             return
         self.balance_label.setText(
-            f"Ending Balance: {fmt_money(self.model.current_balance())}")
+            f"Ending Balance: {fmt_money(self.model.current_balance(), currency=ccy)}")
 
     def _asset_balance_text(self) -> str:
         """The asset register's status line: cost basis, market value, and the
@@ -4020,8 +4035,19 @@ class NewAccountDialog(QDialog):
         # to leave the opening date unset (date_edit_iso -> "" -> None); the
         # VISIBLE default is today.
         self.opening_date = make_date_edit(blank_ok=True)
+        # Native currency, chosen HERE and treated as immutable afterwards (the
+        # user's request). Editable so any ISO 4217 code works; defaults to the
+        # base currency so the common all-USD case needs no thought. Creation
+        # funnels through ledger.create_account, which normalises the value.
+        self.currency = QComboBox()
+        self.currency.setEditable(True)
+        self.currency.addItems(list(dict.fromkeys(_CURRENCY_CODES)))
+        self.currency.setCurrentText(fx.BASE_CURRENCY)
+        self.currency.setToolTip(
+            "This account's native currency (ISO 4217). Chosen once, at creation.")
         form.addRow("Name", self.name)
         form.addRow("Type", self.type)
+        form.addRow("Currency", self.currency)
         form.addRow("Opening balance", self.opening)
         form.addRow("Opening date", self.opening_date)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -4033,6 +4059,7 @@ class NewAccountDialog(QDialog):
         return {
             "name": self.name.text().strip(),
             "type": self.type.currentText(),
+            "currency": self.currency.currentText().strip().upper() or fx.BASE_CURRENCY,
             "opening_balance": parse_amount(str(self.opening.value())),
             "opening_date": date_edit_iso(self.opening_date) or None,
         }
@@ -4178,6 +4205,16 @@ class AccountDetailsDialog(QDialog):
         i = self.type.findText(_row_get(account, "type") or "")
         if i >= 0:
             self.type.setCurrentIndex(i)
+        # Native currency is chosen at creation and treated as immutable, so it is
+        # shown here READ-ONLY (never in values() -- update_account never touches
+        # it from this dialog). Changing an account's currency after it holds
+        # transactions would silently reinterpret every past amount, so it is
+        # deliberately not offered here.
+        self.currency_display = QLineEdit(
+            (_row_get(account, "currency") or fx.BASE_CURRENCY))
+        self.currency_display.setReadOnly(True)
+        self.currency_display.setToolTip(
+            "The account's native currency, chosen at creation. Not editable here.")
         self.institution = QLineEdit(_row_get(account, "institution") or "")
         # Where a PROPERTY is, so a valuation source can look it up. A separate
         # column from `institution`, which means "who holds this account"
@@ -4207,6 +4244,7 @@ class AccountDetailsDialog(QDialog):
         self.hidden.setChecked(bool(_row_get(account, "hidden")))
         form.addRow("Name", self.name)
         form.addRow("Type", self.type)
+        form.addRow("Currency", self.currency_display)
         # Investment accounts: how a sale is costed (roadmap item 7). Average
         # is what every earlier figure was computed under; brokerages report
         # stock sales FIFO unless lots were specified.
@@ -5714,7 +5752,8 @@ class AccountsWidget(QWidget):
         try:
             ledger.create_account(self.conn, v["name"], v["type"],
                                   opening_balance=v["opening_balance"],
-                                  opening_date=v["opening_date"])
+                                  opening_date=v["opening_date"],
+                                  currency=v["currency"])
         except Exception as exc:  # e.g. duplicate name (UNIQUE)
             QMessageBox.warning(self, "New account", str(exc))
             return
@@ -5729,7 +5768,7 @@ class _AccountRow(QFrame):
     (red when negative). Clicking activates the account."""
 
     def __init__(self, account_id, name, balance_cents, activate, parent=None,
-                 has_pending=False):
+                 has_pending=False, currency=None):
         super().__init__(parent)
         self._account_id = account_id
         self._activate = activate
@@ -5748,7 +5787,10 @@ class _AccountRow(QFrame):
             lay.addWidget(dot)
         name_lbl = QLabel(name)
         name_lbl.setObjectName("acctName")
-        bal = QLabel(fmt_cents(balance_cents))
+        # A base-currency account renders bare (the dense classic look); a foreign
+        # account is tagged with its currency so its balance is never read as base
+        # dollars. fmt_amount_ccy makes that decision (no money math here).
+        bal = QLabel(fmt_amount_ccy(balance_cents, currency))
         bal.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         bal.setMinimumWidth(80)
         bal.setStyleSheet(
@@ -5930,7 +5972,7 @@ class AccountBar(QWidget):
             except Exception:  # pragma: no cover - defensive (e.g. legacy schema)
                 has_pending = False
             row = _AccountRow(r["id"], r["name"], r["balance"], self._activate,
-                              has_pending=has_pending)
+                              has_pending=has_pending, currency=r.get("currency"))
             lay.addWidget(row)
             self._item_by_account[r["id"]] = row
         return box
@@ -5969,7 +6011,8 @@ class AccountBar(QWidget):
         try:
             ledger.create_account(self.conn, v["name"], v["type"],
                                   opening_balance=v["opening_balance"],
-                                  opening_date=v["opening_date"])
+                                  opening_date=v["opening_date"],
+                                  currency=v["currency"])
         except Exception as exc:  # e.g. duplicate name (UNIQUE)
             QMessageBox.warning(self, "New account", str(exc))
             return

@@ -91,10 +91,36 @@ def fmt_cents(cents) -> str:
     return f"{sign}{c // 100:,}.{c % 100:02d}"
 
 
-def fmt_money(cents, symbol: bool = True) -> str:
-    """Integer cents -> ``$1,234.56`` (leading ``$``, sign before the symbol:
+# Common ISO 4217 currencies -> the glyph shown before the amount. Anything not
+# listed renders with its bare code as a prefix (e.g. ``SEK 1,234.56``), so a
+# never-mapped currency is still LABELLED rather than silently shown as dollars.
+# This is display formatting only -- no conversion or arithmetic happens here
+# (that is :mod:`mammon.fx`'s job); the UI stays a thin projection.
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$", "HKD": "HK$",
+    "SGD": "S$", "EUR": "€", "GBP": "£", "JPY": "¥",
+    "CNY": "CN¥", "CHF": "CHF ", "INR": "₹", "KRW": "₩",
+    "MXN": "MX$", "BRL": "R$", "RUB": "₽", "ZAR": "R", "SEK": "SEK ",
+    "NOK": "NOK ", "DKK": "DKK ", "PLN": "zł", "ILS": "₪",
+}
+
+
+def currency_symbol(code) -> str:
+    """The prefix glyph for an ISO 4217 code (``$`` for USD or a blank/None code).
+    An unmapped code returns itself with a trailing space so the amount is still
+    labelled (e.g. ``THB 500.00``). Presentation only -- no money math."""
+    if not code:
+        return "$"
+    code = str(code).strip().upper()
+    return _CURRENCY_SYMBOLS.get(code, f"{code} ")
+
+
+def fmt_money(cents, symbol: bool = True, currency=None) -> str:
+    """Integer cents -> ``$1,234.56`` (leading symbol, sign before the symbol:
     ``-$5.00``). Used for category subtotals and net worth. ``symbol=False``
-    falls back to :func:`fmt_cents`."""
+    falls back to :func:`fmt_cents`. ``currency`` chooses the leading glyph
+    (default ``$`` for USD); the value is still rendered straight from integer
+    cents -- NO conversion happens here."""
     if cents is None:
         return ""
     if not symbol:
@@ -102,7 +128,20 @@ def fmt_money(cents, symbol: bool = True) -> str:
     c = int(cents)
     sign = "-" if c < 0 else ""
     c = abs(c)
-    return f"{sign}${c // 100:,}.{c % 100:02d}"
+    return f"{sign}{currency_symbol(currency)}{c // 100:,}.{c % 100:02d}"
+
+
+def fmt_amount_ccy(cents, currency=None) -> str:
+    """A per-account amount in the account's OWN currency. The base currency (or a
+    blank one) renders bare like :func:`fmt_cents` -- the dense classic look the
+    all-USD ledger has always had -- while a FOREIGN currency is tagged with its
+    symbol/code so a non-base account's balance is never mistaken for base
+    dollars. Presentation only; the cents are unconverted."""
+    from mammon import fx
+    code = str(currency).strip().upper() if currency else ""
+    if not code or code == fx.BASE_CURRENCY:
+        return fmt_cents(cents)
+    return fmt_money(cents, currency=code)
 
 
 def fmt_date(iso, fmt: str | None = None) -> str:
@@ -556,6 +595,13 @@ class RegisterModel(QAbstractTableModel):
     def account_name(self) -> str:
         acct = ledger.get_account(self.conn, self.account_id)
         return acct["name"] if acct else ""
+
+    def account_currency(self) -> str:
+        """This register's account native currency ('USD' when unset -- the base).
+        Read through :mod:`mammon.fx` so the normalisation lives in the domain
+        layer, not here."""
+        from mammon import fx
+        return fx.get_account_currency(self.conn, self.account_id)
 
     def is_scheduled_row(self, row) -> bool:
         """True for a pending pre-entry (``scheduled=1``)."""
@@ -2145,6 +2191,8 @@ class AccountsModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows = [
             {"id": a["id"], "name": a["name"], "type": a["type"],
+             # each account's native currency, so a foreign balance renders in it
+             "currency": a["currency"],
              # investment accounts show their market valuation (cash + securities)
              "balance": investments.display_balance(self.conn, a["id"])}
             for a in ledger.list_accounts(self.conn)
@@ -2152,7 +2200,16 @@ class AccountsModel(QAbstractTableModel):
         self.endResetModel()
 
     def net_worth(self) -> int:
-        return ledger.net_worth(self.conn)
+        """Net worth in the BASE currency. Foreign-currency accounts are folded in
+        through :mod:`mammon.fx` (the domain layer owns every conversion and the
+        cents math); when a needed FX rate is missing we fall back to the naive
+        base-currency sum rather than showing nothing -- exactly the figure shown
+        before any foreign account existed, and identical for an all-USD ledger."""
+        from mammon import fx
+        try:
+            return fx.total_in_currency(self.conn, fx.BASE_CURRENCY)
+        except fx.FxRateUnavailable:
+            return ledger.net_worth(self.conn)
 
     def rows(self) -> list[dict]:
         """The account rows (id/name/type/balance) for the account bar."""
@@ -2185,7 +2242,7 @@ class AccountsModel(QAbstractTableModel):
             if col == self.TYPE:
                 return r["type"]
             if col == self.BALANCE:
-                return fmt_cents(r["balance"])
+                return fmt_amount_ccy(r["balance"], r.get("currency"))
         if role == Qt.TextAlignmentRole and col == self.BALANCE:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
