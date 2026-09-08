@@ -44,9 +44,9 @@ from mammon.ui.delegates import (
     date_edit_iso, make_category_combo, make_date_edit, refresh_date_format,
 )
 from mammon.ui.models import (
-    AccountsModel, CryptoRegisterModel, InvestmentRegisterModel, RegisterFilter,
-    RegisterModel, SearchResultsModel, fmt_amount_ccy, fmt_cents, fmt_date,
-    fmt_money, fmt_qty, parse_amount,
+    AccountsModel, CryptoRegisterModel, InvestmentRegisterModel,
+    NetWorthByAssetModel, RegisterFilter, RegisterModel, SearchResultsModel,
+    fmt_amount_ccy, fmt_cents, fmt_date, fmt_money, fmt_qty, parse_amount,
 )
 
 # classic account groupings (account type -> section box)
@@ -3817,7 +3817,8 @@ class CryptoRegisterWidget(QWidget):
 
     def _configure_columns(self):
         """Fixed widths for Date + the right-aligned numeric columns, a tight
-        interactive Action, a stretched Coin/Wallet column, and a fixed Fee."""
+        interactive Action and Coin/Wallet, and a stretched Payee (the on-chain
+        counterparty address needs the room)."""
         hh = self.view.horizontalHeader()
         M = CryptoRegisterModel
         fixed = {M.DATE: 84, M.QUANTITY: 100, M.PRICE: 96, M.COIN_BAL: 100,
@@ -3827,7 +3828,9 @@ class CryptoRegisterWidget(QWidget):
             self.view.setColumnWidth(col, width)
         hh.setSectionResizeMode(M.ACTION, QHeaderView.Interactive)
         self.view.setColumnWidth(M.ACTION, 104)
-        hh.setSectionResizeMode(M.COIN, QHeaderView.Stretch)
+        hh.setSectionResizeMode(M.COIN, QHeaderView.Interactive)
+        self.view.setColumnWidth(M.COIN, 120)
+        hh.setSectionResizeMode(M.PAYEE, QHeaderView.Stretch)
 
     def _refresh_header(self):
         """Re-read the account name and its market valuation (cash + coins),
@@ -4045,8 +4048,19 @@ class NewAccountDialog(QDialog):
         self.currency.setCurrentText(fx.BASE_CURRENCY)
         self.currency.setToolTip(
             "This account's native currency (ISO 4217). Chosen once, at creation.")
+        # Crypto kind: a paper WALLET (coins/tokens only, no fiat leg, the on-chain
+        # counterparty is the payee) vs an EXCHANGE (coins PLUS a fiat cash sleeve).
+        # Only meaningful for type=='crypto'; the row is hidden for every other
+        # type. The choice flows to crypto.create_account(kind=). The display data
+        # carries the crypto.CRYPTO_KIND_* constant so values() is label-agnostic.
+        self.crypto_kind = QComboBox()
+        self.crypto_kind.addItem("Wallet (coins only, no cash)",
+                                 crypto.CRYPTO_KIND_WALLET)
+        self.crypto_kind.addItem("Exchange (coins + cash sleeve)",
+                                 crypto.CRYPTO_KIND_EXCHANGE)
         form.addRow("Name", self.name)
         form.addRow("Type", self.type)
+        form.addRow("Crypto kind", self.crypto_kind)
         form.addRow("Currency", self.currency)
         form.addRow("Opening balance", self.opening)
         form.addRow("Opening date", self.opening_date)
@@ -4054,15 +4068,46 @@ class NewAccountDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+        # Show the kind row only for a crypto account. labelForField needs the row
+        # already added, so resolve it here, then sync once for the initial type.
+        self._crypto_kind_label = form.labelForField(self.crypto_kind)
+        self.type.currentTextChanged.connect(self._sync_crypto_kind_visibility)
+        self._sync_crypto_kind_visibility(self.type.currentText())
+
+    def _sync_crypto_kind_visibility(self, type_text):
+        is_crypto = (type_text == crypto.CRYPTO_ACCOUNT_TYPE)
+        self.crypto_kind.setVisible(is_crypto)
+        if self._crypto_kind_label is not None:
+            self._crypto_kind_label.setVisible(is_crypto)
 
     def values(self):
         return {
             "name": self.name.text().strip(),
             "type": self.type.currentText(),
             "currency": self.currency.currentText().strip().upper() or fx.BASE_CURRENCY,
+            "crypto_kind": self.crypto_kind.currentData(),
             "opening_balance": parse_amount(str(self.opening.value())),
             "opening_date": date_edit_iso(self.opening_date) or None,
         }
+
+
+def create_account_from_values(conn, v):
+    """Create an account from :meth:`NewAccountDialog.values`, routing by type.
+
+    A crypto type goes to :func:`mammon.crypto.create_account` so its
+    ``crypto_kind`` (wallet vs exchange) and ``asset_class`` are set -- the
+    distinction the register, the Etherscan import and the per-asset net-worth
+    breakdown all rely on. Every other type goes to the single writer
+    :func:`mammon.ledger.create_account`. Returns the new account id. This is the
+    one place the New Account dialog's values become an account, shared by every
+    call site so the crypto routing lives in exactly one spot."""
+    if v["type"] == crypto.CRYPTO_ACCOUNT_TYPE:
+        return crypto.create_account(
+            conn, v["name"], kind=v["crypto_kind"],
+            opening_balance=v["opening_balance"], opening_date=v["opening_date"])
+    return ledger.create_account(
+        conn, v["name"], v["type"], opening_balance=v["opening_balance"],
+        opening_date=v["opening_date"], currency=v["currency"])
 
 
 # ---------------------------------------------------------------------------
@@ -5713,6 +5758,20 @@ class AccountsWidget(QWidget):
         self.view.doubleClicked.connect(self._open)
         layout.addWidget(self.view)
 
+        # Net worth broken out per coin/currency: one column per asset with a
+        # NATIVE-quantity row and a USD-converted row plus a Total (a wallet's
+        # coins are valued at market only here, never on the row). A
+        # thin projection of fx.net_worth_by_asset; hidden when there is nothing
+        # to break out (an all-USD-cash ledger with no coins).
+        self.asset_model = NetWorthByAssetModel(conn)
+        self.asset_view = QTableView()
+        self.asset_view.setModel(self.asset_model)
+        self.asset_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.asset_view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.asset_view.setMaximumHeight(88)
+        self.asset_view.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.asset_view)
+
         bar = QHBoxLayout()
         new_btn = QPushButton("New Account…")
         new_btn.clicked.connect(self.on_new_account)
@@ -5729,6 +5788,8 @@ class AccountsWidget(QWidget):
 
     def refresh(self):
         self.model.reload()
+        self.asset_model.reload()
+        self.asset_view.setVisible(self.asset_model.columnCount() > 1)
         self.total_label.setText(f"Net worth: {fmt_money(self.model.net_worth())}")
 
     def _open(self, index):
@@ -5750,10 +5811,7 @@ class AccountsWidget(QWidget):
             QMessageBox.warning(self, "New account", "An account needs a name.")
             return
         try:
-            ledger.create_account(self.conn, v["name"], v["type"],
-                                  opening_balance=v["opening_balance"],
-                                  opening_date=v["opening_date"],
-                                  currency=v["currency"])
+            create_account_from_values(self.conn, v)
         except Exception as exc:  # e.g. duplicate name (UNIQUE)
             QMessageBox.warning(self, "New account", str(exc))
             return
@@ -6009,10 +6067,7 @@ class AccountBar(QWidget):
             QMessageBox.warning(self, "New account", "An account needs a name.")
             return
         try:
-            ledger.create_account(self.conn, v["name"], v["type"],
-                                  opening_balance=v["opening_balance"],
-                                  opening_date=v["opening_date"],
-                                  currency=v["currency"])
+            create_account_from_values(self.conn, v)
         except Exception as exc:  # e.g. duplicate name (UNIQUE)
             QMessageBox.warning(self, "New account", str(exc))
             return

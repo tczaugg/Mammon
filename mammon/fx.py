@@ -210,6 +210,86 @@ def total_in_currency(conn: sqlite3.Connection, target_ccy, as_of: Optional[str]
 
 
 # ---------------------------------------------------------------------------
+# Net worth by ASSET -- one line per coin AND per fiat currency
+# ---------------------------------------------------------------------------
+@dataclass
+class AssetLine:
+    """One asset's contribution to net worth. A coin position carries its NATIVE
+    ``quantity`` (a :class:`~decimal.Decimal`) and its USD-converted market value;
+    a fiat bucket carries ``native_cents`` and its FX-converted value. ``is_coin``
+    says which, and exactly one of ``quantity`` / ``native_cents`` is set."""
+
+    asset: str                        # coin symbol ('ETH') or ISO currency ('USD')
+    is_coin: bool
+    quantity: Optional[Decimal]       # native coin quantity (coins only)
+    native_cents: Optional[int]       # native cents (fiat only)
+    usd_cents: int                    # value converted to the base currency
+
+
+@dataclass
+class NetWorthBreakdown:
+    """Net worth split into one :class:`AssetLine` per coin/currency plus the
+    base-currency ``total_usd_cents``. Coins list first (A->Z), then currencies.
+    ``total_usd_cents`` equals :func:`total_in_currency` for the base currency --
+    the split never double-counts a crypto holding."""
+
+    lines: list                       # list[AssetLine]
+    total_usd_cents: int
+
+
+def net_worth_by_asset(conn: sqlite3.Connection, as_of: Optional[str] = None,
+                       *, include_hidden: bool = False) -> "NetWorthBreakdown":
+    """Break net worth into one line per coin and per fiat currency: each coin's
+    NATIVE quantity and its USD-converted market value (USD is applied only at
+    this net-worth layer, never on a wallet row), each currency bucket's native
+    cents and its FX-converted value, and the base-currency grand total.
+
+    A crypto account contributes its holdings as coin lines (``symbol`` x latest
+    ``{SYM}-USD`` price, via :func:`mammon.crypto.account_valuation`) and its cash
+    sleeve as a fiat line -- exactly the two halves ``display_balance`` already
+    sums for that account, so the crypto holdings are counted EXACTLY once and
+    ``total_usd_cents`` matches :func:`total_in_currency`. A wallet has no cash
+    sleeve (``cash`` is 0), so it adds only coin lines.
+    """
+    from mammon import crypto, investments, ledger  # local import avoids a cycle
+
+    coin_qty: dict[str, Decimal] = {}
+    coin_usd: dict[str, int] = {}
+    fiat_cents: dict[str, int] = {}
+    for a in ledger.list_accounts(conn, include_closed=True,
+                                  include_hidden=include_hidden):
+        if crypto.is_crypto_account(a):
+            val = crypto.account_valuation(conn, a["id"], as_of)
+            for hv in val.holdings:
+                coin_qty[hv.symbol] = coin_qty.get(hv.symbol, Decimal(0)) + hv.quantity
+                coin_usd[hv.symbol] = coin_usd.get(hv.symbol, 0) + hv.market_value
+            if val.cash:
+                ccy = _norm_ccy(a["currency"])
+                fiat_cents[ccy] = fiat_cents.get(ccy, 0) + val.cash
+        else:
+            ccy = _norm_ccy(a["currency"])
+            fiat_cents[ccy] = (fiat_cents.get(ccy, 0)
+                               + investments.display_balance(conn, a["id"], as_of))
+
+    lines: list = []
+    total = 0
+    for sym in sorted(coin_qty):
+        if coin_qty[sym] == 0:
+            continue                              # a fully-spent position is not a line
+        usd = coin_usd.get(sym, 0)
+        total += usd
+        lines.append(AssetLine(sym, True, coin_qty[sym], None, usd))
+    for ccy in sorted(fiat_cents):
+        native = fiat_cents[ccy]
+        if native == 0:
+            continue
+        usd = convert_cents(conn, native, ccy, BASE_CURRENCY, as_of)
+        total += usd
+        lines.append(AssetLine(ccy, False, None, native, usd))
+    return NetWorthBreakdown(lines, total)
+
+
+# ---------------------------------------------------------------------------
 # Network fetch behind an injectable seam (see module docstring)
 # ---------------------------------------------------------------------------
 @dataclass

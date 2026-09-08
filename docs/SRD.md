@@ -977,16 +977,45 @@ floats and no money math in the UI layer.
   domain layer is `mammon/crypto.py`, a parallel of `mammon/investments.py`: it
   is the SOLE writer of the `crypto_*` tables (mirroring investments' single-
   writer discipline), and `ledger.py` stays the only writer of the cash
-  `transactions` table -- crypto adds no second writer there. The fiat side of a
+  `transactions` table -- crypto adds no second writer there. On an EXCHANGE-kind account (below) the fiat side of a
   buy/sell rides on the crypto row's own `amount` (an internal cash sleeve, the
   way investments keeps buy/sell cash in `investment_transactions`), so both
-  domains tell one cash story and no cash-ledger row is written for a trade.
-- **A crypto wallet is creatable from the New Account dialog.** `Crypto` is
+  domains tell one cash story and no cash-ledger row is written for a trade; a
+  WALLET-kind account has no cash sleeve at all.
+- **Two account KINDS, an explicit typed `accounts.crypto_kind` (migration 61).**
+  A `'wallet'` is a single address / paper wallet holding coins and ERC-20 tokens
+  with NO fiat: coin simply arrives and leaves, the network fee is paid IN the
+  coin, and the on-chain COUNTERPARTY IS THE PAYEE (`crypto_transactions.payee` --
+  the `From` address on a coin increase, the `To` on a coin decrease; there is no
+  separate "counterparty" concept and no third-party-payee field). An `'exchange'`
+  is a custodial account holding coins PLUS fiat currencies through the internal
+  cash sleeve (the `BUY`/`SELL`/`SWAP` model below). The kind is a REAL value in
+  (`'wallet'`, `'exchange'`), never an overloaded NULL -- a NULL kind means "not a
+  crypto account"; migration 61 backfills every pre-split crypto account to
+  `'exchange'`, the model they were built on. Predicates `crypto.is_wallet_account`
+  / `is_exchange_account` / `account_kind` classify a row. Both kinds are
+  multi-token, security-style: each token is a distinct position valued at market.
+- **Coin-native wallet writers (the ShrsIn/ShrsOut analogue).** A wallet coin
+  increase is `crypto.record_wallet_credit` (add coin, no fiat leg -- `price` /
+  `amount` / `basis` left NULL) and a decrease is `record_wallet_debit` (remove
+  coin, with an optional coin-native fee leg via `fee_symbol`/`fee_quantity`, the
+  USD `fee_amount` left NULL); both take the on-chain counterparty as `payee`.
+  With no USD proceeds or basis, no realized gain is booked -- correct for a
+  coin-native wallet. Each token (`ETH`, `USDC`, `LINK`) stays a DISTINCT position
+  in `crypto_holdings` (`UNIQUE(account_id, symbol)`); symbols never merge. An
+  own-wallet move between two of the user's accounts is still the coin transfer
+  mirror (`record_wallet_transfer`, below). All route through the existing
+  `record_event`, so `crypto.py` remains the sole writer of `crypto_*`.
+- **Both crypto KINDS are creatable from the New Account dialog.** `Crypto` is
   offered in the dialog's type list alongside `Investment` (both are
-  investment-like), so the user creates a `type='crypto'` account the same way as
-  any other; creation still funnels through the sole writer
-  `ledger.create_account`, and the wallet then groups under Investing and routes
-  to its own `CryptoRegisterWidget` (SRD 5.8j).
+  investment-like); when `Crypto` is chosen a **Wallet vs Exchange** control
+  appears, and the choice flows to `crypto.create_account(kind=...)` through the
+  shared `widgets.create_account_from_values` -- the ONE place the dialog's
+  `values()` become an account, so the crypto routing lives in a single spot and
+  `crypto_kind`/`asset_class` are set. `crypto.create_account` itself funnels the
+  base row through the sole writer `ledger.create_account` and then sets the
+  crypto fields via `ledger.update_account`. The account groups under Investing
+  and routes to its own `CryptoRegisterWidget` (SRD 5.8j).
 - **Quantities and per-unit prices are Decimal-encoded TEXT; fiat is signed
   integer cents.** TEXT storage round-trips an 18-decimal wei value exactly. The
   one new hazard over equities is SUMMATION, not storage: Python's default
@@ -1001,8 +1030,10 @@ floats and no money math in the UI layer.
   linked single-asset legs `SWAP_OUT`+`SWAP_IN` sharing a `swap_group_id`
   (SWAP_OUT is a disposal at fair-market value, SWAP_IN's basis IS that FMV --
   never one row crammed with two symbols, which would break holdings replay),
-  `SEND`/`RECEIVE` to/from a third party (SEND disposes at FMV, RECEIVE is income
-  at FMV), the in-kind income actions `REWARD`/`INTEREST`/`AIRDROP`/`MINING`
+  `SEND`/`RECEIVE` to/from a third party (on an exchange, SEND disposes at FMV and
+  RECEIVE is income at FMV; on a coin-native WALLET these carry no fiat and are
+  written by `record_wallet_debit`/`record_wallet_credit` above), the in-kind
+  income actions `REWARD`/`INTEREST`/`AIRDROP`/`MINING`
   (credited as coin quantity, basis = FMV, accruing to the checkpoint `income`
   total -- the crypto twin of a dividend), `FEE` (a network/gas fee), and `FORK`
   (basis per policy, default the supplied FMV or 0 -- disputed, never hardcoded).
@@ -1041,6 +1072,18 @@ floats and no money math in the UI layer.
   `investments.display_balance` delegates a `'crypto'` account to
   `crypto.display_balance`, so the app's single valuation entry point values any
   account correctly.
+- **Net worth breaks out per coin AND per currency, USD applied only at this
+  layer (the wallet's rule).** `fx.net_worth_by_asset` returns one line per coin
+  (its NATIVE quantity and its USD-converted market value, coin x latest
+  `{SYM}-USD` price) and one per fiat currency (native cents and its FX-converted
+  value), plus a base-currency total. A crypto account contributes its holdings as
+  coin lines and its cash sleeve as a fiat line -- the SAME two halves
+  `display_balance` already sums -- so a holding is counted EXACTLY once and the
+  total equals `fx.total_in_currency` (no double count anywhere net worth is
+  computed). A wallet has no cash sleeve, so it adds only coin lines. The accounts
+  overview renders this as a grid (`ui/models.NetWorthByAssetModel`): one column
+  per asset, a NATIVE-quantity row, a USD-converted row, and a Total column -- a
+  thin projection holding no coin/cents math of its own.
 
 ### 5.8i Cryptocurrency import (Etherscan-style native-coin CSV)
 - A block-explorer by-address CSV export (Etherscan's per-wallet "Export CSV" is
@@ -1051,26 +1094,43 @@ floats and no money math in the UI layer.
   is the parser (the crypto twin of `NormalizedTxn`); `importers/crypto_core`
   (`import_crypto_records` / `import_etherscan_file`) resolves the wallet, dedups,
   classifies each row and writes.
-- **The importer adds NO second writer of the `crypto_*` tables.** Every write
-  funnels through `mammon.crypto`'s event writers (`record_income` for an inbound
-  RECEIVE, `record_send` for a disposal, `record_wallet_transfer` for an
-  own-wallet move) -- never a raw `INSERT`, so the SINGLE-WRITER discipline and
+- **The importer dispatches on the account KIND and adds NO second writer of the
+  `crypto_*` tables.** `import_crypto_records` routes a `kind='wallet'` account to
+  a coin-native path (`_import_wallet_records`) and a `kind='exchange'` account to
+  the fiat-sleeve FMV path. Every write funnels through `mammon.crypto`'s event
+  writers -- `record_wallet_credit`/`record_wallet_debit` for a coin-native wallet,
+  `record_income`/`record_send` for an exchange, and `record_wallet_transfer` for
+  an own-wallet move -- never a raw `INSERT`, so the SINGLE-WRITER discipline and
   the transfer-mirror/lot invariants stay enforced in one place.
+- **A WALLET import is coin-native (the redesign).** A `Value_IN(ETH)` row becomes
+  a `record_wallet_credit` (coin in, the `From` address as `payee`); a
+  `Value_OUT(ETH)` row a `record_wallet_debit` (coin out, the `To` address as
+  `payee`) with the gas as a coin-native `fee_symbol`/`fee_quantity` leg. NO USD is
+  written on any row (`price`/`amount`/`basis` NULL, `fee_amount` NULL) -- a wallet
+  is valued at market only at the net-worth layer (SRD 5.8h), so there is no cost
+  basis, no realized gain, and no cash sleeve to move. The rules below (gas
+  attribution, sign, own-wallet transfer, `tx_hash` dedup, failed-row skip) hold
+  for both kinds.
 - **Gas is the user's only when the user is the sender.** The export prints a
   `TxnFee` on EVERY row, including inbound ones, but on-chain only the sender pays
   gas. Gas is booked as a same-coin `fee_*` leg on the parent event ONLY when the
   sender address is one of the user's own registered wallets; an inbound row's fee
   belongs to the counterparty and must never debit the user's coin. This was the
   single most consequential finding from the real 2020 ETH export (23 inbound
-  rows, 1 outbound).
+  rows, 1 outbound). On a WALLET-kind account no address registry is needed: an
+  Etherscan by-address export puts the wallet on the `From` of every `Value_OUT`
+  row, so a coin-out row IS a row the user sent and its gas is the coin-native fee
+  leg; the registered-sender test applies to the exchange-kind FMV path.
 - **Sign derives from the two unsigned columns.** Value is split across
   `Value_IN` / `Value_OUT` (exactly one non-zero per row); `Value_IN>0` acquires,
   `Value_OUT>0` disposes.
-- **Fair-market value comes from `Historical $Price/Eth`, never `CurrentValue`.**
-  The `CurrentValue @ $<rate>/Eth` column values every row at one export-time rate
-  and is ignored; the per-transaction historical price supplies the basis /
-  proceeds / gas value, computed to signed integer cents under the wei-scale
-  high-precision decimal context (`crypto.quantity_context`).
+- **Fair-market value comes from `Historical $Price/Eth`, never `CurrentValue`
+  (EXCHANGE-kind path only).** The `CurrentValue @ $<rate>/Eth` column values every
+  row at one export-time rate and is ignored; on an exchange-kind account the
+  per-transaction historical price supplies the basis / proceeds / gas value,
+  computed to signed integer cents under the wei-scale high-precision decimal
+  context (`crypto.quantity_context`). A WALLET-kind import writes no USD on the
+  row at all (SRD 5.8h), so this historical price is not booked there.
 - **An own-wallet transfer needs a known-address registry.** A row is a
   wallet-to-wallet transfer (mirror model, no realized gain) only when the OTHER
   address also belongs to one of the user's Mammon crypto accounts (matched on
@@ -1105,7 +1165,9 @@ floats and no money math in the UI layer.
 - **The crypto register is a THIN, read-only projection.** It renders through
   `crypto.register_rows`, which owns every running-balance / cents / label
   computation (the UI holds no SQL and no money or precision math). Columns: Date,
-  Action, Coin / Wallet, Quantity (stored SIGNED -- an OUT leg is negative), Price,
+  Action, Coin / Wallet, Payee (the on-chain counterparty carried on
+  `crypto_transactions.payee` -- the `From` on a coin credit, the `To` on a coin
+  debit), Quantity (stored SIGNED -- an OUT leg is negative), Price,
   Coin Bal (running per-coin balance, folding in the same-coin gas so it ties to
   `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a Buy/Sell), Cash Bal,
   and Fee. The crypto event taxonomy renders as designed: a swap's two

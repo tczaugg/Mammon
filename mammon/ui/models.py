@@ -1992,11 +1992,13 @@ class CryptoRegisterModel(QAbstractTableModel):
     trade; a wallet transfer renders as ``[Other Wallet]`` (the mirror model, in
     coin). READ-ONLY: crypto events are entered by import, not inline editing."""
 
-    (DATE, ACTION, COIN, QUANTITY, PRICE,
-     COIN_BAL, AMOUNT, CASH_BAL, FEE) = range(9)
+    (DATE, ACTION, COIN, PAYEE, QUANTITY, PRICE,
+     COIN_BAL, AMOUNT, CASH_BAL, FEE) = range(10)
     # The COIN column does double duty: a trade/income shows its coin symbol, a
-    # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair.
-    HEADERS = ["Date", "Action", "Coin / Wallet", "Quantity", "Price",
+    # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair. PAYEE is
+    # the on-chain counterparty (From on a coin credit, To on a coin debit) that
+    # crypto.register_rows carries straight through from crypto_transactions.payee.
+    HEADERS = ["Date", "Action", "Coin / Wallet", "Payee", "Quantity", "Price",
                "Coin Bal", "Amount", "Cash Bal", "Fee"]
     _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL)
 
@@ -2084,6 +2086,9 @@ class CryptoRegisterModel(QAbstractTableModel):
             # A trade/income shows its coin; a transfer shows [Other Wallet]; a
             # swap shows the OUT->IN pair (crypto.register_rows.label).
             return r.get("label") or r["symbol"] or ""
+        if col == self.PAYEE:
+            # The on-chain counterparty (From on a credit, To on a debit).
+            return r.get("payee") or ""
         if col == self.QUANTITY:
             # Stored SIGNED (an OUT leg is negative), shown verbatim.
             return fmt_qty(r["quantity"]) if r["quantity"] is not None else ""
@@ -2251,4 +2256,95 @@ class AccountsModel(QAbstractTableModel):
             ct = style.cell_text_color()  # legible item text in dark mode; None in light
             if ct:
                 return QBrush(QColor(ct))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# net worth broken out per coin / per currency (the crypto-era view)
+# ---------------------------------------------------------------------------
+class NetWorthByAssetModel(QAbstractTableModel):
+    """Net worth as a per-asset grid: one COLUMN per coin/currency plus a trailing
+    Total column, a NATIVE row (coin quantity, or native cents for a fiat bucket)
+    and a USD row (each converted to the base currency via price history + fx).
+
+    A THIN projection of :func:`mammon.fx.net_worth_by_asset` -- it holds no SQL
+    and no coin/cents math, only formatting for display. The domain function keeps
+    the crypto holdings from being double-counted (they are the same halves
+    ``display_balance`` already sums), so the Total equals the account bar's."""
+
+    NATIVE, USD = range(2)
+    VHEADERS = ["Native", "USD"]
+
+    def __init__(self, conn, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self._lines: list = []
+        self._total = 0
+        self.reload()
+
+    def reload(self):
+        from mammon import fx
+        self.beginResetModel()
+        try:
+            bd = fx.net_worth_by_asset(self.conn)
+            self._lines = list(bd.lines)
+            self._total = bd.total_usd_cents
+        except fx.FxRateUnavailable:
+            # A missing FX rate is surfaced as an empty breakdown; the account
+            # bar's own net-worth label falls back to the naive base sum.
+            self._lines = []
+            self._total = 0
+        self.endResetModel()
+
+    def total_cents(self) -> int:
+        return self._total
+
+    def _is_total_col(self, col) -> bool:
+        return col == len(self._lines)
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 2
+
+    def columnCount(self, parent=QModelIndex()):
+        # one column per asset, plus the trailing Total column
+        return 0 if parent.isValid() else len(self._lines) + 1
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            if self._is_total_col(section):
+                return "Total"
+            return self._lines[section].asset if 0 <= section < len(self._lines) else None
+        return self.VHEADERS[section] if 0 <= section < len(self.VHEADERS) else None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role not in (Qt.DisplayRole, Qt.EditRole):
+            if role == Qt.ForegroundRole:
+                ct = style.cell_text_color()
+                if ct:
+                    return QBrush(QColor(ct))
+            return None
+        if self._is_total_col(col):
+            # No cross-coin native sum is meaningful; only the USD grand total is.
+            return fmt_cents(self._total) if row == self.USD else ""
+        if not (0 <= col < len(self._lines)):
+            return None
+        line = self._lines[col]
+        if row == self.NATIVE:
+            if line.is_coin:
+                return fmt_qty(line.quantity) if line.quantity is not None else ""
+            return fmt_cents(line.native_cents or 0)
+        if row == self.USD:
+            return fmt_cents(line.usd_cents)
         return None
