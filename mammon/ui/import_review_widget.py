@@ -18,14 +18,14 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt5.QtCore import QEvent, QStandardPaths, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor
+from PyQt5.QtGui import QBrush, QColor, QFontMetrics
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .. import import_review
+from .. import crypto, import_review
 from . import prefs
 from .models import fmt_date
 
@@ -50,10 +50,28 @@ STATUS, DATE, NUM, PAYEE, MEMO, AMOUNT = range(6)
 # holds. Editing the name here is what puts it on the right one.
 I_STATUS, I_DATE, I_SECURITY, I_ACTION, I_SHARES, I_PRICE, I_AMOUNT = range(7)
 
+# A crypto WALLET (a paper-wallet address) gets a THIRD column set, because the
+# other two are both wrong for it. A wallet row's identity is date + coin +
+# quantity + the counterparty ADDRESS; no fiat ever moves, so an Amount column
+# has nothing to put in it. Reviewing a by-address export through the cash layout
+# is what produced the reported defect -- the block number landed under Amount
+# and a Cash Bal column appeared on an account that has no cash sleeve.
+#
+# Increases and decreases get their OWN columns (the source's Value_IN / Value_OUT),
+# the way a cash register separates payment from deposit: on-chain the two are
+# different events with different counterparties, and one signed column hides that.
+# FEE is coin-denominated (ETH gas), never USD, and only a send carries one.
+C_STATUS, C_DATE, C_PAYEE, C_MEMO, C_COIN, C_IN, C_OUT, C_FEE = range(8)
+
 # Foreground for an already-accepted / discarded row: present but inert.
 _ACTIONED_FG = "#9a9a9a"
 _HEADERS = ["Status", "Date", "Num", "Payee", "Memo", "Amount"]
 _INV_HEADERS = ["Status", "Date", "Security", "Action", "Shares", "Price", "Amount"]
+_CRYPTO_HEADERS = ["Status", "Date", "Payee", "Memo", "Coin",
+                   "Coin In", "Coin Out", "Fee"]
+# Which side of the register a wallet row's quantity renders on. Read from the
+# domain layer's own vocabulary so the panel cannot drift from the writers.
+_COIN_OUT_ACTIONS = crypto.WALLET_DEBIT_ACTIONS
 
 
 def _fmt_amount(cents: int) -> str:
@@ -143,14 +161,20 @@ class ImportReviewPanel(QWidget):
         self._entries: list = []
         self._states: list[_RowState] = []
         self.is_investment = self._account_is_investment()
-        self._headers = _INV_HEADERS if self.is_investment else _HEADERS
+        self.is_crypto_wallet = self._account_is_crypto_wallet()
+        if self.is_crypto_wallet:
+            self._headers = _CRYPTO_HEADERS
+        elif self.is_investment:
+            self._headers = _INV_HEADERS
+        else:
+            self._headers = _HEADERS
         # The review list is GROUND TRUTH -- what the source sent -- and is
         # read-only, save for the cash layout's Num (a check number the user
         # needs in order to identify a payee). Corrections to an investment row
         # belong in the register's editable PENDING row, which is where the same
         # correction happens for cash. Two editable surfaces onto one value could
         # disagree about what Accept would commit.
-        self._edit_col = None if self.is_investment else NUM
+        self._edit_col = None if (self.is_investment or self.is_crypto_wallet) else NUM
         # Guards _on_num_edited against the setItem() calls in _render_row, which
         # would otherwise re-fire itemChanged while we are just re-drawing.
         self._suppress_num_edit = False
@@ -213,8 +237,33 @@ class ImportReviewPanel(QWidget):
             QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
             | QAbstractItemView.AnyKeyPressed)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(PAYEE, QHeaderView.Stretch)
-        hh.setSectionResizeMode(MEMO, QHeaderView.Stretch)
+        if self.is_crypto_wallet:
+            # The counterparty is a 42-character hex address; it needs the room,
+            # and it is the one field that identifies the row to the user.
+            hh.setSectionResizeMode(C_PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(C_MEMO, QHeaderView.Stretch)
+            # Coin quantities are NOT dollar amounts: ETH carries 18 decimals, so
+            # a real row reads 25.566401739928923937 -- 21 characters against a
+            # fiat cell's 9. At the default column width those elided to "0....",
+            # which on a number is worse than useless. Measured from the FONT
+            # rather than left to ResizeToContents, which takes whatever the
+            # widest row wants and starves the stretched Payee beside it -- and
+            # the payee is the 42-character address that identifies the row.
+            # Clamped at both ends: a measurement is only as sane as the font it
+            # is taken in, and an unbounded one starved the Payee to a 21px stub.
+            # Past the cap the number elides and the cell's tooltip carries the
+            # full value.
+            fm = QFontMetrics(self.table.font())
+            coin_w = max(110, min(200, fm.width("25.566401739928923937") + 16))
+            hh.setMinimumSectionSize(72)
+            for col, w in ((C_COIN, max(56, fm.width("WBTC") + 16)),
+                           (C_IN, coin_w), (C_OUT, coin_w),
+                           (C_FEE, coin_w + 36)):        # + " ETH"
+                hh.setSectionResizeMode(col, QHeaderView.Fixed)
+                self.table.setColumnWidth(col, w)
+        else:
+            hh.setSectionResizeMode(PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(MEMO, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         # An edited Num cell flows straight to entry.mapped.check_number so it
         # carries through save_new when the row is accepted.
@@ -416,6 +465,11 @@ class ImportReviewPanel(QWidget):
             # (import_review.accept_match); this only surfaces it.
             merge_tip = (_merge_policy_tooltip(entry)
                          if getattr(entry, "is_matching", False) else None)
+            if self.is_crypto_wallet:
+                self._render_crypto_row(i, m, status, cell, actioned, merge_tip)
+                if actioned:
+                    self._grey_row(i)
+                return
             if self.is_investment:
                 self._render_investment_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
@@ -453,6 +507,72 @@ class ImportReviewPanel(QWidget):
         row = self.conn.execute(
             "SELECT type FROM accounts WHERE id=?", (self.account_id,)).fetchone()
         return bool(row) and str(row[0]).strip().lower() == "investment"
+
+    def _account_is_crypto_wallet(self) -> bool:
+        """Whether this panel is reviewing a coin-native crypto WALLET -- a single
+        address whose rows move coin and no fiat. A crypto EXCHANGE account is
+        deliberately excluded: it has a cash sleeve and trades coin for dollars,
+        so its rows really do carry an amount and a price. The classification is
+        read through :mod:`mammon.crypto` rather than compared here, so the two
+        kinds are distinguished in exactly one place."""
+        return crypto.is_wallet_account(
+            crypto.get_account(self.conn, self.account_id))
+
+    def _render_crypto_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
+        """Draw one coin-native wallet review row: the counterparty address, the
+        coin, and the quantity in whichever direction it moved. Everything is the
+        imported ground truth and read-only -- the chain is not a guess the way an
+        importer's action mapping is, so there is nothing here to correct.
+
+        The quantity is stored UNSIGNED with the direction carried by the action,
+        so it renders under Coin In or Coin Out rather than as a signed number."""
+        st = cell(status)
+        if merge_tip:
+            st.setToolTip(merge_tip)
+        self.table.setItem(i, C_STATUS, st)
+        self.table.setItem(i, C_DATE, cell(fmt_date(m.date)))
+        # The on-chain counterparty IS the payee: the From address on a coin
+        # increase, the To address on a decrease.
+        self.table.setItem(i, C_PAYEE, cell(m.payee))
+        self.table.setItem(i, C_MEMO, cell(m.memo))
+        if not getattr(m, "is_crypto", False):
+            # A row queued for this wallet by the CASH path -- the leftovers of a
+            # by-address export that was routed to the generic delimited importer
+            # before crypto routing existed. It carries a fiat amount and no coin,
+            # so there is nothing to show in the coin columns and nothing this
+            # account could do with it. Name it rather than drawing four blanks,
+            # which read as a corrupt row.
+            legacy = cell("(not on-chain)")
+            legacy.setToolTip(
+                "This row was queued by the cash importer before on-chain "
+                "routing existed. It carries no coin, so it cannot be added to "
+                "a wallet. Discard it and import the export again.")
+            self.table.setItem(i, C_COIN, legacy)
+            for col in (C_IN, C_OUT, C_FEE):
+                self.table.setItem(i, col, cell(""))
+            return
+        self.table.setItem(i, C_COIN, cell(m.symbol))
+        is_out = (m.action or "").strip().upper() in _COIN_OUT_ACTIONS
+        qty = (m.quantity or "").strip()
+        for col, text in ((C_IN, "" if is_out else qty),
+                          (C_OUT, qty if is_out else "")):
+            it = cell(text)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            # A quantity long enough to elide anyway is one hover from readable
+            # rather than lost behind an ellipsis.
+            if text:
+                it.setToolTip(text)
+            self.table.setItem(i, col, it)
+        # The network fee is paid in the COIN (ETH gas), never in dollars, and
+        # only the sender pays it -- so an inbound row's Fee cell stays empty.
+        fee = ""
+        if m.fee_quantity:
+            fee = f"{m.fee_quantity} {m.fee_symbol}".strip()
+        fee_item = cell(fee)
+        fee_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if fee:
+            fee_item.setToolTip(fee)
+        self.table.setItem(i, C_FEE, fee_item)
 
     def _render_investment_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
         """Draw one investment review row. Security is editable; everything else
