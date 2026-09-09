@@ -61,6 +61,8 @@ __all__ = [
     "build_review",
     "build_review_from_records",
     "build_crypto_review",
+    "build_exchange_review",
+    "mapped_from_exchange_record",
     "crypto_import_counts",
     "import_records_via_review",
     "resolve_or_create_transfer_account",
@@ -822,7 +824,7 @@ def build_review_from_records(conn, account_id: int, records, *,
     return entries
 
 
-def mapped_from_crypto_record(rec) -> MappedRow:
+def mapped_from_crypto_record(rec, *, with_price: bool = False) -> MappedRow:
     """Map a parsed :class:`~mammon.importers.crypto_csv.CryptoRecord` to a
     COIN-NATIVE :class:`MappedRow` -- the wallet twin of :func:`mapped_from_record`.
 
@@ -836,6 +838,14 @@ def mapped_from_crypto_record(rec) -> MappedRow:
 
     ``payee_supplied`` is set because an address IS what the source sent: the
     description-driven rename rules must not rewrite it.
+
+    ``with_price`` carries the export's historical per-unit price onto the row.
+    It is FALSE for a wallet, by design -- there is no USD on a wallet row -- and
+    TRUE when the same on-chain file is imported into a custodial EXCHANGE
+    account, which does keep cost basis and realized gain and therefore needs the
+    fair market value the export already states. This is the ONE place the
+    account kind gets a say: the FILE picks the reader, the ACCOUNT decides
+    whether dollars ride along.
     """
     direction = (getattr(rec, "direction", "") or "").strip().lower()
     counterparty = (rec.to_addr if direction == "out" else rec.from_addr) or ""
@@ -855,10 +865,64 @@ def mapped_from_crypto_record(rec) -> MappedRow:
         action=("SEND" if direction == "out" else "RECEIVE"),
         symbol=(rec.symbol or ""),
         quantity=(rec.quantity or ""),
+        price=((rec.price or "") if with_price else ""),
         fee_symbol=fee_symbol,
         fee_quantity=fee_quantity,
         tx_hash=(rec.tx_hash or ""),
     )
+
+
+def mapped_from_exchange_record(rec) -> MappedRow:
+    """Map a parsed :class:`~mammon.importers.coinbase_csv.ExchangeRecord` to a
+    :class:`MappedRow` -- the EXCHANGE twin of :func:`mapped_from_crypto_record`.
+
+    The difference from a wallet row is exactly the difference between the two
+    account kinds. A custodial exchange HAS a fiat cash sleeve, so a trade and a
+    cash movement really do carry ``amount_cents`` and a per-unit ``price``,
+    where a wallet row carries neither. A coin move that is not a trade still
+    carries no amount: Coinbase prints a USD figure on those rows for tax
+    purposes, and that is a VALUATION, not money the account saw.
+
+    ``quantity`` is stored UNSIGNED with the direction carried by the ACTION --
+    the same convention the wallet path uses, so one review renderer and one
+    accept path serve both kinds.
+    """
+    # A pure FIAT row's "quantity" IS its dollar amount, and that belongs in the
+    # Amount column alone: repeating it under Quantity reads as a coin position
+    # of 1222.01 of something. The money is already carried by amount_cents.
+    qty = "" if rec.is_cash else (rec.quantity or "").strip().lstrip("-")
+    raw = (rec.raw_type or "").strip()
+    memo = (rec.memo or "").strip()
+    return MappedRow(
+        transaction_id=(rec.txn_id or ""),
+        date=rec.date or "",
+        amount_cents=int(rec.amount_cents or 0),
+        payee=(rec.payee or "").strip(),
+        payee_supplied=bool((rec.payee or "").strip()),
+        # The source's own type rides the memo when it says something the mapped
+        # action does not -- an unrecognised Coinbase product name is exactly
+        # what the user needs to see in order to correct the action.
+        memo=memo,
+        is_crypto=True,
+        action=(rec.action or "").upper(),
+        symbol=(rec.symbol or ""),
+        quantity=qty,
+        price=(rec.price or ""),
+        commission_cents=int(rec.fee_cents or 0),
+        tx_hash=(rec.txn_id or ""),
+        raw={"source_type": raw} if raw else {},
+    )
+
+
+def build_exchange_review(conn, account_id: int, records) -> list[ReviewEntry]:
+    """Classify a crypto EXCHANGE's parsed records into a review list.
+
+    Same shape and same dedup as :func:`build_crypto_review` -- the exchange's
+    own row id is as exact a key as an on-chain hash -- so an exchange import is
+    reviewed row by row like every other source instead of writing straight
+    through. Never mutates the database."""
+    return _build_crypto_entries(conn, account_id, records,
+                                 mapped_from_exchange_record)
 
 
 def build_crypto_review(conn, account_id: int, records) -> list[ReviewEntry]:
@@ -874,42 +938,121 @@ def build_crypto_review(conn, account_id: int, records) -> list[ReviewEntry]:
     A FAILED on-chain transaction is dropped: it burned the sender's gas but
     moved no value, so it is not a ledger event. Never mutates the database.
     """
+    from . import crypto
+    # The same on-chain file means different things to the two kinds. A WALLET
+    # takes it coin-native, with no USD anywhere on the row. An EXCHANGE keeps
+    # cost basis and realized gain, so the export's historical price rides along
+    # and the accept path can value the disposal -- without it a SEND books a
+    # phantom loss equal to the entire basis.
+    with_price = crypto.is_exchange_account(crypto.get_account(conn, account_id))
+    return _build_crypto_entries(
+        conn, account_id, records,
+        lambda rec: mapped_from_crypto_record(rec, with_price=with_price))
+
+
+def _build_crypto_entries(conn, account_id: int, records, mapper) -> list[ReviewEntry]:
+    """Shared body of the two crypto review builders: drop what did not happen,
+    drop what this account already knows, map the rest. One implementation so a
+    wallet and an exchange can never dedupe by different rules."""
     seen: set[str] = set()
     entries: list[ReviewEntry] = []
     for rec in records:
         if not getattr(rec, "is_success", True):
             continue
-        h = (rec.tx_hash or "").strip()
+        h = (getattr(rec, "tx_hash", "") or "").strip()
         if h:
             if h in seen or _crypto_hash_present(conn, account_id, h):
                 continue
             seen.add(h)
-        entries.append(ReviewEntry(mapped=mapped_from_crypto_record(rec),
-                                   label=LABEL_NEW))
+        entries.append(_classify_crypto(conn, account_id, mapper(rec)))
     return entries
+
+
+def _classify_crypto(conn, account_id: int, mapped: MappedRow) -> ReviewEntry:
+    """Classify one crypto row NEW or MATCHING, against THIS ACCOUNT'S REGISTER.
+
+    The same question :func:`classify_row` asks for cash, asked of the crypto
+    tables -- and asked the same way. ``_find_match`` queries
+    ``WHERE account_id=?``: a review row is matched against the register it is
+    landing in, never against another account's. That is not an incidental
+    detail of the cash path, it is the model. The counterpart is expected to be
+    HERE already, because accepting a transfer on the other side CREATED it:
+    ``save_new`` routes a row with a transfer target through
+    ``ledger.create_transfer``, which writes both legs at once, and
+    :func:`crypto.link_as_transfer` does the same for coin.
+
+    So rule 2 of ``_find_match``, in coin: a transfer-shaped row matches an
+    existing leg of a double-entry transfer in this register (one whose
+    ``transfer_account_id`` is set), so accepting CLEARS that leg rather than
+    inserting a second, one-sided row.
+    """
+    from . import crypto
+    act = (mapped.action or "").upper()
+    if act in (crypto.CASH_ACTIONS | {"TRANSFER_IN", "TRANSFER_OUT"}):
+        leg = _find_crypto_transfer_leg(conn, account_id, mapped, act)
+        if leg is not None:
+            return ReviewEntry(mapped=mapped, label=LABEL_MATCHING,
+                               matched_txn_id=int(leg["id"]),
+                               match_method="transfer")
+    return ReviewEntry(mapped=mapped, label=LABEL_NEW)
+
+
+def _find_crypto_transfer_leg(conn, account_id: int, mapped: MappedRow, act: str):
+    """The leg ALREADY IN THIS REGISTER that this downloaded row is: a row whose
+    ``transfer_account_id`` is set, moving the same coin or the same money, near
+    the same date. Nearest date wins."""
+    from . import crypto
+    from .importers import record as _record
+    if not mapped.date:
+        return None
+    lo = _record.iso_shift(mapped.date, -crypto.TRANSFER_LINK_WINDOW_DAYS)
+    hi = _record.iso_shift(mapped.date, crypto.TRANSFER_LINK_WINDOW_DAYS)
+    sql = ("SELECT * FROM crypto_transactions WHERE account_id=? "
+           "AND date BETWEEN ? AND ? AND transfer_account_id IS NOT NULL ")
+    params = [account_id, lo, hi]
+    if mapped.symbol and mapped.quantity:
+        sql += "AND symbol=? "
+        params.append(mapped.symbol)
+    else:
+        sql += "AND symbol IS NULL AND amount=? "
+        params.append(int(mapped.amount_cents or 0))
+    sql += "ORDER BY ABS(julianday(date) - julianday(?)), id"
+    params.append(mapped.date)
+    from decimal import Decimal
+    want = None
+    if mapped.symbol and mapped.quantity:
+        try:
+            want = abs(Decimal(str(mapped.quantity)))
+        except Exception:
+            return None
+    for row in conn.execute(sql, tuple(params)).fetchall():
+        if want is not None:
+            try:
+                if abs(Decimal(str(row["quantity"] or "0"))) != want:
+                    continue
+            except Exception:
+                continue
+        return row
+    return None
 
 
 def crypto_import_counts(conn, account_id: int, records) -> tuple[int, dict]:
     """How many rows the export actually HELD, and the state of the ones this
-    wallet already knows: ``(readable, {state: count})``.
+    account already knows: ``(readable, {state: count})``.
 
-    Separate from :func:`build_crypto_review` because the two answer different
-    questions, and conflating them produces a lie. ``build_crypto_review``
-    returns only what should be QUEUED -- a row already posted or already pending
-    must not be queued again. Reporting that count as "rows read from the file"
-    means a re-import of a fully-imported export announces that NOTHING could be
-    read, which reads as "the file is empty or unreadable" when what actually
-    happened is that every row was recognised and correctly refused re-entry.
-    The cash path learned this first (see ``MainWindow._import_report``); this is
-    the same distinction for chain data.
-    """
+    Separate from the review builders because the two answer different questions,
+    and conflating them produces a lie. A builder returns only what should be
+    QUEUED; reporting that as "rows read from the file" makes a re-import of an
+    already-imported export announce that NOTHING could be read, which reads as
+    "the file is empty or unreadable" when in fact every row was recognised and
+    correctly refused re-entry."""
     readable = 0
     prior: dict = {}
     for rec in records:
         if not getattr(rec, "is_success", True):
-            continue          # a failed txn moved no value: not a ledger row
+            continue
         readable += 1
-        h = (rec.tx_hash or "").strip()
+        h = (getattr(rec, "tx_hash", "") or "").strip()
         if not h:
             continue
         state = _crypto_hash_state(conn, account_id, h)
@@ -919,17 +1062,12 @@ def crypto_import_counts(conn, account_id: int, records) -> tuple[int, dict]:
 
 
 def _crypto_hash_state(conn, account_id: int, tx_hash: str) -> Optional[str]:
-    """Why this wallet already knows ``tx_hash``, or ``None`` if it does not.
+    """Why this account already knows ``tx_hash``, or ``None`` if it does not.
 
-    The SINGLE authority on whether a chain row is a duplicate --
-    :func:`_crypto_hash_present` is this test, and :func:`crypto_import_counts`
-    reports this answer -- so what gets skipped and what gets reported as skipped
-    can never disagree.
-
-    ``"in the register"`` when the event is posted; ``"pending"`` when it is
-    still in the review queue. A DISCARDED row is deliberately not a duplicate:
-    discard means "not now", not "never again", so re-importing the range brings
-    it back -- the same policy the cash path states."""
+    The SINGLE authority on whether a row is a duplicate -- ``_crypto_hash_present``
+    is this test and ``crypto_import_counts`` reports its answer -- so what gets
+    skipped and what gets reported as skipped can never disagree. A DISCARDED row
+    is deliberately not a duplicate: discard means "not now", not "never again"."""
     if conn.execute(
             "SELECT 1 FROM crypto_transactions WHERE account_id=? AND tx_hash=? "
             "LIMIT 1", (account_id, tx_hash)).fetchone() is not None:
@@ -1379,11 +1517,19 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
     if mapped.is_crypto:
         # A coin-native wallet row posts into crypto_transactions through
         # mammon.crypto's writers -- never the cash register, which would book a
-        # fiat amount that does not exist. Its payee is the counterparty address
-        # the source sent, so it feeds no rename tree either.
-        return _save_crypto(
+        # fiat amount that does not exist. Its payee STARTS as the counterparty
+        # address the source sent; when the user renames it, that correction is
+        # fed to the SAME rename tree the cash review uses (payee resolved first),
+        # so the next import of the same address auto-fills the name. Only a real
+        # correction teaches anything -- an address kept as its own payee does not
+        # (see _learn_crypto_rename).
+        final_payee = mapped.payee if payee is None else payee
+        txn_id = _save_crypto(
             conn, account_id, mapped, memo=memo, review_id=review_id, date=d,
             payee=payee, action=action, symbol=symbol, quantity=quantity)
+        if learn:
+            _learn_crypto_rename(conn, mapped, final_payee, review_id=review_id)
+        return txn_id
     if mapped.is_investment:
         # Investment rows post into investment_transactions (their own table), not
         # the cash register; they carry no payee/category and feed no rename tree.
@@ -1581,12 +1727,68 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
     none, and inventing one would put fiat on a register that has no cash sleeve.
     """
     from . import crypto
+    from decimal import Decimal
     use_date = date or mapped.date
     use_action = ((action or "").strip() or mapped.action or "RECEIVE").upper()
     use_symbol = (mapped.symbol if symbol is None else symbol) or ""
     use_qty = (mapped.quantity if quantity is None else quantity) or "0"
     use_payee = (mapped.payee if payee is None else payee) or None
     m = mapped.memo if memo is None else memo
+    cents = int(mapped.amount_cents or 0)
+    fee_cents = int(mapped.commission_cents or 0) or None
+
+    # A pure FIAT move against an exchange's cash sleeve: no coin at all.
+    if use_action in crypto.CASH_ACTIONS:
+        txn_id = crypto.record_cash(
+            conn, account_id, use_date, cents, action=use_action,
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+
+    # A TRADE moves the cash sleeve; everything else coin-only leaves it alone.
+    if use_action == "BUY":
+        txn_id = crypto.record_buy(
+            conn, account_id, use_date, use_symbol, use_qty, abs(cents),
+            price=(mapped.price or None), fee_amount=fee_cents, memo=(m or None),
+            tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+    if use_action == "SELL":
+        txn_id = crypto.record_sell(
+            conn, account_id, use_date, use_symbol, use_qty, abs(cents),
+            price=(mapped.price or None), fee_amount=fee_cents, memo=(m or None),
+            tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+
+    # Coin leaving or arriving with no cash leg. On an EXCHANGE these still have
+    # a fair market value -- the source reported a per-unit price -- and a SEND
+    # is a disposal, so it needs one or it books a phantom loss equal to the
+    # whole basis. A WALLET row carries no price and passes None, which is right:
+    # there is no USD on a wallet row at all.
+    fmv = _fmv_cents(mapped.price, use_qty)
+    if use_action in ("TRANSFER_IN", "TRANSFER_OUT"):
+        # Coin moved between the user's own venues: basis rides, no gain booked.
+        # A one-sided leg is legitimate here -- the other end is an account
+        # Mammon does not model (a Coinbase Pro sub-ledger, say).
+        q = Decimal(str(use_qty or "0"))
+        signed = q if use_action == "TRANSFER_IN" else -abs(q)
+        txn_id = crypto.record_event(
+            conn, account_id, use_date, use_action, symbol=use_symbol,
+            quantity=signed, price=(mapped.price or None),
+            basis=(fmv if use_action == "TRANSFER_IN" else None),
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+    if use_action in crypto.REMOVE_ACTIONS and fmv is not None:
+        txn_id = crypto.record_send(
+            conn, account_id, use_date, use_symbol, use_qty, fmv,
+            payee=use_payee, fee_symbol=(mapped.fee_symbol or None),
+            fee_quantity=(mapped.fee_quantity or None), fee_amount=fee_cents,
+            memo=(m or None), tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+    if use_action in crypto.ADD_ACTIONS and fmv is not None:
+        txn_id = crypto.record_income(
+            conn, account_id, use_date, use_action, use_symbol, use_qty, fmv,
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+        return _finish_crypto(conn, account_id, txn_id, review_id)
+
     if use_action in crypto.WALLET_DEBIT_ACTIONS:
         txn_id = crypto.record_wallet_debit(
             conn, account_id, use_date, use_symbol, use_qty,
@@ -1599,8 +1801,27 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
             conn, account_id, use_date, use_symbol, use_qty,
             payee=use_payee, action=use_action, memo=(m or None),
             tx_hash=(mapped.tx_hash or None))
-    # Refresh the per-coin positions so the wallet values correctly. The row is
-    # already persisted, so a replay failure must not abort the accept.
+    return _finish_crypto(conn, account_id, txn_id, review_id)
+
+
+def _fmv_cents(price, quantity) -> Optional[int]:
+    """Fair market value in cents from a per-unit price and a quantity, or
+    ``None`` when the source gave no price (a wallet row never has one)."""
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    if not price:
+        return None
+    try:
+        value = Decimal(str(price)) * abs(Decimal(str(quantity or "0")))
+    except (InvalidOperation, ValueError):
+        return None
+    return int((value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _finish_crypto(conn, account_id: int, txn_id: int,
+                   review_id: Optional[int]) -> int:
+    """Refresh the per-coin positions and stamp the review row accepted. The
+    event is already persisted, so a replay failure must not abort the accept."""
+    from . import crypto
     try:
         crypto.rebuild_holdings(conn, account_id)
     except Exception:
@@ -1650,6 +1871,84 @@ def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
                       txn_id=txn_id, review_id=review_id)
 
 
+def _crypto_rename_source(mapped: MappedRow):
+    """The ``(desc, extra)`` the rename tree keys on for a CRYPTO row.
+
+    A crypto wallet row's stable identifier is the on-chain counterparty ADDRESS
+    (``mapped.payee``) -- the crypto analogue of a bank statement's gobbledygook
+    text -- so it drives the rename; the memo rides along as the secondary field.
+    With no address (a bare-memo row) the memo drives it. The SAME pair feeds
+    :func:`predict_crypto_payee` and :func:`_learn_crypto_rename`, so what is
+    offered is exactly what is taught -- the content differs from the cash path
+    (address rather than statement text), but the rename tree path is identical.
+    """
+    memo = (mapped.memo or "").strip()
+    addr = (mapped.payee or "").strip()
+    if addr:
+        return addr, memo
+    return memo, ""
+
+
+def predict_crypto_payee(conn, mapped: MappedRow) -> str:
+    """Auto-fill a crypto review row's payee from learned renames, the way
+    :func:`predict_fields` does for a cash row (payee resolved first).
+
+    Returns the raw counterparty when the tree has nothing confident to say -- an
+    address the user has not yet named stays an address, because the tree fills
+    only from CORRECTIONS (>= ``rename_tree.MIN_FILL`` matching examples). This is
+    what makes the crypto review list rename the payee the same way the cash
+    review list does."""
+    default = (mapped.payee or "").strip()
+    desc, extra = _crypto_rename_source(mapped)
+    if not (desc or extra):
+        return default
+    sugg = rename_tree.suggest(conn, desc, extra=extra)
+    if sugg.action == rename_tree.ACTION_AUTO and sugg.payee:
+        return sugg.payee
+    return default
+
+
+def _learn_crypto_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
+                         review_id: Optional[int] = None) -> None:
+    """Learn a crypto counterparty rename from an accepted review row, the same
+    way :func:`_learn_payee_rename` does for a cash row -- so the next import of
+    the same on-chain address auto-fills the name.
+
+    Only a genuine CORRECTION teaches anything: a row accepted with the raw
+    address left as its own payee records nothing, so the tree never learns that
+    an address 'means' itself. (The cash path leans on the corpus loader's
+    kept-default filter for this; a crypto row's identifier sits in ``extra``
+    rather than the tidied ``text``, so the correction is checked explicitly
+    here.)
+
+    The example is stored with NO ``txn_id`` -- deliberately. The rename corpus
+    reads a live label by joining ``rename_examples.txn_id`` against the
+    ``transactions`` table; a crypto row lives in ``crypto_transactions``, whose
+    id space overlaps ``transactions``', so forwarding the crypto id would let an
+    UNRELATED cash row's payee masquerade as this example's label. Storing the
+    label directly (``txn_id=None``) keeps it immune to that collision -- the one
+    cost is that a later in-register edit of the crypto payee will not retrain
+    this example, which is exactly the lookup that is unsafe to attempt here."""
+    final = (final_payee or "").strip()
+    if not final:
+        return
+    if final == (mapped.payee or "").strip():
+        return
+    desc, extra = _crypto_rename_source(mapped)
+    if not (desc or extra):
+        return
+    sugg = rename_tree.suggest(conn, desc, extra=extra)
+    if sugg.action == rename_tree.ACTION_AUTO:
+        if final == sugg.payee:
+            rename_tree.note_applied(conn, final)
+        else:
+            rename_tree.note_overridden(conn, sugg.payee)
+    elif sugg.action == rename_tree.ACTION_DROPDOWN and final in sugg.payees:
+        rename_tree.note_applied(conn, final)
+    rename_tree.learn(conn, desc, final, extra=extra,
+                      txn_id=None, review_id=review_id)
+
+
 def _record_applied_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
                            txn_id: Optional[int] = None,
                            review_id: Optional[int] = None) -> None:
@@ -1686,6 +1985,8 @@ def accept_match(conn, entry: ReviewEntry) -> dict:
     txn_id = entry.matched_txn_id
     if txn_id is None:
         raise ValueError("entry is not a MATCHING row")
+    if entry.mapped.is_crypto:
+        return _accept_crypto_match(conn, entry, txn_id)
     if entry.mapped.is_investment:
         # The identical investment txn already exists (its id is in
         # investment_transactions, not transactions). Stamp the source id onto it
@@ -1747,6 +2048,35 @@ def accept_match(conn, entry: ReviewEntry) -> dict:
                prior_amount=prior["amount"])
     conn.commit()
     return prior
+
+
+def _accept_crypto_match(conn, entry: ReviewEntry, matched_id: int) -> dict:
+    """Accept a crypto row matched to a leg ALREADY IN THIS REGISTER.
+
+    The cash gesture, in coin: the row the user downloaded IS that leg, so
+    accepting stamps the source id onto it (only when it has none, so a real one
+    is never clobbered) and adds nothing. Inserting a row here would be the
+    double-entry this match exists to prevent."""
+    from . import crypto
+    leg = crypto.get_event(conn, matched_id)
+    if leg is None:
+        raise KeyError("no crypto transaction %s" % matched_id)
+    prior = {"fitid": leg["tx_hash"], "cleared": None}
+    if not leg["tx_hash"] and entry.mapped.tx_hash:
+        crypto.update_event(conn, matched_id, tx_hash=entry.mapped.tx_hash)
+    if entry.review_id is not None:
+        _set_state(conn, entry.review_id, "accepted", accepted_txn_id=matched_id,
+                   prior_fitid=prior["fitid"])
+        conn.commit()
+    return prior
+
+
+def _review_account_id(conn, entry: ReviewEntry) -> Optional[int]:
+    if entry.review_id is None:
+        return None
+    row = conn.execute("SELECT account_id FROM review_items WHERE id=?",
+                       (entry.review_id,)).fetchone()
+    return int(row[0]) if row is not None else None
 
 
 def _fill_missing_price(conn, txn_id: int, entry) -> Optional[str]:
@@ -2282,11 +2612,13 @@ def _accept_one_predicted(conn, account_id: int, entry: ReviewEntry) -> int:
     correction."""
     m = entry.mapped
     if m.is_crypto:
-        # A wallet row's fields all come from the chain -- coin, quantity,
-        # direction, counterparty address -- so there is nothing to predict and
-        # nothing to learn. It posts exactly as imported.
+        # The chain fixes the coin, quantity and direction, but the counterparty
+        # PAYEE is a judgement: auto-fill it from learned renames (the same tree
+        # the cash review uses) and let save_new learn the row. An address the
+        # user has not yet named stays the address and teaches nothing, so a bulk
+        # accept of un-renamed rows behaves exactly as before.
         return save_new(conn, account_id, m, review_id=entry.review_id,
-                        learn=False)
+                        payee=predict_crypto_payee(conn, m), learn=True)
     if m.is_investment:
         return save_new(conn, account_id, m, review_id=entry.review_id,
                         learn=False, action=predict_action(conn, m))

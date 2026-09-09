@@ -578,6 +578,93 @@ class TagDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class TransferAccountDelegate(QStyledItemDelegate):
+    """Pick a transfer account by typing, with autocomplete -- the same editor the
+    cash register's category/transfer cell uses, fed ONLY account names.
+
+    Consistency is the point. In the cash register a payee is free text and the
+    NEXT field resolves a category or an ``[Account]`` transfer target with
+    autocomplete. A crypto register had no such field at all, so the transfer
+    target had nowhere to live and ended up smuggled into the coin column.
+    Reusing :func:`make_category_combo` means this field completes, matches
+    case-insensitively and behaves exactly as its cash counterpart -- the same
+    request the loan wizard's "Paid from" got ("consistent with the others, but
+    no categories").
+
+    Choices come live from the model, so an account created since the register
+    opened is offered without rebuilding the delegate. Blank clears the link."""
+
+    def createEditor(self, parent, option, index):
+        model = index.model()
+        choices = (model.transfer_choices(index.row())
+                   if hasattr(model, "transfer_choices") else [])
+        return make_category_combo(parent, choices)
+
+    def setEditorData(self, editor, index):
+        txt = str(index.data(Qt.EditRole) or "")
+        i = editor.findText(txt)
+        if i >= 0:
+            editor.setCurrentIndex(i)
+        else:
+            editor.setEditText(txt)
+        select_editor_for_append(editor)
+
+    def setModelData(self, editor, model, index):
+        _accept_active_completion(editor)
+        model.setData(index, editor.currentText().strip(), Qt.EditRole)
+
+
+class ChoiceDelegate(QStyledItemDelegate):
+    """Edit a cell by picking from a FIXED list, supplied per-cell by a callable.
+
+    Used where the field is a closed vocabulary the domain layer validates and a
+    typo is not a correction but a crash: a crypto wallet row's action must be one
+    of ``crypto.WALLET_CREDIT_ACTIONS`` / ``WALLET_DEBIT_ACTIONS``, and
+    ``record_wallet_credit`` raises on anything else. A free-text editor would let
+    the user type ``RECIEVE`` and only find out at accept, with the row already
+    selected and the review list advanced. The list is fetched at editor-open
+    time (not at construction) because it depends on the row -- a coin-out row can
+    only ever be a send.
+
+    Not editable: the whole point is that the value cannot be off-vocabulary."""
+
+    def __init__(self, choices, parent=None):
+        super().__init__(parent)
+        self._choices = choices        # callable(index) -> list[str]
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.addItems([str(c) for c in (self._choices(index) or [])])
+        return combo
+
+    def setEditorData(self, editor, index):
+        current = str(index.data(Qt.EditRole) or "")
+        i = editor.findText(current)
+        if i >= 0:
+            editor.setCurrentIndex(i)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.EditRole)
+
+
+class FocusSelectDelegate(QStyledItemDelegate):
+    """A plain text-cell editor whose Tab / keyboard / programmatic open SELECTS
+    ALL its text (so the first keystroke REPLACES) while a mouse click leaves the
+    caret where it lands -- :class:`_FocusSelectLineEdit`'s behaviour, the very
+    one the cash register's Payee/Memo editors rely on.
+
+    Used for the crypto register's free-text and coin-quantity cells (Coin,
+    Payee, Memo and the Decimal-text Quantity / Price / Coin In / Coin Out / Fee)
+    so Tab and click behave there EXACTLY as they do in the cash register. The
+    default delegate's bare QLineEdit gives neither the focus-select nor the
+    click-to-append distinction, which is one of the field-behaviour differences
+    this register had. Reading/writing is the default EditRole round-trip; only
+    the editor widget changes."""
+
+    def createEditor(self, parent, option, index):
+        return _FocusSelectLineEdit(parent)
+
+
 class DateDelegate(QStyledItemDelegate):
     """Edit a date cell with a calendar popup, in the user's chosen date format.
     The cell DISPLAYS that format while the model stores/edits ISO YYYY-MM-DD, so

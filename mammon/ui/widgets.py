@@ -38,7 +38,9 @@ from mammon import webslinger as webslinger_mod
 from mammon.ui import prefs, sounds, style
 from mammon.ui.import_review_widget import ImportReviewPanel
 from mammon.ui.delegates import (
-    CategoryDelegate, ChoiceDelegate, DateDelegate, MoneyDelegate, NoWheelComboBox,
+    CategoryDelegate, ChoiceDelegate, DateDelegate, FocusSelectDelegate,
+    MoneyDelegate, NoWheelComboBox,
+    TransferAccountDelegate,
     NoWheelDoubleSpinBox, PayeeCompleter, PayeeTwoLineDelegate, SplitAmountSpinBox,
     TagDelegate, TwoLineHeaderView, _accept_active_completion, accept_category_text,
     date_edit_iso, make_category_combo, make_date_edit, refresh_date_format,
@@ -3719,9 +3721,17 @@ class CryptoRegisterWidget(QWidget):
     Kept API-compatible with :class:`RegisterWidget` so MainWindow can stack it in
     ``self._registers`` / ``self.stack`` interchangeably: it exposes a ``changed``
     signal, a ``model`` with ``reload()``, and ``apply_display_prefs`` /
-    ``set_view_mode`` / ``select_txn``. The model is a READ-ONLY projection over
-    :mod:`mammon.crypto` (events are entered by import); Get Quotes prices the
-    coins and the Holdings button opens :class:`CryptoHoldingsDialog`."""
+    ``set_view_mode`` / ``select_txn``. Get Quotes prices the coins and the
+    Holdings button opens :class:`CryptoHoldingsDialog`.
+
+    BEHAVIOUR MATCHES THE CASH REGISTER (the parity pass): a right-click context
+    menu edits/deletes a row (Edit… opens :class:`CryptoTransactionDialog`,
+    Delete removes both legs of a transfer/swap), a trailing blank quick-entry
+    row enters a new event by hand, a single click opens the editor and Tab and
+    click select-all the same way, and the review list auto-renames the payee
+    through the same rename tree the cash review uses. Only the CONTENT differs
+    (coin quantities, coin fees, no price/amount/cash column on a wallet); every
+    write still goes through :mod:`mammon.crypto`, the sole crypto writer."""
 
     changed = pyqtSignal()               # kept for the register-stack contract
     holdingsRequested = pyqtSignal(int)  # account_id
@@ -3792,7 +3802,24 @@ class CryptoRegisterWidget(QWidget):
         self.view.setAlternatingRowColors(True)
         self.view.verticalHeader().setVisible(False)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # Field behaviour matches the cash register exactly (the whole point of
+        # the parity pass): the edit triggers are keyboard-only, and a SINGLE
+        # click opens the editor through `_on_cell_clicked` (not Qt's built-in
+        # DoubleClicked/SelectedClicked triggers), so the click-to-edit path and
+        # the Tab path agree -- and `flags` still gates which cells can open at
+        # all (the correctable posted columns, the pending review row, the blank
+        # quick-entry row).
+        self.view.setEditTriggers(
+            QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
+        self.view.clicked.connect(self._on_cell_clicked)
+        # Right-click a row for Edit / Delete / New, the crypto twin of the cash
+        # register's context menu. `QMenu` (the module global) is used so tests
+        # can monkeypatch `widgets.QMenu` to intercept the menu, exactly as they
+        # do for the cash register.
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._context_menu)
+        self.model.committed.connect(self._on_model_committed)
+        self.model.error.connect(self._on_model_error)
         self._configure_columns()
         layout.addWidget(self.view)
 
@@ -3810,10 +3837,11 @@ class CryptoRegisterWidget(QWidget):
         # per-row accept/discard before ANYTHING is written. Without it, a crypto
         # account's review_items lit the sidebar dot but had no widget to mount
         # them and the Review... action stayed permanently disabled (it is only
-        # ever re-enabled from _sync_review_action, which this class lacked). The
-        # crypto grid is READ-ONLY -- no in-place pending-row editing -- so a NEW
-        # row is accepted with the importer's mapped values as-is rather than
-        # through an editable register line the way the cash register does.
+        # ever re-enabled from _sync_review_action, which this class lacked). A
+        # NEW row opens an editable PENDING register line (its judgement fields --
+        # action, payee, memo, transfer -- are correctable, and its payee is
+        # auto-renamed through the same rename tree the cash review uses) before
+        # it is accepted, exactly as the cash register does.
         from .import_review_widget import ImportReviewPanel
         self.review_panel = ImportReviewPanel(conn, account_id, self)
         self.review_panel.changed.connect(self._on_review_changed)
@@ -3826,11 +3854,42 @@ class CryptoRegisterWidget(QWidget):
         self.view.installEventFilter(self)
         # The Action cell of a pending row is a closed vocabulary the domain
         # layer validates, so it is PICKED, never typed (see ChoiceDelegate).
-        act_col = self.model.column_index(CryptoRegisterModel.ACTION)
+        M = CryptoRegisterModel
+        act_col = self.model.column_index(M.ACTION)
         if act_col >= 0:
             self.view.setItemDelegateForColumn(
-                act_col, ChoiceDelegate(lambda _i: self.model.pending_actions(),
-                                        self.view))
+                act_col,
+                ChoiceDelegate(lambda i: self.model.actions_for_row(i.row()),
+                               self.view))
+        # The transfer field autocompletes to account names -- the same editor
+        # the cash register's category/transfer cell uses, minus the categories.
+        xfer_col = self.model.column_index(M.TRANSFER)
+        if xfer_col >= 0:
+            self.view.setItemDelegateForColumn(
+                xfer_col, TransferAccountDelegate(self.view))
+        # Date opens the calendar/type editor; the free-text and coin-quantity
+        # cells get the focus-select editor the cash register uses, so Tab and
+        # click behave identically here (Tab replaces, a click appends). These
+        # only ever OPEN where `flags` allows -- the blank quick-entry row and
+        # the correctable posted/pending columns.
+        date_col = self.model.column_index(M.DATE)
+        if date_col >= 0:
+            self.view.setItemDelegateForColumn(date_col, DateDelegate(self.view))
+        for key in (M.COIN, M.PAYEE, M.MEMO, M.QUANTITY, M.PRICE,
+                    M.AMOUNT, M.COIN_IN, M.COIN_OUT, M.FEE):
+            col = self.model.column_index(key)
+            if col >= 0:
+                self.view.setItemDelegateForColumn(
+                    col, FocusSelectDelegate(self.view))
+        # An Enter pressed INSIDE a cell editor closes it with SubmitModelCache;
+        # on the blank quick-entry row that must commit the new transaction, the
+        # same way the cash register commits its blank row on Enter-in-cell.
+        seen = set()
+        for c in range(self.model.columnCount()):
+            d = self.view.itemDelegateForColumn(c) or self.view.itemDelegate()
+            if d is not None and id(d) not in seen:
+                seen.add(id(d))
+                d.closeEditor.connect(self._on_editor_closed)
         layout.addWidget(self.review_panel)
 
         self._refresh_header()
@@ -3871,7 +3930,8 @@ class CryptoRegisterWidget(QWidget):
                 continue
             hh.setSectionResizeMode(col, QHeaderView.Fixed)
             self.view.setColumnWidth(col, width)
-        for key, width in ((M.ACTION, 104), (M.COIN, 120), (M.MEMO, 160)):
+        for key, width in ((M.ACTION, 104), (M.COIN, 120), (M.MEMO, 160),
+                           (M.TRANSFER, 140)):
             col = self.model.column_index(key)
             if col < 0:
                 continue
@@ -3998,9 +4058,10 @@ class CryptoRegisterWidget(QWidget):
         self.view.scrollToBottom()
 
     def has_open_editor(self) -> bool:
-        """Always False: the crypto register is read-only, so no cell editor
-        ever opens (and the stack never needs to resolve one on the way out)."""
-        return False
+        """Whether a cell editor is open, so the register stack can resolve it
+        before switching away. No longer always False: the three correctable
+        columns really do open editors."""
+        return self.view.state() == QAbstractItemView.EditingState
 
     def refresh(self) -> None:
         """Re-read the register, the coin filter and the header totals."""
@@ -4122,6 +4183,43 @@ class CryptoRegisterWidget(QWidget):
         self.view.selectRow(row)
         self.view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
 
+    def _link_transfer(self, txn_id, name) -> None:
+        """Apply the pending line's transfer choice to the row it just created.
+        Reported, never raised: the transaction is already posted and must not be
+        lost to a name that did not resolve."""
+        plain = CryptoRegisterModel._TRANSFER_RE.sub(
+            r"\g<name>", str(name)).strip()
+        other = self.model._account_id_for_name(plain)
+        if other is None:
+            self._on_model_error(
+                "Saved the row, but no account is named %r, so no transfer was "
+                "recorded." % name)
+            return
+        try:
+            crypto.link_as_transfer(self.conn, int(txn_id), other)
+        except Exception as exc:
+            self._on_model_error(
+                "Saved the row, but could not link the transfer: %s" % exc)
+            return
+        self.model.reload()
+        self._refresh_header()
+
+    def _on_model_committed(self) -> None:
+        """A correction reached the database: revalue the header (an action or a
+        transfer link changes what the account holds) and tell the register stack
+        so the sidebar balance and any linked account follow."""
+        self._reload_coin_filter()
+        self._refresh_header()
+        self.changed.emit()
+
+    def _on_model_error(self, message) -> None:
+        """Report a refused edit. Shown from a queued slot, never from inside
+        ``setModelData``: a modal there opens a nested event loop that lets the
+        editor teardown finish and frees the frame's own editor (CLAUDE.md)."""
+        QTimer.singleShot(
+            0, lambda: QMessageBox.warning(self, "Cannot change this row",
+                                           str(message)))
+
     def _drop_accept_btn(self) -> None:
         """Remove the inline Accept button, tolerating a C++ object Qt has
         already deleted out from under us: ``set_pending``/``reload``'s
@@ -4165,24 +4263,37 @@ class CryptoRegisterWidget(QWidget):
         try:
             entry = self.model.pending_entry()
             values = self.model.pending_values()
+            transfer = values.pop("transfer_account", None)
             self._drop_accept_btn()
             self.model.clear_pending()
-            return self.review_panel.accept_new(entry, values)
+            txn_id = self.review_panel.accept_new(entry, values)
+            # A transfer can only be LINKED once both sides are real rows, so
+            # the pending line's choice is applied here, after the save.
+            if transfer and txn_id and txn_id > 0:
+                self._link_transfer(txn_id, transfer)
+            return txn_id
         finally:
             self._accepting = False
 
     def eventFilter(self, obj, event):
-        """Enter/Return on the pending line accepts it, as in the cash register.
-        Any open cell editor is force-committed FIRST: the Action cell is a combo
-        and a combo SWALLOWS Enter, so without this a just-picked action would
-        revert unless the user first clicked another cell."""
+        """Enter/Return on the pending line accepts it, and on the blank
+        quick-entry line commits it -- exactly as the cash register does. Any open
+        cell editor is force-committed FIRST: the Action cell is a combo and a
+        combo SWALLOWS Enter, so without this a just-picked action would revert
+        unless the user first clicked another cell."""
         if (obj is self.view and event.type() == QEvent.KeyPress
-                and event.key() in (Qt.Key_Return, Qt.Key_Enter)
-                and self.model.has_pending()
-                and self.model.is_pending_row(self.view.currentIndex().row())):
-            self._commit_open_editor()
-            self._accept_pending()
-            return True
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            row = self.view.currentIndex().row()
+            if self.model.has_pending() and self.model.is_pending_row(row):
+                self._commit_open_editor()
+                self._accept_pending()
+                return True
+            if self.model.is_blank_row(row):
+                self._commit_open_editor()
+                # Deferred: the just-committed editor is still tearing down, and
+                # commit_blank resets the model -- the setModelData heap hazard.
+                QTimer.singleShot(0, self._commit_blank_row)
+                return True
         return super().eventFilter(obj, event)
 
     def _commit_open_editor(self) -> None:
@@ -4196,6 +4307,108 @@ class CryptoRegisterWidget(QWidget):
         delegate = self.view.itemDelegateForColumn(col) or self.view.itemDelegate()
         delegate.commitData.emit(editor)
         delegate.closeEditor.emit(editor)
+
+    def _on_editor_closed(self, editor, hint=QAbstractItemDelegate.NoHint) -> None:
+        """Commit the blank quick-entry row when an editor on it is closed by
+        Enter (SubmitModelCache) -- the crypto twin of RegisterWidget's handler,
+        so Enter INSIDE a cell records the new transaction, not just Enter with no
+        editor open. Other close hints (Tab, focus-out, Escape) just move on."""
+        if hint != QAbstractItemDelegate.SubmitModelCache:
+            return
+        if self.model.is_blank_row(self.view.currentIndex().row()):
+            QTimer.singleShot(0, self._commit_blank_row)
+
+    def _commit_blank_row(self) -> None:
+        """Record the blank quick-entry row through the model (which writes via
+        mammon.crypto). The model's ``committed`` signal refreshes the header and
+        the sidebar, so nothing else is needed here."""
+        self.model.commit_blank()
+
+    # ---- click-to-edit and context menu (cash-register parity) -----------
+    def _on_cell_clicked(self, index) -> None:
+        """Open the editor on a SINGLE click, matching the cash register. `flags`
+        decides whether the cell can edit at all, so a click on a read-only cell
+        (a derived balance, a posted number) does nothing."""
+        if not index.isValid():
+            return
+        if not (self.model.flags(index) & Qt.ItemIsEditable):
+            return
+        self._edit_cell(index)
+
+    def _edit_cell(self, index) -> None:
+        """Open ``index``'s editor and select its contents, so a click behaves
+        exactly like the cash register's click-to-edit. The live editor is found
+        through the viewport's focus widget (not QWidget.focusWidget), the same
+        guard the cash register uses against a dangling editor."""
+        self.view.edit(index)
+        editor = self.view.viewport().focusWidget()
+        if editor is not None and hasattr(editor, "selectAll"):
+            editor.selectAll()
+
+    def _context_menu(self, pos) -> None:
+        """Right-click a row for New / Edit / Delete -- the crypto twin of the
+        cash register's context menu, restricted to what a crypto row supports
+        (there is no split or transfer-mirror jump to offer here)."""
+        index = self.view.indexAt(pos)
+        menu = QMenu(self)
+        act_new = menu.addAction("New…")
+        act_edit = menu.addAction("Edit…")
+        act_delete = menu.addAction("Delete")
+        editable_row = (index.isValid()
+                        and not self.model.is_blank_row(index.row())
+                        and not self.model.is_pending_row(index.row()))
+        act_edit.setEnabled(editable_row)
+        act_delete.setEnabled(editable_row)
+        chosen = menu.exec_(self.view.viewport().mapToGlobal(pos))
+        if chosen == act_new:
+            self._start_new_row()
+        elif chosen == act_edit and editable_row:
+            self._edit_row(index.row())
+        elif chosen == act_delete and editable_row:
+            self._delete_row(index.row())
+
+    def _edit_row(self, row) -> None:
+        """Open the full edit dialog for a posted crypto event and apply the
+        changes through the model (which writes via crypto.update_event). This is
+        where the fields that are facts -- date, coin, quantity, price, fee -- are
+        corrected; they are not inline-editable, exactly so a stray click cannot
+        rewrite the chain's numbers."""
+        if row < 0 or self.model.is_blank_row(row) or self.model.is_pending_row(row):
+            return
+        txn = self.model.txn_at(row)
+        if txn is None:
+            return
+        dlg = CryptoTransactionDialog(
+            self.model, txn, self.model.actions_for_row(row), parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.model.apply_edit(int(txn["id"]), dlg.values())
+
+    def _delete_row(self, row) -> None:
+        """Delete a posted crypto event after confirmation (both legs of a
+        transfer or all legs of a swap go together, per crypto.delete_event)."""
+        txn = self.model.txn_at(row)
+        if txn is None:
+            return
+        note = ""
+        if txn.get("transfer_pair_id") is not None:
+            note = " (both legs of the transfer)"
+        elif txn.get("swap_group_id") is not None:
+            note = " (both legs of the swap)"
+        if QMessageBox.question(
+                self, "Delete transaction",
+                f"Delete the {txn['date']} {txn['action']} row{note}?",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.model.delete_txn(int(txn["id"]))
+
+    def _start_new_row(self) -> None:
+        """Context-menu New…: put the cursor on the blank quick-entry row and open
+        its first cell, the crypto twin of the cash register's New… gesture."""
+        self._end_pending()
+        row = self.model.blank_row()
+        idx = self.model.index(row, 0)
+        self.view.setCurrentIndex(idx)
+        self.view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        self._edit_cell(idx)
 
     def _accept_new_direct(self, entry) -> None:
         """The panel's own Accept button on a NEW row. Route it through the
@@ -4256,6 +4469,105 @@ class CryptoRegisterWidget(QWidget):
         act = getattr(self.toolbar, "act_review", None)
         if act is not None:
             act.setEnabled(self.review_panel.has_pending())
+
+
+# ---------------------------------------------------------------------------
+# crypto edit dialog (context-menu Edit -> crypto.update_event)
+# ---------------------------------------------------------------------------
+class CryptoTransactionDialog(QDialog):
+    """Edit a posted crypto event's fields -- the crypto twin of the cash
+    register's TransactionDialog, reached from the context menu's Edit….
+
+    It exists because the register's inline editing deliberately leaves the
+    chain's NUMBERS (date, coin, quantity, price, fee) read-only, so a stray
+    click cannot rewrite recorded history; a deliberate correction still needs a
+    home, and this is it. Every field it exposes maps to a
+    :func:`crypto.update_event` key, and the register applies them through the
+    model (the sole crypto writer). The quantity is entered as a positive amount;
+    its sign follows the action (a removal is negative), so the user never has to
+    reason about the stored sign. Price/Amount are shown only for an EXCHANGE
+    account -- a wallet has no fiat leg to correct."""
+
+    def __init__(self, model, txn, actions, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit crypto transaction")
+        self._wallet = model.is_wallet
+        form = QFormLayout(self)
+        self.date_edit = make_date_edit(self, iso=str(txn.get("date") or ""))
+        form.addRow("Date", self.date_edit)
+        self.action_combo = QComboBox()
+        self.action_combo.addItems([str(a) for a in (actions or [])])
+        cur = str(txn.get("action") or "").upper()
+        i = self.action_combo.findText(cur)
+        if i < 0 and cur:
+            self.action_combo.addItem(cur)
+            i = self.action_combo.findText(cur)
+        if i >= 0:
+            self.action_combo.setCurrentIndex(i)
+        form.addRow("Action", self.action_combo)
+        self.coin_edit = QLineEdit(str(txn.get("symbol") or ""))
+        form.addRow("Coin", self.coin_edit)
+        # Quantity is shown as a positive magnitude; the sign is the action's.
+        qty = str(txn.get("quantity") or "").lstrip("+-")
+        self.qty_edit = QLineEdit(fmt_qty(qty) if qty else "")
+        form.addRow("Quantity", self.qty_edit)
+        self.price_edit = self.amount_edit = None
+        if not self._wallet:
+            self.price_edit = QLineEdit(
+                fmt_qty(txn.get("price")) if txn.get("price") else "")
+            form.addRow("Price", self.price_edit)
+            amt = txn.get("amount")
+            self.amount_edit = QLineEdit(fmt_cents(abs(amt)) if amt else "")
+            form.addRow("Amount", self.amount_edit)
+        fee = ""
+        if txn.get("fee_quantity"):
+            fee = f"{fmt_qty(txn.get('fee_quantity'))} {txn.get('fee_symbol') or ''}".strip()
+        self.fee_edit = QLineEdit(fee)
+        form.addRow("Fee", self.fee_edit)
+        self.payee_edit = QLineEdit(str(txn.get("payee") or ""))
+        form.addRow("Payee", self.payee_edit)
+        self.memo_edit = QLineEdit(str(txn.get("memo") or ""))
+        form.addRow("Memo", self.memo_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    @staticmethod
+    def _signed_amount(action, text):
+        s = str(text or "").strip()
+        if not s:
+            return None
+        cents = abs(parse_amount(s))
+        act = (action or "").upper()
+        if act in ("BUY", "BUYX", "WITHDRAW"):
+            return -cents
+        return cents
+
+    def values(self) -> dict:
+        """The edited fields as :func:`crypto.update_event` keyword arguments."""
+        action = self.action_combo.currentText().strip().upper()
+        out = {
+            "date": date_edit_iso(self.date_edit),
+            "action": action,
+            "symbol": self.coin_edit.text().strip().upper() or None,
+            "payee": self.payee_edit.text().strip() or None,
+            "memo": self.memo_edit.text().strip() or None,
+        }
+        qty = self.qty_edit.text().replace(",", "").strip().lstrip("+-")
+        if qty:
+            sign = "-" if action in crypto.REMOVE_ACTIONS else ""
+            out["quantity"] = sign + qty
+        else:
+            out["quantity"] = None
+        if not self._wallet:
+            out["price"] = self.price_edit.text().strip() or None
+            out["amount"] = self._signed_amount(action, self.amount_edit.text())
+        fee_sym, fee_qty = CryptoRegisterModel._parse_fee(
+            self.fee_edit.text(), self.coin_edit.text().strip().upper())
+        out["fee_symbol"] = fee_sym
+        out["fee_quantity"] = fee_qty
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -8000,16 +8312,18 @@ class MainWindow(QMainWindow):
         on-chain ``tx_hash``, a globally unique immutable key, so re-importing an
         export is a no-op rather than a pile of near-duplicates.
 
-        An EXCHANGE account keeps the fiat-sleeve model (buys, sells, swaps and
-        cost basis), which the coin importer books directly through
-        :mod:`mammon.crypto`; it reports as a direct import the way a
-        multi-account QIF does.
+        An EXCHANGE export (a custodial transaction history) goes through the
+        SAME queue, carrying the fiat sleeve a wallet does not have: a trade's
+        cash leg, a bank deposit, a per-venue transfer. Nothing writes through
+        unreviewed -- an exchange's rows need MORE judgement than a wallet's, not
+        less, because the source's product names ("Pro Deposit", "Exchange
+        Withdrawal") only approximate what happened.
 
         Returns the same counts dict the cash path returns, or ``None`` when the
-        file could not be read as an on-chain export."""
+        file could not be read as either crypto export."""
         from mammon.importers import crypto_core
         try:
-            records = crypto_core.parse_export_file(path)
+            shape, records = crypto_core.parse_export_file(path)
         except Exception as exc:
             # Report the REASON, both when this file is alone and when it is one
             # of a batch. Returning a bare None lost it, and the batch reporter
@@ -8024,23 +8338,12 @@ class MainWindow(QMainWindow):
                     + chr(10) + chr(10) + str(exc))
                 return None
             return {"parsed": 0, "inserted": 0, "prior": {}, "error": str(exc)}
-        if not crypto.is_wallet_account(crypto.get_account(self.conn, account_id)):
-            # Exchange kind: the fiat-sleeve importer writes straight through.
-            try:
-                res = crypto_core.import_crypto_records(
-                    self.conn, records, account_id)
-            except Exception as exc:
-                if report:
-                    QMessageBox.warning(self, "Import failed", str(exc))
-                return None
-            self._refresh_all()
-            if report:
-                QMessageBox.information(
-                    self, "Import complete",
-                    f"{res.imported} on-chain row(s) added, "
-                    f"{res.duplicates} already present (skipped).")
-            return {"bulk": True, "direct_added": res.imported,
-                    "direct_matched": res.duplicates, "kind": "crypto"}
+        # The FILE decides which reader ran; the ACCOUNT decides nothing here. A
+        # user with coin at an exchange and coin in a wallet holds both kinds of
+        # document, and picking the parser by account kind hands one of them a
+        # reader that cannot read it and then blames the file.
+        builder = (import_review.build_exchange_review if shape == "exchange"
+                   else import_review.build_crypto_review)
         # `parsed` is rows the file HELD; `inserted` is rows newly QUEUED. They are
         # different numbers and reporting one as the other is a lie: a re-import
         # of an already-imported export queues nothing, and calling that "0 rows
@@ -8049,7 +8352,7 @@ class MainWindow(QMainWindow):
         # same distinction in _import_report.)
         parsed, prior = import_review.crypto_import_counts(
             self.conn, account_id, records)
-        entries = import_review.build_crypto_review(self.conn, account_id, records)
+        entries = builder(self.conn, account_id, records)
         inserted = import_review.persist_entries(
             self.conn, account_id, entries, batch_id=batch_id)
         result = {"parsed": parsed, "inserted": inserted, "prior": prior}

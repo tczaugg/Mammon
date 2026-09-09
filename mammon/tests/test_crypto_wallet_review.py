@@ -239,8 +239,10 @@ def test_current_etherscan_column_names_are_read(qapp, conn, wallet):
     assert by_payee[RECIPIENT].action == "SEND"
     # The extra trailing Method column must not shift the fee off its own column.
     assert Decimal(by_payee[RECIPIENT].fee_quantity) == Decimal("0.0006")
-    # The two spellings are the same file to the parser, field for field.
-    old = crypto_core.parse_export_file(FIXTURE)
+    # The two spellings are the same file to the parser, field for field -- and
+    # both route to the WALLET reader on the file's own signature.
+    shape, old = crypto_core.parse_export_file(FIXTURE)
+    assert shape == "wallet"
     assert [r.direction for r in old] == ["in", "in", "out"]
 
 
@@ -434,7 +436,8 @@ def test_wallet_register_drops_price_amount_and_cash_bal(qapp, conn, wallet):
     assert "Price" not in headers
     assert "Amount" not in headers
     assert "Cash Bal" not in headers
-    assert {"Coin In", "Coin Out", "Coin Bal", "Fee", "Payee"} <= set(headers)
+    assert {"Coin In", "Coin Out", "Coin Bal", "Fee", "Payee",
+            "Transfer"} <= set(headers)
     for key in (CryptoRegisterModel.PRICE, CryptoRegisterModel.AMOUNT,
                 CryptoRegisterModel.CASH_BAL):
         assert m.column_index(key) == -1
@@ -466,8 +469,11 @@ def test_exchange_rows_also_carry_the_counterparty_as_payee(qapp, conn, exchange
         res = _import(win, exchange)
     finally:
         win.close()
-    # An exchange import writes through rather than queueing for review.
-    assert res["bulk"] and res["direct_added"] == 3
+    # An exchange import goes through the SAME review queue a wallet's does --
+    # its rows need MORE judgement than a wallet's, not less, because the
+    # source's product names only approximate what happened.
+    assert res["parsed"] == 3 and res["inserted"] == 3
+    import_review.accept_all(conn, exchange)
     rows = list(conn.execute(
         "SELECT action, payee, amount, price FROM crypto_transactions "
         "WHERE account_id=? ORDER BY date", (exchange,)))
@@ -483,10 +489,12 @@ def test_exchange_register_keeps_the_fiat_columns(qapp, conn, exchange):
     m = CryptoRegisterModel(conn, exchange)
     assert not m.is_wallet
     headers = [m.headerData(c, 1) for c in range(m.columnCount())]
-    assert headers == CryptoRegisterModel.HEADERS
-    assert {"Price", "Amount", "Cash Bal"} <= set(headers)
-    # The class constants still read as positions for the exchange layout.
-    assert m.column_index(CryptoRegisterModel.AMOUNT) == CryptoRegisterModel.AMOUNT
+    assert {"Price", "Amount", "Cash Bal", "Memo", "Transfer"} <= set(headers)
+    # Columns are addressed by KEY, never by the bare constant: the two kinds
+    # show different sets, so a position means different things in each.
+    for key in (CryptoRegisterModel.AMOUNT, CryptoRegisterModel.PRICE,
+                CryptoRegisterModel.CASH_BAL):
+        assert m.column_index(key) >= 0
 
 
 def test_wallet_surfaces_show_no_cash(qapp, conn, wallet):
@@ -539,7 +547,11 @@ def test_selecting_a_review_row_opens_a_pending_register_line(qapp, conn, wallet
         # the hidden-panel emit used to lose.
         assert m.has_pending()
         row = m.pending_row()
-        assert row == m.rowCount() - 1
+        # The pending review line sits just before the trailing blank quick-entry
+        # row (the cash register lays its pending and blank rows out the same way).
+        assert m.is_pending_row(row)
+        assert row == m.rowCount() - 2
+        assert m.is_blank_row(m.rowCount() - 1)
         cols = [m.headerData(c, 1) for c in range(m.columnCount())]
 
         def cell(name):
@@ -556,7 +568,7 @@ def test_selecting_a_review_row_opens_a_pending_register_line(qapp, conn, wallet
         # fee are what the chain reported; editing them would invent history.
         editable = [cols[c] for c in range(m.columnCount())
                     if m.flags(m.index(row, c)) & Qt.ItemIsEditable]
-        assert editable == ["Action", "Payee", "Memo"]
+        assert editable == ["Action", "Payee", "Transfer", "Memo"]
 
         # The action choices are scoped to the direction the chain already fixed:
         # a coin-in row is where the real judgement lives.
