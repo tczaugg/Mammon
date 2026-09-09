@@ -1204,7 +1204,26 @@ floats and no money math in the UI layer.
   skipped, or it is new — inventing a fuzzy match would manufacture ambiguity the
   chain does not have. Accepting routes through `import_review._save_crypto` into
   `crypto.record_wallet_credit` / `record_wallet_debit`, keeping `crypto.py` the
-  sole writer.
+  sole writer. `_crypto_hash_state` is the single authority on what counts as a
+  duplicate, so what gets skipped and what gets reported as skipped cannot
+  disagree; a DISCARDED row is deliberately not a duplicate (discard means "not
+  now", not "never again", the same policy the cash path states).
+- **Rows READ and rows QUEUED are different numbers, and reporting one as the
+  other is a lie.** A re-import of an already-imported export queues nothing;
+  calling that "0 rows read" made the zero-row message explain it as a layout
+  problem, for a file that had just been read perfectly. `crypto_import_counts`
+  reports what the export HELD plus the state of the rows already known ("130
+  already in the register"), so the "Already imported" wording fires. The cash
+  path documents the same distinction in `MainWindow._import_report`.
+- **A leftover cash-shaped review row cannot be added to a wallet.** A ledger
+  that imported a by-address export before on-chain routing existed still holds
+  the rows that import queued: a fiat amount (often the BLOCK NUMBER the generic
+  importer mistook for money) and no coin. `save_new` dispatches on
+  `mapped.is_crypto`, so accepting one takes the CASH branch and posts that
+  amount against an account with no cash sleeve. The review pane names such a row
+  `(not on-chain)` rather than drawing four blank coin cells, opens no pending
+  line for it, and Accept refuses with the reason and the remedy (discard, then
+  re-import).
 - **Boundary (not yet built): the webSlinger SCRAPE path is still cash-shaped for
   crypto.** A download whose script DROPS A FILE (EXPORT mode) goes through
   `_ingest_file_via_review` and therefore gets the coin-native routing above. A

@@ -4090,6 +4090,14 @@ class CryptoRegisterWidget(QWidget):
             self._end_pending()
             self._sync_review_action()
             return
+        if not getattr(entry.mapped, "is_crypto", False):
+            # A leftover cash-shaped row (queued for this wallet before on-chain
+            # routing existed). It carries a fiat amount and no coin: there is
+            # nothing to show on a coin-native line, and accepting it would post
+            # that amount into a cash register this account does not have.
+            self._end_pending()
+            self._sync_review_action()
+            return
         self._show_pending(entry)
         self._sync_review_action()
 
@@ -4193,6 +4201,21 @@ class CryptoRegisterWidget(QWidget):
         """The panel's own Accept button on a NEW row. Route it through the
         pending line when that line is the same entry, so a correction made there
         is what gets committed; otherwise post the row as the importer mapped it."""
+        if not getattr(entry.mapped, "is_crypto", False):
+            # REFUSE a leftover cash-shaped row. save_new dispatches on
+            # mapped.is_crypto, so accepting one here would take the CASH branch
+            # and post its fiat amount as an ordinary transaction against a
+            # wallet -- an account with no cash sleeve, from a row whose "amount"
+            # was a block number the generic importer mistook for money.
+            QMessageBox.warning(
+                self, "Cannot add this row",
+                "This row was queued by the cash importer before on-chain "
+                "routing existed, so it carries a dollar amount and no coin. "
+                "A wallet holds no cash, and that amount is not a real one."
+                + chr(10) + chr(10) +
+                "Discard it (right-click, or Discard All) and import the "
+                "export again -- it will come back as coin.")
+            return
         if (self.model.has_pending()
                 and self.model.pending_entry() is entry):
             self._accept_pending()
