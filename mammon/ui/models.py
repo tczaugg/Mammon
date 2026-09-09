@@ -1990,17 +1990,50 @@ class CryptoRegisterModel(QAbstractTableModel):
     and the gas ``fee`` label; the view holds NO quantity or cents math. A swap's
     two legs render with a shared ``OUT->IN`` label so they read as one paired
     trade; a wallet transfer renders as ``[Other Wallet]`` (the mirror model, in
-    coin). READ-ONLY: crypto events are entered by import, not inline editing."""
+    coin). READ-ONLY: crypto events are entered by import, not inline editing.
 
+    THE COLUMN SET DEPENDS ON THE ACCOUNT KIND, and that is the whole point of the
+    redesign. An EXCHANGE account is custodial: it holds a fiat cash sleeve, buys
+    and sells coin for dollars, and its rows genuinely carry a per-unit price, a
+    signed dollar amount and a running cash balance. A WALLET is a single address:
+    coin arrives and leaves, the network fee is paid IN THE COIN, and there is no
+    dollar leg anywhere -- so Price, Amount and Cash Bal are not merely empty for
+    it, they are meaningless, and showing them invites a reading of the register
+    that is simply false. Its increases and decreases get their own columns (the
+    source's Value_IN / Value_OUT), because on-chain those are different events
+    with different counterparties and one signed column hides that.
+
+    USD is not absent from a wallet, it is just not on the ROW: each coin is a
+    security valued at quantity x market price, and that valuation happens at the
+    holdings and net-worth layers."""
+
+    # Stable column KEYS. They are not positions: each kind lists the keys it
+    # shows, in order, and the model maps position -> key. The exchange list is
+    # deliberately keys 0..9 in order, so the constants still read as indices for
+    # an exchange account (and every existing caller keeps working).
     (DATE, ACTION, COIN, PAYEE, QUANTITY, PRICE,
-     COIN_BAL, AMOUNT, CASH_BAL, FEE) = range(10)
+     COIN_BAL, AMOUNT, CASH_BAL, FEE, COIN_IN, COIN_OUT, MEMO) = range(13)
+
     # The COIN column does double duty: a trade/income shows its coin symbol, a
     # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair. PAYEE is
     # the on-chain counterparty (From on a coin credit, To on a coin debit) that
     # crypto.register_rows carries straight through from crypto_transactions.payee.
+    _HEADER_TEXT = {
+        DATE: "Date", ACTION: "Action", COIN: "Coin / Wallet", PAYEE: "Payee",
+        QUANTITY: "Quantity", PRICE: "Price", COIN_BAL: "Coin Bal",
+        AMOUNT: "Amount", CASH_BAL: "Cash Bal", FEE: "Fee",
+        COIN_IN: "Coin In", COIN_OUT: "Coin Out", MEMO: "Memo",
+    }
+    _EXCHANGE_COLUMNS = (DATE, ACTION, COIN, PAYEE, QUANTITY, PRICE,
+                         COIN_BAL, AMOUNT, CASH_BAL, FEE)
+    _WALLET_COLUMNS = (DATE, ACTION, COIN, PAYEE, MEMO,
+                       COIN_OUT, COIN_IN, COIN_BAL, FEE)
+    # Kept for the exchange layout's callers; HEADERS is the exchange header row.
+    # Spelled out rather than derived: a class-body comprehension cannot see the
+    # class's own names.
     HEADERS = ["Date", "Action", "Coin / Wallet", "Payee", "Quantity", "Price",
                "Coin Bal", "Amount", "Cash Bal", "Fee"]
-    _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL)
+    _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL, COIN_IN, COIN_OUT)
 
     def __init__(self, conn, account_id, parent=None):
         super().__init__(parent)
@@ -2008,7 +2041,122 @@ class CryptoRegisterModel(QAbstractTableModel):
         self.account_id = account_id
         self._rows: list = []
         self._symbol_filter = None        # None -> show every coin
+        self.is_wallet = crypto.is_wallet_account(
+            crypto.get_account(conn, account_id))
+        self._columns = (self._WALLET_COLUMNS if self.is_wallet
+                         else self._EXCHANGE_COLUMNS)
+        # The not-yet-accepted review row, shown at the bottom of the register
+        # before it is committed -- the same gesture the cash and investment
+        # registers offer. {"entry": ReviewEntry, "buf": {field: text}} or None.
+        self._pending = None
         self.reload()
+
+    # ---- pending review row ------------------------------------------------
+    # What a user may CORRECT on a chain row, and nothing more. Date, coin,
+    # quantity and fee are facts the chain reported -- editing them would be
+    # inventing history, and the review list is meant to be ground truth. What is
+    # genuinely a judgement is the ACTION (the chain cannot tell a plain receive
+    # from a staking reward, an airdrop or mined coin), the PAYEE (an address is
+    # the truthful default, but a name the user recognises is more useful), and
+    # the MEMO. Those three are exactly what import_review._save_crypto accepts
+    # as overrides.
+    _PENDING_EDITABLE = (ACTION, PAYEE, MEMO)
+
+    def set_pending(self, entry) -> None:
+        """Open the not-yet-accepted row at the bottom for a NEW review entry,
+        seeded from what the importer read off the chain."""
+        m = entry.mapped
+        self.beginResetModel()
+        self._pending = {"entry": entry, "buf": {
+            "action": (m.action or "RECEIVE").upper(),
+            "payee": m.payee or "",
+            "memo": m.memo or "",
+        }}
+        self.endResetModel()
+
+    def clear_pending(self) -> None:
+        if self._pending is None:
+            return
+        self.beginResetModel()
+        self._pending = None
+        self.endResetModel()
+
+    def has_pending(self) -> bool:
+        return self._pending is not None
+
+    def pending_row(self) -> int:
+        """Index of the pending row -- always last, after the real history."""
+        return len(self._rows) if self._pending is not None else -1
+
+    def is_pending_row(self, row) -> bool:
+        return self._pending is not None and row == len(self._rows)
+
+    def pending_entry(self):
+        return self._pending["entry"] if self._pending else None
+
+    def pending_values(self) -> dict:
+        """The edited fields, as :func:`import_review.save_new` takes them. No
+        quantity, price or amount: a wallet row's numbers come from the chain and
+        are not editable, and there is no fiat leg to state."""
+        if self._pending is None:
+            return {}
+        buf = self._pending["buf"]
+        return {
+            "action": (buf.get("action") or "").strip().upper(),
+            "payee": (buf.get("payee") or "").strip(),
+            "memo": (buf.get("memo") or "").strip() or None,
+        }
+
+    def pending_actions(self) -> list:
+        """The actions the pending row may take, given the DIRECTION the chain
+        already fixed. A coin-out row can only be a send; a coin-in row is where
+        the real choice lives (receive / reward / interest / airdrop / mining /
+        fork), because the chain shows coin arriving and cannot say why."""
+        if self._pending is None:
+            return []
+        act = (self._pending["entry"].mapped.action or "").strip().upper()
+        if act in crypto.WALLET_DEBIT_ACTIONS:
+            return sorted(crypto.WALLET_DEBIT_ACTIONS)
+        return sorted(crypto.WALLET_CREDIT_ACTIONS)
+
+    def _pending_text(self, col) -> str:
+        """One cell of the pending row. The chain-supplied fields render exactly
+        as a posted row would; the three editable ones come from the buffer."""
+        m = self._pending["entry"].mapped
+        buf = self._pending["buf"]
+        if col == self.DATE:
+            return fmt_date(m.date)
+        if col == self.ACTION:
+            return buf.get("action", "")
+        if col == self.COIN:
+            return m.symbol or ""
+        if col == self.PAYEE:
+            return buf.get("payee", "")
+        if col == self.MEMO:
+            return buf.get("memo", "")
+        if col in (self.COIN_IN, self.COIN_OUT, self.QUANTITY):
+            qty = (m.quantity or "").strip()
+            if not qty:
+                return ""
+            out = buf.get("action", "").upper() in crypto.WALLET_DEBIT_ACTIONS
+            if col == self.QUANTITY:
+                return fmt_qty(("-" + qty) if out else qty)
+            if out != (col == self.COIN_OUT):
+                return ""
+            return fmt_qty(qty)
+        if col == self.FEE:
+            return (f"{fmt_qty(m.fee_quantity)} {m.fee_symbol}".strip()
+                    if m.fee_quantity else "")
+        return ""
+
+    def column_index(self, key) -> int:
+        """Where a column KEY sits in this account's layout, or -1 when the kind
+        does not show it. The view configures widths through this rather than
+        through the constants, so a wallet cannot be handed an exchange column."""
+        try:
+            return self._columns.index(key)
+        except ValueError:
+            return -1
 
     def set_symbol_filter(self, symbol):
         """Restrict the register to one coin (``None`` shows all). The running
@@ -2041,29 +2189,61 @@ class CryptoRegisterModel(QAbstractTableModel):
 
     # ---- QAbstractTableModel API -----------------------------------------
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._rows)
+        if parent.isValid():
+            return 0
+        return len(self._rows) + (1 if self._pending is not None else 0)
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.HEADERS)
+        return 0 if parent.isValid() else len(self._columns)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self.HEADERS[section]
+            if 0 <= section < len(self._columns):
+                return self._HEADER_TEXT[self._columns[section]]
         return None
 
     def flags(self, index):
-        # Read-only: crypto events are entered by import, not inline editing.
+        # POSTED rows are read-only: a crypto event is entered by import, and
+        # its numbers are what the chain reported. The PENDING review row is the
+        # exception, and only in the three fields that are a judgement rather
+        # than a fact (see _PENDING_EDITABLE).
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        base = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if not self.is_pending_row(index.row()):
+            return base
+        if not (0 <= index.column() < len(self._columns)):
+            return base
+        if self._columns[index.column()] in self._PENDING_EDITABLE:
+            return base | Qt.ItemIsEditable
+        return base
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+        if not index.isValid() or not (0 <= index.row() < self.rowCount()):
+            return None
+        if not (0 <= index.column() < len(self._columns)):
+            return None
+        col = self._columns[index.column()]
+        if self.is_pending_row(index.row()):
+            if role in (Qt.DisplayRole, Qt.EditRole):
+                return self._pending_text(col)
+            if role == Qt.ToolTipRole:
+                return self._pending_text(col) or None
+            if role == Qt.TextAlignmentRole and col in self._NUMERIC:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ForegroundRole:
+                ct = style.cell_text_color()
+                if ct:
+                    return QBrush(QColor(ct))
             return None
         r = self._rows[index.row()]
-        col = index.column()
         if role in (Qt.DisplayRole, Qt.EditRole):
             return self._cell_text(r, col)
+        if role == Qt.ToolTipRole:
+            # A coin quantity carries up to 18 decimals, so a column sized for
+            # the ordinary case still elides the occasional long one. The full
+            # value is always one hover away rather than lost behind an ellipsis.
+            return self._cell_text(r, col) or None
         if role == Qt.TextAlignmentRole and col in self._NUMERIC:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
@@ -2077,6 +2257,30 @@ class CryptoRegisterModel(QAbstractTableModel):
                 return QBrush(QColor(ct))
         return None
 
+    def setData(self, index, value, role=Qt.EditRole):
+        """Only the pending row's three editable fields are writable, and the
+        edit lands in the pending BUFFER -- never on the review entry, which is
+        the source's ground truth, and never on a posted event."""
+        if role != Qt.EditRole or not index.isValid():
+            return False
+        if not self.is_pending_row(index.row()):
+            return False
+        if not (0 <= index.column() < len(self._columns)):
+            return False
+        col = self._columns[index.column()]
+        if col not in self._PENDING_EDITABLE:
+            return False
+        key = {self.ACTION: "action", self.PAYEE: "payee",
+               self.MEMO: "memo"}[col]
+        text = str(value or "").strip()
+        self._pending["buf"][key] = text.upper() if key == "action" else text
+        row = index.row()
+        # The action decides which side the quantity renders on, so redraw the
+        # whole row rather than the one cell.
+        self.dataChanged.emit(self.index(row, 0),
+                              self.index(row, len(self._columns) - 1))
+        return True
+
     def _cell_text(self, r, col) -> str:
         if col == self.DATE:
             return fmt_date(r["date"])
@@ -2089,9 +2293,26 @@ class CryptoRegisterModel(QAbstractTableModel):
         if col == self.PAYEE:
             # The on-chain counterparty (From on a credit, To on a debit).
             return r.get("payee") or ""
+        if col == self.MEMO:
+            return r.get("memo") or ""
         if col == self.QUANTITY:
             # Stored SIGNED (an OUT leg is negative), shown verbatim.
             return fmt_qty(r["quantity"]) if r["quantity"] is not None else ""
+        if col in (self.COIN_IN, self.COIN_OUT):
+            # The wallet layout splits the signed quantity into the two columns
+            # the source exports it in (Value_IN / Value_OUT), so a receive and a
+            # send never share a column. Sign comes off the stored quantity, which
+            # crypto.record_wallet_debit writes negative.
+            q = r.get("quantity")
+            if q is None or str(q).strip() == "":
+                return ""
+            try:
+                out = Decimal(str(q)) < 0
+            except (InvalidOperation, ValueError):
+                return ""
+            if out != (col == self.COIN_OUT):
+                return ""
+            return fmt_qty(abs(Decimal(str(q))))
         if col == self.PRICE:
             return fmt_qty(r["price"]) if r["price"] else ""
         if col == self.COIN_BAL:

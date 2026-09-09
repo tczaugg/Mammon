@@ -43,6 +43,25 @@ allocation pie. The wallet address lives in the existing
 ``accounts.account_number`` column (already blanked from the MCP surface), and
 ``asset_class = 'crypto'`` carries the allocation classification.
 
+Two crypto account KINDS share that type, recorded explicitly in
+``accounts.crypto_kind`` (migration 61; SRD §5.8) -- BOTH multi-token and valued
+like securities (a quantity per token, priced at market):
+
+- ``'wallet'`` -- a single address / paper wallet holding coins/ERC-20 tokens
+  ONLY, no fiat. Coin arrives/leaves with NO USD leg (the ShrsIn/ShrsOut analogue),
+  the network fee is paid IN the coin, and the on-chain ``From``/``To`` counterparty
+  IS the row's payee (stored in ``crypto_transactions.payee``, migration 61 -- there
+  is no separate "counterparty" concept). Coin-native moves go through
+  :func:`record_wallet_credit` / :func:`record_wallet_debit` (and
+  :func:`record_wallet_transfer` for own-wallet moves).
+- ``'exchange'`` -- coins PLUS fiat currencies: the BUY/SELL/SWAP model below with
+  an internal USD cash sleeve.
+
+``crypto_kind`` is a real typed value, never an overloaded NULL; a NULL kind means
+"not a crypto account". Both kinds keep every token as a distinct security position
+('USDC', 'ETH', 'LINK' never merge), so a wallet that receives ERC-20 tokens holds
+them alongside its ETH without special-casing.
+
 Event taxonomy (schema v51 ``action`` enum) mapped to primitives:
 
 - ``BUY`` / ``SELL`` -- fiat<->coin. BUY adds a lot and debits the cash sleeve
@@ -87,10 +106,25 @@ import sqlite3
 
 from mammon import ledger, investments
 
-# The distinct account.type value for a crypto wallet, and the asset_class that
-# flows a coin position into the allocation pie / rebalance drift.
+# The distinct account.type value shared by both crypto account KINDS, and the
+# asset_class that flows a coin position into the allocation pie / rebalance drift.
 CRYPTO_ACCOUNT_TYPE = "crypto"
 CRYPTO_ASSET_CLASS = "crypto"
+
+# The two crypto account KINDS (SRD §5.8; both share accounts.type='crypto' and are
+# BOTH multi-token, valued like securities -- a quantity per token, priced at market).
+# They differ only in whether an internal fiat cash sleeve exists:
+#   * WALLET   -- a single address / paper wallet holding coins/ERC-20 tokens ONLY.
+#                 Movements are coin-native (the ShrsIn/ShrsOut analogue): a quantity
+#                 in or out, NO fiat leg, the on-chain From/To counterparty as the
+#                 payee, and any network fee paid IN the coin.
+#   * EXCHANGE -- coins PLUS fiat currencies: the existing BUY/SELL/SWAP model with an
+#                 internal USD cash sleeve.
+# Stored explicitly in ``accounts.crypto_kind`` (migration 61) -- never an overloaded
+# NULL. A NULL kind means "not a crypto account".
+CRYPTO_KIND_WALLET = "wallet"
+CRYPTO_KIND_EXCHANGE = "exchange"
+CRYPTO_KINDS = (CRYPTO_KIND_WALLET, CRYPTO_KIND_EXCHANGE)
 
 # Significant digits for quantity arithmetic. The default context (28) can drop
 # a wei when summing a large balance; 40 clears realistic integer-part +
@@ -196,8 +230,42 @@ def pair_symbol(symbol: str) -> str:
 # Accounts
 # ---------------------------------------------------------------------------
 def is_crypto_account(acct: Optional[sqlite3.Row]) -> bool:
-    """Whether ``acct`` (a row, or None) is a crypto wallet-account."""
+    """Whether ``acct`` (a row, or None) is a crypto account of EITHER kind."""
     return acct is not None and (acct["type"] or "") == CRYPTO_ACCOUNT_TYPE
+
+
+def _norm_kind(kind: Optional[str]) -> str:
+    """Normalise/validate a crypto account KIND, raising on anything unexpected so a
+    bad value is caught at creation rather than silently mis-routing later."""
+    k = (kind or "").strip().lower()
+    if k not in CRYPTO_KINDS:
+        raise ValueError(f"unknown crypto account kind {kind!r}; one of {CRYPTO_KINDS}")
+    return k
+
+
+def account_kind(acct: Optional[sqlite3.Row]) -> Optional[str]:
+    """The crypto account KIND -- :data:`CRYPTO_KIND_WALLET` or
+    :data:`CRYPTO_KIND_EXCHANGE` -- read from ``accounts.crypto_kind``, or ``None``
+    for a non-crypto account."""
+    if not is_crypto_account(acct):
+        return None
+    return _row_value(acct, "crypto_kind")
+
+
+def is_wallet_account(acct: Optional[sqlite3.Row]) -> bool:
+    """A single address / paper wallet: coins/tokens only, coin-native, no fiat
+    sleeve. Movements go through :func:`record_wallet_credit` /
+    :func:`record_wallet_debit` (and :func:`record_wallet_transfer` for own-wallet
+    moves)."""
+    return account_kind(acct) == CRYPTO_KIND_WALLET
+
+
+def is_exchange_account(acct: Optional[sqlite3.Row]) -> bool:
+    """A crypto exchange/custodial account: coins PLUS a fiat cash sleeve, driven by
+    the BUY/SELL/SWAP writers. Any crypto account not explicitly a wallet reads as an
+    exchange -- migration 61 backfills legacy crypto accounts (whose kind predates the
+    split) to 'exchange', so this is the historical behaviour, not NULL-overloading."""
+    return is_crypto_account(acct) and account_kind(acct) != CRYPTO_KIND_WALLET
 
 
 def is_investment_like(acct: Optional[sqlite3.Row]) -> bool:
@@ -208,26 +276,36 @@ def is_investment_like(acct: Optional[sqlite3.Row]) -> bool:
 
 
 def create_account(conn: sqlite3.Connection, name: str, *,
+                   kind: str = CRYPTO_KIND_EXCHANGE,
                    opening_balance: int = 0,
                    opening_date: Optional[str] = None,
                    institution: Optional[str] = None,
                    note: Optional[str] = None,
                    wallet_address: Optional[str] = None) -> int:
-    """Create a crypto wallet-account (``type='crypto'``) and return its id.
+    """Create a crypto account (``type='crypto'``) of the given ``kind`` and return
+    its id.
 
-    Account rows are written by ``ledger`` (the one writer of the accounts
-    table); this wrapper only fixes the type to ``'crypto'`` and stamps
-    ``asset_class='crypto'`` so the position flows into the allocation pie. The
-    wallet address, when supplied, is stored in ``account_number`` (the same
-    column the MCP authorizer blanks) -- crypto introduces no new sensitive
-    column and no credential storage.
+    ``kind`` is :data:`CRYPTO_KIND_WALLET` (a single address / paper wallet holding
+    coins/tokens only, coin-native) or :data:`CRYPTO_KIND_EXCHANGE` (a multi-coin
+    exchange with a fiat sleeve). It defaults to EXCHANGE -- the model this
+    constructor has always produced -- so existing callers are unchanged; a
+    coin-native wallet opts in with ``kind='wallet'``. The chosen kind is stored
+    explicitly in ``accounts.crypto_kind``.
+
+    Account rows are written by ``ledger`` (the one writer of the accounts table);
+    this wrapper only fixes the type to ``'crypto'``, stamps
+    ``asset_class='crypto'`` so the position flows into the allocation pie, and
+    records the kind. The wallet address, when supplied, is stored in
+    ``account_number`` (the same column the MCP authorizer blanks) -- crypto
+    introduces no credential storage.
     """
+    k = _norm_kind(kind)
     account_id = ledger.create_account(
         conn, name, CRYPTO_ACCOUNT_TYPE,
         opening_balance=opening_balance, opening_date=opening_date,
         institution=institution, note=note,
     )
-    fields: dict = {"asset_class": CRYPTO_ASSET_CLASS}
+    fields: dict = {"asset_class": CRYPTO_ASSET_CLASS, "crypto_kind": k}
     if wallet_address is not None:
         fields["account_number"] = wallet_address
     ledger.update_account(conn, account_id, **fields)
@@ -244,7 +322,7 @@ def get_account(conn: sqlite3.Connection, account_id: int) -> Optional[sqlite3.R
 def list_accounts(conn: sqlite3.Connection,
                   include_closed: bool = False,
                   include_hidden: bool = False) -> list[sqlite3.Row]:
-    """Just the crypto wallet-accounts, filtered from ``ledger.list_accounts``."""
+    """Just the crypto accounts (either kind), filtered from ``ledger.list_accounts``."""
     return [a for a in ledger.list_accounts(
         conn, include_closed=include_closed, include_hidden=include_hidden)
         if (a["type"] or "") == CRYPTO_ACCOUNT_TYPE]
@@ -705,7 +783,7 @@ def realized_gains(conn, account_id: int, as_of: Optional[str] = None) -> list:
 # ---------------------------------------------------------------------------
 _EDITABLE = {
     "date", "action", "symbol", "quantity", "price", "amount", "basis",
-    "fee_symbol", "fee_quantity", "fee_amount", "memo", "tx_hash", "fitid",
+    "fee_symbol", "fee_quantity", "fee_amount", "memo", "payee", "tx_hash", "fitid",
 }
 
 
@@ -713,7 +791,7 @@ def record_event(conn, account_id: int, date: str, action: str, *,
                  symbol=None, quantity=None, price=None, amount=None, basis=None,
                  fee_symbol=None, fee_quantity=None, fee_amount=None,
                  transfer_account_id=None, transfer_pair_id=None, swap_group_id=None,
-                 tx_hash=None, memo=None, fitid=None, import_id=None,
+                 tx_hash=None, memo=None, payee=None, fitid=None, import_id=None,
                  commit: bool = True) -> int:
     """The low-level insert -- one row per single-asset delta. Quantities/prices
     are encoded to exponent-free Decimal TEXT; cents are stored as-is (signed).
@@ -729,8 +807,8 @@ def record_event(conn, account_id: int, date: str, action: str, *,
         "INSERT INTO crypto_transactions"
         "(account_id, date, action, symbol, quantity, price, amount, basis,"
         " fee_symbol, fee_quantity, fee_amount, transfer_account_id,"
-        " transfer_pair_id, swap_group_id, tx_hash, memo, import_id, fitid)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " transfer_pair_id, swap_group_id, tx_hash, memo, payee, import_id, fitid)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             account_id, date, act, symbol or None,
             _qty_text(_D(quantity)) if quantity not in (None, "") else None,
@@ -741,7 +819,7 @@ def record_event(conn, account_id: int, date: str, action: str, *,
             _qty_text(_D(fee_quantity)) if fee_quantity not in (None, "") else None,
             int(fee_amount) if fee_amount is not None else None,
             transfer_account_id, transfer_pair_id, swap_group_id,
-            tx_hash or None, memo or None, import_id, fitid or None,
+            tx_hash or None, memo or None, payee or None, import_id, fitid or None,
         ),
     )
     _invalidate_holdings_checkpoints_from(conn, account_id, date)
@@ -783,13 +861,17 @@ def record_sell(conn, account_id: int, date: str, symbol: str, quantity, proceed
 
 
 def record_send(conn, account_id: int, date: str, symbol: str, quantity, fmv, *,
-                fee_symbol=None, fee_quantity=None, fee_amount=None, memo=None,
-                tx_hash=None, fitid=None, import_id=None) -> int:
+                payee=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
+                memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
     """Send ``quantity`` of ``symbol`` to a third party -- a disposal at ``fmv``
     cents fair-market value (books realized gain vs the relieved basis). A network
-    fee (gas) rides the ``fee_*`` fields. If the recipient is really an
-    intermediary the user controls, prefer :func:`record_wallet_transfer` with an
-    account-per-intermediary instead (CLAUDE.md), so no gain is realized."""
+    fee (gas) rides the ``fee_*`` fields. ``payee`` is the on-chain ``To``
+    recipient; the counterparty IS the payee on an exchange row exactly as it is
+    on a wallet row -- when the user moves coin from their own paper wallet to an
+    exchange, the exchange side must show that wallet's address. If the recipient
+    is really an intermediary the user controls, prefer
+    :func:`record_wallet_transfer` with an account-per-intermediary instead
+    (CLAUDE.md), so no gain is realized."""
     q = abs(_D(quantity))
     fmv_cents = abs(int(fmv))
     price = None
@@ -798,17 +880,18 @@ def record_send(conn, account_id: int, date: str, symbol: str, quantity, fmv, *,
             price = (Decimal(fmv_cents) / _HUNDRED) / q
     return record_event(conn, account_id, date, "SEND", symbol=symbol, quantity=-q,
                         price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
-                        fee_amount=fee_amount, memo=memo, tx_hash=tx_hash,
-                        fitid=fitid, import_id=import_id)
+                        fee_amount=fee_amount, memo=memo, payee=payee,
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
 
 
 def record_income(conn, account_id: int, date: str, action: str, symbol: str,
-                  quantity, fmv, *, memo=None, tx_hash=None, fitid=None,
-                  import_id=None) -> int:
+                  quantity, fmv, *, payee=None, memo=None, tx_hash=None,
+                  fitid=None, import_id=None) -> int:
     """Credit ``quantity`` of ``symbol`` as in-kind income (RECEIVE / REWARD /
     INTEREST / AIRDROP / MINING / FORK) at ``fmv`` cents fair-market value. Basis
     = FMV; the income actions accrue FMV to the checkpoint ``income`` total (FORK
-    basis is per policy -- pass ``fmv=0`` for the $0-basis treatment)."""
+    basis is per policy -- pass ``fmv=0`` for the $0-basis treatment). ``payee`` is
+    the on-chain ``From`` sender -- the counterparty IS the payee here too."""
     act = _norm(action)
     if act not in (_INCOME_ACTIONS | {"FORK"}):
         raise ValueError(f"{action!r} is not an income/fork action")
@@ -819,8 +902,72 @@ def record_income(conn, account_id: int, date: str, action: str, symbol: str,
         with decimal.localcontext(quantity_context()):
             price = (Decimal(fmv_cents) / _HUNDRED) / q
     return record_event(conn, account_id, date, act, symbol=symbol, quantity=q,
-                        price=price, basis=fmv_cents, memo=memo, tx_hash=tx_hash,
-                        fitid=fitid, import_id=import_id)
+                        price=price, basis=fmv_cents, memo=memo, payee=payee,
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+
+
+# ---------------------------------------------------------------------------
+# Coin-native WALLET writers (SRD §5.8; the ShrsIn/ShrsOut analogue). A wallet
+# moves coin with NO fiat leg -- a quantity arrives or leaves, valued at market
+# like a security -- so ``price``/``amount``/``basis`` stay NULL and the counterparty
+# address IS the payee. These route through ``record_event``, so :mod:`mammon.crypto`
+# stays the SOLE writer of ``crypto_*``. Own-wallet moves keep using
+# :func:`record_wallet_transfer` (the coin mirror model), and coin-for-coin trades
+# :func:`record_swap`; those legs MUST be written as a pair, so they are excluded
+# from the single-leg credit/debit action sets below.
+# ---------------------------------------------------------------------------
+_WALLET_CREDIT_ACTIONS = {"RECEIVE", "REWARD", "INTEREST", "AIRDROP", "MINING", "FORK"}
+_WALLET_DEBIT_ACTIONS = {"SEND"}
+# Public aliases: the import-review accept path has to decide which writer a
+# reviewed wallet row belongs to, and that decision must read the SAME sets the
+# writers validate against rather than re-listing the vocabulary somewhere else.
+WALLET_CREDIT_ACTIONS = _WALLET_CREDIT_ACTIONS
+WALLET_DEBIT_ACTIONS = _WALLET_DEBIT_ACTIONS
+
+
+def record_wallet_credit(conn, account_id: int, date: str, symbol: str, quantity, *,
+                         payee=None, action: str = "RECEIVE", price=None, basis=None,
+                         memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+    """A coin-native INCREASE (the ShrsIn analogue): ``quantity`` of ``symbol``
+    arrives with NO fiat leg. ``payee`` is the on-chain ``From`` counterparty and
+    populates the register's Payee directly (there is no separate "counterparty"
+    field). ``price``/``basis`` stay NULL for a bare receive; supply an FMV ``basis``
+    only when a cost is known (an airdrop/reward's fair-market value, which the
+    income actions accrue). ``action`` defaults to ``RECEIVE`` and must be a
+    single-leg add action (RECEIVE / REWARD / INTEREST / AIRDROP / MINING / FORK) --
+    own-wallet TRANSFER_IN goes through :func:`record_wallet_transfer` and SWAP_IN
+    through :func:`record_swap`. Each ``symbol`` is a distinct security position:
+    'USDC', 'ETH', 'LINK' never merge."""
+    act = _norm(action)
+    if act not in _WALLET_CREDIT_ACTIONS:
+        raise ValueError(f"{action!r} is not a coin-in action; "
+                         f"one of {sorted(_WALLET_CREDIT_ACTIONS)}")
+    q = abs(_D(quantity))
+    return record_event(conn, account_id, date, act, symbol=symbol, quantity=q,
+                        price=price, basis=basis, memo=memo, payee=payee,
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+
+
+def record_wallet_debit(conn, account_id: int, date: str, symbol: str, quantity, *,
+                        payee=None, action: str = "SEND", price=None,
+                        fee_symbol=None, fee_quantity=None,
+                        memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+    """A coin-native DECREASE (the ShrsOut analogue): ``quantity`` of ``symbol``
+    leaves with NO fiat proceeds. ``payee`` is the on-chain ``To`` recipient. An
+    optional network fee is a COIN-NATIVE leg on this SAME row -- ``fee_symbol`` /
+    ``fee_quantity`` (e.g. ETH gas), never a USD amount -- and only the sender books
+    it. ``action`` defaults to ``SEND`` (own-wallet TRANSFER_OUT goes through
+    :func:`record_wallet_transfer`). With no USD proceeds/basis, no realized gain is
+    booked, which is correct for a coin-native wallet."""
+    act = _norm(action)
+    if act not in _WALLET_DEBIT_ACTIONS:
+        raise ValueError(f"{action!r} is not a coin-out action; "
+                         f"one of {sorted(_WALLET_DEBIT_ACTIONS)}")
+    q = abs(_D(quantity))
+    return record_event(conn, account_id, date, act, symbol=symbol, quantity=-q,
+                        price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
+                        memo=memo, payee=payee, tx_hash=tx_hash, fitid=fitid,
+                        import_id=import_id)
 
 
 def record_fee(conn, account_id: int, date: str, symbol: str, quantity, *,

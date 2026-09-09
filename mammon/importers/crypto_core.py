@@ -155,13 +155,18 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
                 fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
             result.account_ids.update((frm, to))
         elif rec.direction == "out":
+            # The counterparty IS the payee on an exchange row too: when the user
+            # moves coin from their own paper wallet to an exchange, the exchange
+            # side has to show that wallet's address.
             crypto.record_send(
                 conn, account_id, rec.date, rec.symbol, qty, fmv,
+                payee=rec.to_addr or None,
                 fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                 fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
         else:  # direction == "in"
             crypto.record_income(
                 conn, account_id, rec.date, "RECEIVE", rec.symbol, qty, fmv,
+                payee=rec.from_addr or None,
                 tx_hash=rec.tx_hash, memo=rec.memo or None)
 
         result.imported += 1
@@ -269,6 +274,16 @@ def _decode(raw: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("latin-1", errors="replace")
+
+
+def parse_export_file(path) -> list[CryptoRecord]:
+    """Read an on-chain by-address export at ``path`` and return its records.
+
+    PURE with respect to the database -- it only reads a file -- so the UI can
+    parse first and route the rows into the import-review queue instead of
+    writing them. Raises ``ValueError`` when the file is not such an export,
+    which is how a caller tells an Etherscan CSV from any other CSV."""
+    return parse_etherscan(_decode(Path(path).read_bytes()))
 
 
 def import_etherscan_file(conn: sqlite3.Connection, path, account_id: int, *,

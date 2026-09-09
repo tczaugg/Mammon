@@ -56,9 +56,12 @@ __all__ = [
     "ReviewEntry",
     "map_row",
     "mapped_from_record",
+    "mapped_from_crypto_record",
     "classify_row",
     "build_review",
     "build_review_from_records",
+    "build_crypto_review",
+    "crypto_import_counts",
     "import_records_via_review",
     "resolve_or_create_transfer_account",
     "save_new",
@@ -250,6 +253,17 @@ class MappedRow:
     quantity: str = ""            # Decimal text
     price: str = ""               # Decimal text (per share/unit)
     commission_cents: int = 0
+    # crypto extension: a coin-native wallet row (an on-chain send/receive) that
+    # posts into crypto_transactions. It reuses `symbol`/`quantity`/`action`/
+    # `payee` above -- the coin, its Decimal-text amount, RECEIVE/SEND, and the
+    # From/To counterparty address, which IS the payee (there is no separate
+    # counterparty field). What a wallet row does NOT have is the whole point:
+    # no fiat `amount`, no `price`, no cash balance. Its fee is paid in COIN, so
+    # it needs its own coin-denominated leg rather than `commission_cents`.
+    is_crypto: bool = False
+    fee_symbol: str = ""          # coin the network fee was paid in (e.g. ETH)
+    fee_quantity: str = ""        # Decimal text, unsigned fee magnitude
+    tx_hash: str = ""             # on-chain hash: the exact dedup key
     raw: dict = field(default_factory=dict)
     # True when ``payee`` was carried in VERBATIM from the source record -- an OFX
     # <NAME>/<PAYEE>, a QIF payee, or a tabular importer's explicit payee column
@@ -808,6 +822,132 @@ def build_review_from_records(conn, account_id: int, records, *,
     return entries
 
 
+def mapped_from_crypto_record(rec) -> MappedRow:
+    """Map a parsed :class:`~mammon.importers.crypto_csv.CryptoRecord` to a
+    COIN-NATIVE :class:`MappedRow` -- the wallet twin of :func:`mapped_from_record`.
+
+    Nothing fiat is filled in, deliberately. A paper-wallet address has no cash
+    sleeve: coin arrives and leaves, the network fee is paid in the coin itself,
+    and the only "who" the chain carries is the counterparty ADDRESS -- the
+    ``From`` on an increase, the ``To`` on a decrease -- which lands straight on
+    ``payee``. ``amount_cents`` stays 0 and ``price`` stays empty so no USD can
+    leak onto the row; USD enters only at the net-worth layer, where the coin is
+    valued at quantity x market price like any other security.
+
+    ``payee_supplied`` is set because an address IS what the source sent: the
+    description-driven rename rules must not rewrite it.
+    """
+    direction = (getattr(rec, "direction", "") or "").strip().lower()
+    counterparty = (rec.to_addr if direction == "out" else rec.from_addr) or ""
+    # Gas is the SENDER's. An Etherscan export prints a TxnFee on inbound rows
+    # too, but on-chain only the sender pays it -- booking it on a receive would
+    # debit coin the user never spent.
+    fee_symbol = (rec.fee_symbol or "") if direction == "out" else ""
+    fee_quantity = (rec.fee_quantity or "") if direction == "out" else ""
+    return MappedRow(
+        transaction_id=(rec.tx_hash or ""),
+        date=rec.date or "",
+        amount_cents=0,               # a wallet row moves no fiat, ever
+        payee=counterparty,
+        payee_supplied=bool(counterparty),
+        memo=(rec.memo or "").strip(),
+        is_crypto=True,
+        action=("SEND" if direction == "out" else "RECEIVE"),
+        symbol=(rec.symbol or ""),
+        quantity=(rec.quantity or ""),
+        fee_symbol=fee_symbol,
+        fee_quantity=fee_quantity,
+        tx_hash=(rec.tx_hash or ""),
+    )
+
+
+def build_crypto_review(conn, account_id: int, records) -> list[ReviewEntry]:
+    """Classify a crypto WALLET's parsed on-chain records into a review list.
+
+    Everything reviewable here is NEW. There is no fuzzy amount/date matching
+    because there is nothing to be fuzzy about: an on-chain ``tx_hash`` is a
+    globally unique, immutable exact key -- the crypto analogue of ``fitid`` and
+    strictly better -- so a row either already exists in this wallet (skip it,
+    the way :mod:`mammon.importers.crypto_core` does) or it is new. Guessing a
+    match on a coin quantity would be inventing ambiguity the chain does not have.
+
+    A FAILED on-chain transaction is dropped: it burned the sender's gas but
+    moved no value, so it is not a ledger event. Never mutates the database.
+    """
+    seen: set[str] = set()
+    entries: list[ReviewEntry] = []
+    for rec in records:
+        if not getattr(rec, "is_success", True):
+            continue
+        h = (rec.tx_hash or "").strip()
+        if h:
+            if h in seen or _crypto_hash_present(conn, account_id, h):
+                continue
+            seen.add(h)
+        entries.append(ReviewEntry(mapped=mapped_from_crypto_record(rec),
+                                   label=LABEL_NEW))
+    return entries
+
+
+def crypto_import_counts(conn, account_id: int, records) -> tuple[int, dict]:
+    """How many rows the export actually HELD, and the state of the ones this
+    wallet already knows: ``(readable, {state: count})``.
+
+    Separate from :func:`build_crypto_review` because the two answer different
+    questions, and conflating them produces a lie. ``build_crypto_review``
+    returns only what should be QUEUED -- a row already posted or already pending
+    must not be queued again. Reporting that count as "rows read from the file"
+    means a re-import of a fully-imported export announces that NOTHING could be
+    read, which reads as "the file is empty or unreadable" when what actually
+    happened is that every row was recognised and correctly refused re-entry.
+    The cash path learned this first (see ``MainWindow._import_report``); this is
+    the same distinction for chain data.
+    """
+    readable = 0
+    prior: dict = {}
+    for rec in records:
+        if not getattr(rec, "is_success", True):
+            continue          # a failed txn moved no value: not a ledger row
+        readable += 1
+        h = (rec.tx_hash or "").strip()
+        if not h:
+            continue
+        state = _crypto_hash_state(conn, account_id, h)
+        if state:
+            prior[state] = prior.get(state, 0) + 1
+    return readable, prior
+
+
+def _crypto_hash_state(conn, account_id: int, tx_hash: str) -> Optional[str]:
+    """Why this wallet already knows ``tx_hash``, or ``None`` if it does not.
+
+    The SINGLE authority on whether a chain row is a duplicate --
+    :func:`_crypto_hash_present` is this test, and :func:`crypto_import_counts`
+    reports this answer -- so what gets skipped and what gets reported as skipped
+    can never disagree.
+
+    ``"in the register"`` when the event is posted; ``"pending"`` when it is
+    still in the review queue. A DISCARDED row is deliberately not a duplicate:
+    discard means "not now", not "never again", so re-importing the range brings
+    it back -- the same policy the cash path states."""
+    if conn.execute(
+            "SELECT 1 FROM crypto_transactions WHERE account_id=? AND tx_hash=? "
+            "LIMIT 1", (account_id, tx_hash)).fetchone() is not None:
+        return "in the register"
+    if conn.execute(
+            "SELECT 1 FROM review_items WHERE account_id=? AND tx_hash=? "
+            "AND state='pending' LIMIT 1", (account_id, tx_hash)).fetchone():
+        return "pending"
+    return None
+
+
+def _crypto_hash_present(conn, account_id: int, tx_hash: str) -> bool:
+    """Whether this wallet already carries an event for ``tx_hash`` -- posted, or
+    still sitting in the review queue. Both count: re-importing the same export
+    must neither double-post nor stack a second copy of every pending row."""
+    return _crypto_hash_state(conn, account_id, tx_hash) is not None
+
+
 def _prior_txn_for(conn, mapped: MappedRow) -> Optional[dict]:
     """The payee/category prior register rows with this exact statement text
     AGREE on, or ``None``. Feeds the CATEGORY back-fill only.
@@ -1236,6 +1376,14 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
     chk = mapped.check_number if num is None else num
     if not d:
         raise ValueError("cannot save a reviewed row that has no date")
+    if mapped.is_crypto:
+        # A coin-native wallet row posts into crypto_transactions through
+        # mammon.crypto's writers -- never the cash register, which would book a
+        # fiat amount that does not exist. Its payee is the counterparty address
+        # the source sent, so it feeds no rename tree either.
+        return _save_crypto(
+            conn, account_id, mapped, memo=memo, review_id=review_id, date=d,
+            payee=payee, action=action, symbol=symbol, quantity=quantity)
     if mapped.is_investment:
         # Investment rows post into investment_transactions (their own table), not
         # the cash register; they carry no payee/category and feed no rename tree.
@@ -1409,6 +1557,54 @@ def _save_investment(conn, account_id: int, mapped: MappedRow, *,
                 txn_id=txn_id, review_id=review_id)
         except Exception:
             pass
+    if review_id is not None:
+        _set_state(conn, review_id, "accepted", accepted_txn_id=txn_id)
+        conn.commit()
+    return txn_id
+
+
+def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
+                 memo: Optional[str] = None, review_id: Optional[int] = None,
+                 date: Optional[str] = None, payee: Optional[str] = None,
+                 action: Optional[str] = None, symbol: Optional[str] = None,
+                 quantity: Optional[str] = None) -> int:
+    """Insert a reviewed NEW coin-native wallet row into ``crypto_transactions``
+    and rebuild the wallet's per-coin holdings. Returns the new event id.
+
+    Routes through :mod:`mammon.crypto`'s wallet writers so ``crypto.py`` stays the
+    SOLE writer of the ``crypto_*`` tables. The direction decides which writer: a
+    coin INCREASE is the ShrsIn analogue (``record_wallet_credit``, no fiat leg, the
+    ``From`` address as payee), a coin DECREASE the ShrsOut analogue
+    (``record_wallet_debit``, the ``To`` address as payee, the network fee carried
+    as a COIN leg on the same row -- ETH gas, never a USD amount). No price, no
+    amount and no basis is written on either: for a paper-wallet address there is
+    none, and inventing one would put fiat on a register that has no cash sleeve.
+    """
+    from . import crypto
+    use_date = date or mapped.date
+    use_action = ((action or "").strip() or mapped.action or "RECEIVE").upper()
+    use_symbol = (mapped.symbol if symbol is None else symbol) or ""
+    use_qty = (mapped.quantity if quantity is None else quantity) or "0"
+    use_payee = (mapped.payee if payee is None else payee) or None
+    m = mapped.memo if memo is None else memo
+    if use_action in crypto.WALLET_DEBIT_ACTIONS:
+        txn_id = crypto.record_wallet_debit(
+            conn, account_id, use_date, use_symbol, use_qty,
+            payee=use_payee, action=use_action,
+            fee_symbol=(mapped.fee_symbol or None),
+            fee_quantity=(mapped.fee_quantity or None),
+            memo=(m or None), tx_hash=(mapped.tx_hash or None))
+    else:
+        txn_id = crypto.record_wallet_credit(
+            conn, account_id, use_date, use_symbol, use_qty,
+            payee=use_payee, action=use_action, memo=(m or None),
+            tx_hash=(mapped.tx_hash or None))
+    # Refresh the per-coin positions so the wallet values correctly. The row is
+    # already persisted, so a replay failure must not abort the accept.
+    try:
+        crypto.rebuild_holdings(conn, account_id)
+    except Exception:
+        pass
     if review_id is not None:
         _set_state(conn, review_id, "accepted", accepted_txn_id=txn_id)
         conn.commit()
@@ -1817,8 +2013,10 @@ def persist_entries(conn, account_id: int, entries, batch_id=None) -> int:
             "(account_id, transaction_id, account_ref, date, amount, payee, memo, "
             " check_number, is_transfer, transfer_account, raw_json, label, "
             " matched_txn_id, match_method, is_investment, action, symbol, quantity, "
-            " price, commission, payee_supplied, batch_id, state, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', datetime('now'))",
+            " price, commission, payee_supplied, batch_id, "
+            " is_crypto, fee_symbol, fee_quantity, tx_hash, state, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, "
+            "        'pending', datetime('now'))",
             (account_id, (m.transaction_id or None), m.account_ref, m.date,
              m.amount_cents, m.payee, m.memo, m.check_number,
              1 if m.is_transfer else 0, m.transfer_account,
@@ -1826,7 +2024,9 @@ def persist_entries(conn, account_id: int, entries, batch_id=None) -> int:
              entry.match_method,
              1 if m.is_investment else 0, (m.action or None), (m.symbol or None),
              (m.quantity or None), (m.price or None), (m.commission_cents or None),
-             1 if m.payee_supplied else 0, batch_id),
+             1 if m.payee_supplied else 0, batch_id,
+             1 if m.is_crypto else 0, (m.fee_symbol or None),
+             (m.fee_quantity or None), (m.tx_hash or None)),
         )
         if cur.rowcount:
             entry.review_id = int(cur.lastrowid)
@@ -1868,6 +2068,13 @@ def _entry_from_row(row) -> ReviewEntry:
         # QIF payee / tabular From-To) still skips the description renamer in
         # predict_fields. Absent on pre-V27 rows -> default 0 (behaves as derived).
         payee_supplied=bool(_g("payee_supplied", 0)),
+        # Coin-native wallet fields. Absent on a pre-V62 row -> defaults, which
+        # read as an ordinary cash row (is_crypto False), so old review history
+        # keeps rendering exactly as it did.
+        is_crypto=bool(_g("is_crypto", 0)),
+        fee_symbol=_g("fee_symbol", "") or "",
+        fee_quantity=_g("fee_quantity", "") or "",
+        tx_hash=_g("tx_hash", "") or "",
         raw=json.loads(row["raw_json"] or "{}"),
     )
     return ReviewEntry(
@@ -2074,6 +2281,12 @@ def _accept_one_predicted(conn, account_id: int, entry: ReviewEntry) -> int:
     against "what was saved" sees them agree -- an unedited accept is not a
     correction."""
     m = entry.mapped
+    if m.is_crypto:
+        # A wallet row's fields all come from the chain -- coin, quantity,
+        # direction, counterparty address -- so there is nothing to predict and
+        # nothing to learn. It posts exactly as imported.
+        return save_new(conn, account_id, m, review_id=entry.review_id,
+                        learn=False)
     if m.is_investment:
         return save_new(conn, account_id, m, review_id=entry.review_id,
                         learn=False, action=predict_action(conn, m))

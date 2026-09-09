@@ -1799,6 +1799,50 @@ DELETE FROM rename_meta WHERE key = 'ranking_version';
 """
 
 
+# Migration 61: the crypto redesign (SRD §5.8; design locked in review 55a2d8a0).
+# Two crypto account KINDS share ``type='crypto'`` and are BOTH multi-token and valued
+# like securities (a quantity per token, priced at market):
+#   * 'wallet'   -- a single address / paper wallet holding coins/ERC-20 tokens ONLY,
+#                   no fiat. Coin arrives/leaves; the network fee is paid IN the coin.
+#   * 'exchange' -- coins PLUS fiat currencies: the existing BUY/SELL/SWAP model with
+#                   an internal USD cash sleeve.
+# ``crypto_kind`` is a REAL typed column carrying that choice explicitly -- NOT an
+# overloaded nullable "native coin" flag (the design's earlier nullable-column /
+# JSON-header modelling was rejected as unclear). Existing crypto accounts predate the
+# split and were built on the exchange model, so they backfill to 'exchange'; a NULL
+# ``crypto_kind`` now means "not a crypto account", never "exchange".
+#
+# ``crypto_transactions.payee`` is the counterparty that IS the payee/payer: the
+# on-chain ``From`` address on a coin increase, the ``To`` address on a coin decrease
+# (there is no separate "counterparty" concept). It is machine text that renders as a
+# distinct Payee column, so it gets its own column rather than colliding with the
+# user's own (routinely blanked) memo. Both adds are nullable and append-only; no
+# existing migration is edited, and neither ALTER duplicates an existing column
+# (``crypto_kind`` is new to ``accounts``; ``payee`` is new to ``crypto_transactions``).
+_V61 = """
+ALTER TABLE accounts ADD COLUMN crypto_kind TEXT;
+UPDATE accounts SET crypto_kind = 'exchange' WHERE type = 'crypto';
+ALTER TABLE crypto_transactions ADD COLUMN payee TEXT;
+"""
+
+# review_items grows the COIN-NATIVE columns, so a crypto wallet's import lands in
+# the same review queue every other source does instead of being forced through the
+# cash shape. It was the cash shape that produced the reported defect: an Etherscan
+# by-address CSV reviewed as cash mapped Blockno into `amount` and rendered a Cash
+# Bal column, for an account where no USD ever moves. Real typed columns, never a
+# serialized blob, because the review panel's bulk operations are SQL over this
+# table. `symbol`/`quantity`/`action`/`payee`/`memo`/`date` are reused as-is (they
+# already mean the right thing); only the coin fee legs and the on-chain identity
+# are new. `is_crypto` selects the coin-native accept path the way `is_investment`
+# selects the securities one.
+_V62 = """
+ALTER TABLE review_items ADD COLUMN is_crypto INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review_items ADD COLUMN fee_symbol TEXT;
+ALTER TABLE review_items ADD COLUMN fee_quantity TEXT;
+ALTER TABLE review_items ADD COLUMN tx_hash TEXT;
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -1860,6 +1904,8 @@ MIGRATIONS: list[str] = [
     _V58,
     _V59,
     _V60,
+    _V61,
+    _V62,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

@@ -1086,6 +1086,19 @@ floats and no money math in the UI layer.
   thin projection holding no coin/cents math of its own.
 
 ### 5.8i Cryptocurrency import (Etherscan-style native-coin CSV)
+- **ETHERSCAN RENAMES ITS COLUMNS, so the header must be matched broadly.**
+  Exports through ~2023 head the hash column `Txhash` and the timestamp
+  `DateTime`; current ones say `Transaction Hash` and `DateTime (UTC)` (and append
+  a `Method` column). That column is load-bearing twice — it is the exact-dedup
+  key AND the signature that identifies the file as a by-address export at all —
+  so matching only the old spelling rejected a real export outright: the parser
+  found no header, the file read as EMPTY, and the import reported it in the cash
+  importer's words ("use Adjust mapping to point out the date and amount
+  columns"), naming a control the crypto path does not have. Every accepted
+  spelling lives in `crypto_csv._is_hash_col`, used by both the header scan and
+  the column lookup so the two cannot drift. A zero-row import on a crypto
+  account says so in crypto's terms, and a parse failure carries its REASON
+  through the multi-file batch path rather than collapsing to "could not read".
 - A block-explorer by-address CSV export (Etherscan's per-wallet "Export CSV" is
   the reference shape) lands as crypto events on a `type='crypto'` account. The
   path mirrors the file-import hourglass (Section 6): a PURE parser turns text
@@ -1131,11 +1144,33 @@ floats and no money math in the UI layer.
   computed to signed integer cents under the wei-scale high-precision decimal
   context (`crypto.quantity_context`). A WALLET-kind import writes no USD on the
   row at all (SRD 5.8h), so this historical price is not booked there.
+- **The counterparty is the payee on BOTH kinds.** `record_send` / `record_income`
+  (the exchange path) take a `payee=` just as the wallet writers do, and the
+  importer fills it from `To` (out) / `From` (in). This is what makes a move from
+  the user's own paper wallet to their exchange legible: the EXCHANGE side shows
+  the paper-wallet address (a real holding the user controls), while the
+  exchange-assigned deposit address on the paper side is institutional and is not
+  tracked as a user holding.
 - **An own-wallet transfer needs a known-address registry.** A row is a
   wallet-to-wallet transfer (mirror model, no realized gain) only when the OTHER
   address also belongs to one of the user's Mammon crypto accounts (matched on
   `accounts.account_number`); otherwise it stays SEND / RECEIVE for the user to
   reclassify, since own-wallet intent is not derivable from the chain data alone.
+  The address is captured at CREATION: the New Account dialog shows a "Wallet
+  address" field for a crypto type and passes it to
+  `crypto.create_account(wallet_address=)`, which stores it in `account_number`
+  (the column the MCP authorizer already blanks, so crypto adds no new place a
+  private identifier can leak from). Asking only in the after-the-fact properties
+  dialog meant a freshly created wallet could never auto-classify anything.
+- **The crypto KIND is changeable after creation.** The account-properties dialog
+  shows a "Crypto kind" selector for a `type='crypto'` account, writing through
+  `ledger.update_account`. This is not a convenience: migration 61 backfilled
+  every pre-split crypto account to `'exchange'`, including the ones that are
+  really paper wallets, so without it those accounts keep the exchange register,
+  the exchange review columns and the exchange import path — and the redesign
+  never reaches the account it was built for. Changing the kind only changes how
+  existing rows are READ and how future ones are written; no stored row is
+  rewritten.
 - **`tx_hash` is the exact-dedup key, so a re-import is a NO-OP.** The on-chain
   hash is globally unique and immutable -- the crypto analogue of `fitid`, and
   strictly better. Each row whose `(account_id, tx_hash)` already exists is
@@ -1147,6 +1182,37 @@ floats and no money math in the UI layer.
 - Wallet addresses and tx hashes flow through only in memory to attribute gas and
   detect own-wallet transfers; they are never written to a tracked file, and the
   test fixtures use synthetic ANON placeholders only.
+- **A crypto account's file import routes to the coin parser BEFORE anything
+  else, and this is load-bearing.** `MainWindow._ingest_file_via_review` tests the
+  account for `crypto.is_crypto_account` first and hands the file to
+  `_ingest_crypto_file`; only a non-crypto account reaches the multi-account /
+  cash / investment routing below it. Without that test a by-address export fell
+  through to the generic delimited importer, which knows only date/payee/amount
+  columns: it inferred **`Blockno` as the money column** and produced cash-shaped
+  review rows with an Amount and a Cash Bal for an account where no dollar ever
+  moves. A file that does not parse as an on-chain export is reported as such
+  rather than silently reinterpreted as cash.
+- **A WALLET import goes through the import-review queue like every other
+  source; an EXCHANGE import writes through.** `import_review.build_crypto_review`
+  classifies the parsed records and `persist_entries` stores them as coin-native
+  `review_items` (schema v62: `is_crypto`, `fee_symbol`, `fee_quantity`, `tx_hash`,
+  reusing `symbol`/`quantity`/`action`/`payee`/`memo`/`date`) — REAL typed columns,
+  never a serialized blob, so the panel's DB-backed bulk operations keep working.
+  Nothing reaches `crypto_transactions` until the user accepts a row. Every row is
+  NEW: there is no fuzzy amount/date matching because `tx_hash` is an exact key, so
+  a row either already exists in this wallet (posted OR still pending) and is
+  skipped, or it is new — inventing a fuzzy match would manufacture ambiguity the
+  chain does not have. Accepting routes through `import_review._save_crypto` into
+  `crypto.record_wallet_credit` / `record_wallet_debit`, keeping `crypto.py` the
+  sole writer.
+- **Boundary (not yet built): the webSlinger SCRAPE path is still cash-shaped for
+  crypto.** A download whose script DROPS A FILE (EXPORT mode) goes through
+  `_ingest_file_via_review` and therefore gets the coin-native routing above. A
+  download that SCRAPES ROWS calls `import_review.build_review` on flat row dicts,
+  which maps date/payee/amount — there is no coin row shape for it to map because
+  no recorded script scrapes an address explorer yet. When one exists, the mapping
+  belongs beside `mapped_from_crypto_record`, keyed off the account kind, and must
+  not be guessed at in advance: the field names come from the generated script.
 
 ### 5.8j Cryptocurrency accounts in the UI (register, holdings, grouping)
 - **Grouping is already investment-like, by the shared constant.** A `type='crypto'`
@@ -1162,15 +1228,29 @@ floats and no money math in the UI layer.
   grouping, but their activity lives in DIFFERENT tables (`crypto_transactions`
   vs `investment_transactions`), so widening the dispatch to the membership test
   would misroute a wallet into a register that reads the wrong table.
-- **The crypto register is a THIN, read-only projection.** It renders through
-  `crypto.register_rows`, which owns every running-balance / cents / label
-  computation (the UI holds no SQL and no money or precision math). Columns: Date,
-  Action, Coin / Wallet, Payee (the on-chain counterparty carried on
-  `crypto_transactions.payee` -- the `From` on a coin credit, the `To` on a coin
-  debit), Quantity (stored SIGNED -- an OUT leg is negative), Price,
-  Coin Bal (running per-coin balance, folding in the same-coin gas so it ties to
-  `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a Buy/Sell), Cash Bal,
-  and Fee. The crypto event taxonomy renders as designed: a swap's two
+- **The crypto register is a THIN, read-only projection, and ITS COLUMNS DEPEND ON
+  THE ACCOUNT KIND.** It renders through `crypto.register_rows`, which owns every
+  running-balance / cents / label computation (the UI holds no SQL and no money or
+  precision math). `CryptoRegisterModel` lists the columns each kind shows and maps
+  position -> column KEY, so a position that means Price on an exchange is a coin
+  quantity on a wallet; callers address columns through `column_index(key)`, and a
+  key the kind does not show returns -1.
+  - **EXCHANGE** (custodial: a fiat cash sleeve, coin traded for dollars) —
+    Date, Action, Coin / Wallet, Payee, Quantity (stored SIGNED — an OUT leg is
+    negative), Price, Coin Bal (running per-coin balance, folding in the same-coin
+    gas so it ties to `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a
+    Buy/Sell), Cash Bal, Fee.
+  - **WALLET** (a single address) — Date, Action, Coin / Wallet, Payee, Memo,
+    Coin Out, Coin In, Coin Bal, Fee. **Price, Amount and Cash Bal are ABSENT, not
+    blank.** For a paper-wallet address there is no per-row USD, no fiat leg and no
+    cash sleeve, so those columns are not merely empty — they invite a reading of
+    the register that is false. Increases and decreases get their own columns (the
+    source's `Value_IN` / `Value_OUT`) because on-chain they are different events
+    with different counterparties, which one signed column hides. The Fee is
+    coin-denominated (`<qty> <SYM>`), never USD. USD is not absent from a wallet,
+    it is just not on the ROW: each coin is a security valued at quantity x market
+    price at the holdings and net-worth layers.
+  The crypto event taxonomy renders as designed: a swap's two
   `swap_group_id` legs BOTH read as one paired `OUT->IN` trade; a same-coin wallet
   transfer renders as `[Other Wallet]` (the mirror model in coin, consuming no
   category, SRD 5.8h); gas that rides an event shows as a `<qty> <SYM>` entry in the
@@ -1191,15 +1271,60 @@ floats and no money math in the UI layer.
   as-is through the single `import_review` chokepoint, posting into the account's
   fiat cash sleeve (`transactions`, which `crypto.account_valuation` folds in) — a
   MATCHING row still points at its existing register line where one can be found.
-- **The holdings window values coins + cash to the account's own balance.**
-  `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price | Market Value |
-  Gain/Loss from `crypto.holding_values` (priced through the shared `{SYM}-USD`
-  path), with the fiat cash sleeve as the last row, and a footer that totals to
-  `crypto.account_valuation().total` -- the SAME number the accounts list shows, so
-  the two cannot drift. An unpriced coin leaves Price / Market Value / Gain-Loss
-  blank. Get Quotes prices the coins (a coin symbol IS its ticker, so unlike
-  equities there is no name-to-ticker guess to confirm) behind the injectable
-  `crypto.fetch_quotes` source.
+- **A crypto review row opens a PENDING register line, like every other kind.**
+  Selecting a NEW row shows the line about to be added at the bottom of the
+  register with an Accept button on it. Most of a chain row is fact and stays
+  read-only — editing the date, coin, quantity or fee would invent history, and
+  the review list is meant to be ground truth. Three fields ARE a judgement and
+  are editable: the **action** (the chain shows coin arriving and cannot say
+  whether it was a plain receive, a staking reward, an airdrop, interest, mined
+  coin or a fork), the **payee** (the address is the truthful default, a
+  recognisable name is more useful), and the **memo**. The action is PICKED from
+  the vocabulary the domain layer validates (`ChoiceDelegate`), scoped to the
+  direction the chain already fixed — a typo would otherwise surface as an
+  exception at accept, with the row already gone from the list.
+  `show_review` must re-fire the selection handler AFTER revealing the panel:
+  `set_entries` selects row 0 and emits while the panel is still hidden, so the
+  first row — the one already selected, whose re-click changes no selection and
+  emits nothing — is precisely the one whose pending line never appeared.
+- **A coin column is sized from the font, and clamped.** A coin quantity is not a
+  dollar amount: ETH carries 18 decimals, so a real row reads
+  `25.566401739928923937` — 21 characters where a fiat cell needs 9 — and fixed
+  96-110px columns elided them to `0....`. Sizing to CONTENT instead starved the
+  stretched Payee (the 42-character address that identifies the row) to a 21px
+  stub, so the width is measured against a worst-case quantity and clamped at
+  both ends, with a header minimum so no section can collapse. Past the cap the
+  number elides and the cell's tooltip carries the full value: two fields that
+  both need room is a scrollbar problem, not a reason to lose either.
+- **The review PANE has a third column set for a wallet.** The cash layout
+  (Status, Date, Num, Payee, Memo, Amount) and the investment one (Status, Date,
+  Security, Action, Shares, Price, Amount) are both wrong for an address: a wallet
+  row's identity is date + coin + quantity + the counterparty ADDRESS, and no fiat
+  moves, so an Amount column has nothing to put in it. A `kind='wallet'` account
+  gets **Status, Date, Payee, Memo, Coin, Coin In, Coin Out, Fee** — read-only in
+  every cell (the chain is not a guess the way an importer's action mapping is),
+  with the fee shown as `<qty> <SYM>`. A crypto EXCHANGE keeps the cash layout: it
+  really does trade coin for dollars.
+- **The holdings window values coins (+ cash on an exchange) to the account's own
+  balance.** `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price |
+  Market Value | Gain/Loss from `crypto.holding_values` (priced through the shared
+  `{SYM}-USD` path), and a footer that totals to `crypto.account_valuation().total`
+  -- the SAME number the accounts list shows, so the two cannot drift. On an
+  EXCHANGE the fiat cash sleeve is the last row; a WALLET has no cash sleeve at all,
+  so it gets no Cash row, no Cash total and no `Cash: $0.00` in the register header
+  -- printing a zero states a balance that is not even a concept there. An unpriced
+  coin leaves Price / Market Value / Gain-Loss blank. Get Quotes prices the coins (a
+  coin symbol IS its ticker, so unlike equities there is no name-to-ticker guess to
+  confirm) behind the injectable `crypto.fetch_quotes` source.
+- **Net worth breaks out per coin and per currency, from the Reports menu.**
+  `Reports ▸ Net Worth by Asset…` opens `NetWorthByAssetDialog`: one COLUMN per
+  coin/currency plus a Total, a NATIVE row (a coin's quantity, a currency bucket's
+  own cents) and a USD row converting each through price history / `fx`. Once a
+  ledger holds coin or a foreign currency, one folded dollar figure hides what it
+  is made of -- the same total can be four coins or one. It is a THIN projection of
+  `NetWorthByAssetModel` over `fx.net_worth_by_asset`, which splits exactly the two
+  halves `display_balance` already sums, so a crypto holding is counted EXACTLY
+  once and the Total equals the sidebar's Net Worth strip.
 
 ### 5.8c Backup scoping (one folder per database)
 - Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
