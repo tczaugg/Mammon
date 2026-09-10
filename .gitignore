@@ -27,7 +27,14 @@ download.log
 docs/*_roadmap.md
 docs/quicken_research.md
 docs/priorities_proposal_2026-09.md
+docs/upgrade_priorities.md
 docs/*_plan.md
+# Design docs are internal planning notes, matched by SHAPE like the globs above.
+# (amazon_itemization_design.md and investment_central_design.md predate this rule
+# and stay tracked by explicit add -- git honours an explicit add over an ignore, so
+# this glob does not untrack them; it keeps NEW design docs, e.g. the crypto redesign,
+# private by default.)
+docs/*_design.md
 
 # Build output: PyInstaller's dist/build, and the icon preview blowups.
 build/
