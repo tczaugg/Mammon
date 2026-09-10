@@ -4918,6 +4918,15 @@ class AccountDetailsDialog(QDialog):
         form.addRow("", self.closed)
         form.addRow("", self.hidden)
         form.addRow(self._build_download_group(account))
+        # Parent the button at construction (never leave it briefly parentless --
+        # a realised top-level would steal focus and commit an in-progress cell
+        # edit elsewhere). It reparents into the form when added below.
+        self.reconciled_log_btn = QPushButton("Reconciled change log…", self)
+        self.reconciled_log_btn.setToolTip(
+            "Show every edit or deletion applied to a reconciled transaction in "
+            "this account -- rare events that can throw off a later reconcile.")
+        self.reconciled_log_btn.clicked.connect(self._open_reconciled_log)
+        form.addRow("", self.reconciled_log_btn)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(form_host)
@@ -4927,6 +4936,16 @@ class AccountDetailsDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(scroll, 1)
         outer.addWidget(buttons)
+
+    def _open_reconciled_log(self):
+        """Open the read-only audit trail of changes to this account's reconciled
+        transactions (migration 63). No SQL or money logic here -- the dialog
+        reads it through ``ledger.reconciled_change_log``."""
+        if self._conn is None or self._account_id is None:
+            return
+        from mammon.ui.reconciled_log_dialog import ReconciledChangeLogDialog
+        dlg = ReconciledChangeLogDialog(self._conn, self._account_id, parent=self)
+        dlg.exec_()
 
     def _build_download_group(self, account):
         """The Download (webSlinger) section: a slot for the automation SCRIPT

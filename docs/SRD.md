@@ -130,6 +130,12 @@ One SQLite database. Core tables:
   exact at any decimal count, so only summation is at risk.
 - reconciliations(id, account_id, statement_date, statement_balance, ...) - the
   record of COMPLETED reconciliations only.
+- reconciled_change_log(id, account_id, transaction_id, changed_at, operation,
+  field, old_value, new_value) - a per-account audit trail of every change made
+  to an ALREADY-reconciled transaction (schema v63; see 5.11a). Append-only,
+  written only by `mammon/ledger.py` (the sole transaction writer) and otherwise
+  read-only. `transaction_id` carries no foreign key on purpose: after a delete
+  the row it names is gone, and the log entry must outlive it.
 - reconcile_drafts(account_id PK, statement_date, beginning/ending_cents,
   charges/payments/credits/finance_cents, finance_category, finance_txn_id) -
   the statement inputs of an UNFINISHED reconcile, one per account (schema v30).
@@ -2785,6 +2791,33 @@ money movement.
   `Balances…` still edits them. This also carries the posted finance charge's
   transaction id, so a reopened reconcile updates that charge rather than posting
   a duplicate.
+
+### 5.11a Audit log of changes to reconciled transactions
+A reconciled transaction should rarely be changed. Once a row is locked in
+against a statement, editing its amount or date, un-reconciling it, or deleting
+it outright silently throws off the NEXT reconcile of that account, and the
+failure then surfaces far from its cause. So every such change is recorded, on a
+per-account basis, to make that class of problem easy to diagnose after the fact.
+
+- The store is `reconciled_change_log` (Section 4, schema v63). It is written
+  ONLY from `mammon/ledger.py` -- the sole writer of transaction rows -- so the
+  same choke point that enforces the transfer invariants records the audit. The
+  edit path (`_apply_update`, through which `update_transaction`, `void` and
+  `replace` all pass) logs one row per changed field on a transaction whose
+  `reconciled` flag was already set; the delete path (`delete_transaction`) logs
+  one row per surviving value field of a reconciled row it removes. Both legs of
+  a reconciled transfer are audited, each in its own account's log.
+- What is captured per row: the account, the transaction id, an ISO timestamp,
+  the operation (`edit`/`delete`), the field name, and the old and new values as
+  TEXT (amounts as signed cents, stored verbatim -- the log carries no money
+  logic). Only fields that affect a reconcile are tracked (date, num, payee,
+  category, memo, amount, and the cleared/reconciled flags for edits); internal
+  ids are excluded. Editing an UN-reconciled transaction, or reconciling a row
+  for the first time (a 0 -> 1 transition), logs nothing.
+- The read side is `ledger.reconciled_change_log(conn, account_id)` (oldest
+  first). The viewer is a strictly read-only dialog reachable from the account's
+  Details window ("Reconciled change log…"); like all of `ui/` it holds no SQL
+  and no money logic, rendering the stored strings as-is.
 
 ### 5.12 Budgets (roadmap item 6)
 Named per-category monthly spending targets, so "did I overspend Groceries in

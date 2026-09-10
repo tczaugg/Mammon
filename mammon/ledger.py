@@ -36,6 +36,22 @@ _UNSET = object()
 # Quicken's marker in the Category field for a split transaction.
 SPLIT_LABEL = "--Split--"
 
+# Fields whose change on an ALREADY-reconciled transaction is worth auditing
+# (migration 63, table ``reconciled_change_log``). ``amount`` and ``date`` are
+# the ones that actually move a reconcile balance; the rest identify the row.
+# ``cleared``/``reconciled`` are here because flipping them on a reconciled row
+# (un-reconciling, un-clearing) is precisely the kind of quiet change this log
+# exists to catch. Internal ids (``fitid``, ``import_id``, ``scheduled``,
+# transfer links) are deliberately excluded -- they never affect a reconcile.
+_AUDIT_FIELDS = (
+    "date", "num", "payee", "category_id", "memo", "amount",
+    "cleared", "reconciled",
+)
+# On a DELETE the whole row goes, so its surviving VALUE fields are what a later
+# reconcile lost. The status flags are omitted: a 'delete' entry logged at all
+# already means the row was reconciled, so recording reconciled=1 -> None is noise.
+_DELETE_AUDIT_FIELDS = ("date", "num", "payee", "category_id", "memo", "amount")
+
 
 # --------------------------------------------------------------------------
 # Accounts
@@ -603,6 +619,12 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
     _delete_split_mirrors(conn, txn_id)
     pair_id = row["transfer_pair_id"]
     pair_row = get_transaction(conn, pair_id) if pair_id is not None else None
+    # Audit the deletion of a reconciled row (migration 63) BEFORE it is gone --
+    # both legs, each scoped to its own account, since deleting one transfer leg
+    # deletes the other and either may have been reconciled.
+    _log_reconciled_delete(conn, row)
+    if pair_row is not None:
+        _log_reconciled_delete(conn, pair_row)
     # Deleting this row NULLs the pair's transfer_pair_id via ON DELETE SET NULL,
     # so the second delete is a clean, unlinked delete.
     conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
@@ -614,6 +636,21 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
     if pair_row is not None:
         edits.append((pair_row["account_id"], int(pair_row["date"][:4])))
     _touch_checkpoints(conn, *edits)
+
+
+def reconciled_change_log(conn: sqlite3.Connection,
+                          account_id: int) -> list[sqlite3.Row]:
+    """Read-only: the audit trail of edits and deletions applied to RECONCILED
+    transactions in ``account_id``, oldest first (migration 63).
+
+    Each row has ``transaction_id``, ``changed_at`` (ISO), ``operation``
+    ('edit'/'delete'), ``field``, ``old_value`` and ``new_value`` (both TEXT;
+    amounts are signed cents rendered verbatim -- no money logic here). Written
+    only by the edit/delete paths above; nothing else touches the table."""
+    return conn.execute(
+        "SELECT * FROM reconciled_change_log WHERE account_id=? ORDER BY id",
+        (account_id,),
+    ).fetchall()
 
 
 # --------------------------------------------------------------------------
@@ -908,7 +945,7 @@ def update_account(conn: sqlite3.Connection, account_id: int, **fields: Any) -> 
     allowed = {"name", "type", "currency", "institution", "note", "closed_flag",
                "sort_order", "url", "account_number", "hidden", "download_script",
                "lot_method", "download_config", "cutover_date", "asset_class",
-               "property_address", "secured_by_account_id"}
+               "property_address", "secured_by_account_id", "crypto_kind"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     bad = set(fields) - allowed
     if bad:
@@ -2262,11 +2299,61 @@ def _touch_checkpoints(conn: sqlite3.Connection, *account_years) -> None:
 # internals
 # --------------------------------------------------------------------------
 def _apply_update(conn: sqlite3.Connection, txn_id: int, updates: dict) -> None:
+    # Snapshot BEFORE the write so a change to a reconciled row can be audited
+    # (migration 63). This is the single choke point every column edit passes
+    # through -- primary and mirror legs, void, replace_field -- so auditing here
+    # catches them all in one place. The read is skipped-free of side effects and
+    # only matters when the row turns out to have been reconciled.
+    before = get_transaction(conn, txn_id)
     assignments = ",".join(f"{k}=?" for k in updates)
     conn.execute(
         f"UPDATE transactions SET {assignments} WHERE id=?",
         (*updates.values(), txn_id),
     )
+    if before is not None and before["reconciled"]:
+        for field, new_value in updates.items():
+            if field in _AUDIT_FIELDS and before[field] != new_value:
+                _log_reconciled_change(
+                    conn, before["account_id"], txn_id, "edit",
+                    field, before[field], new_value,
+                )
+
+
+def _audit_value(v: Any) -> Optional[str]:
+    """Render an old/new field value for the audit log as TEXT, preserving NULL.
+
+    Amounts are signed cents (e.g. ``'-5000'``); the log stays money-logic-free
+    and any presentation layer formats them, so the value is stored verbatim."""
+    return None if v is None else str(v)
+
+
+def _log_reconciled_change(conn: sqlite3.Connection, account_id: int,
+                           txn_id: Optional[int], operation: str,
+                           field: Optional[str], old: Any, new: Any) -> None:
+    """Append one row to ``reconciled_change_log`` (migration 63). Called only
+    from the edit/delete paths and only for transactions that were reconciled at
+    the time -- the caller has already checked that."""
+    conn.execute(
+        "INSERT INTO reconciled_change_log"
+        " (account_id, transaction_id, operation, field, old_value, new_value)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (account_id, txn_id, operation, field,
+         _audit_value(old), _audit_value(new)),
+    )
+
+
+def _log_reconciled_delete(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Audit the deletion of a RECONCILED transaction: one 'delete' entry per
+    surviving value field (migration 63). No-op for an unreconciled row."""
+    if not row["reconciled"]:
+        return
+    for field in _DELETE_AUDIT_FIELDS:
+        value = row[field]
+        if value is not None:
+            _log_reconciled_change(
+                conn, row["account_id"], row["id"], "delete",
+                field, value, None,
+            )
 
 
 def _category_path(conn: sqlite3.Connection, category_id: int) -> str:

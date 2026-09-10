@@ -1842,6 +1842,34 @@ ALTER TABLE review_items ADD COLUMN fee_quantity TEXT;
 ALTER TABLE review_items ADD COLUMN tx_hash TEXT;
 """
 
+# Migration 63: a per-account audit log of every change made to a RECONCILED
+# transaction. A reconciled row should almost never change -- once it is locked
+# in against a statement, editing its amount or date, or deleting it outright,
+# silently throws off the next reconcile of that account, and the failure then
+# shows up far from its cause. This table records one row per changed field on an
+# edit (operation='edit') and one row per surviving value on a deletion
+# (operation='delete') of a transaction that was reconciled at the time, so such
+# a change can be traced after the fact and a broken reconcile diagnosed.
+#
+# ledger.py (the sole writer of transaction rows) writes this table from its
+# edit and delete paths; everything else reads it (ledger.reconciled_change_log).
+# ``transaction_id`` intentionally carries NO foreign key: after a delete the row
+# it names is gone, and the log entry must outlive it -- a cascade would erase
+# exactly the evidence this log exists to keep.
+_V63 = """
+CREATE TABLE reconciled_change_log (
+    id             INTEGER PRIMARY KEY,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    transaction_id INTEGER,                                   -- may be gone after a delete; no FK on purpose
+    changed_at     TEXT NOT NULL DEFAULT (datetime('now')),   -- ISO timestamp
+    operation      TEXT NOT NULL,                             -- 'edit' | 'delete'
+    field          TEXT,                                      -- column name changed
+    old_value      TEXT,
+    new_value      TEXT
+);
+CREATE INDEX idx_reconciled_change_log_account ON reconciled_change_log(account_id, id);
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -1906,6 +1934,7 @@ MIGRATIONS: list[str] = [
     _V60,
     _V61,
     _V62,
+    _V63,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
