@@ -141,17 +141,31 @@ LOT_METHODS = ("average", "fifo", "lifo")
 # to the checkpoint ``income`` total).
 # ---------------------------------------------------------------------------
 _ADD_ACTIONS = {
-    "BUY", "SWAP_IN", "TRANSFER_IN", "RECEIVE",
+    "BUY", "BUYX", "SWAP_IN", "TRANSFER_IN", "RECEIVE",
     "REWARD", "INTEREST", "AIRDROP", "MINING", "FORK",
 }
-_REMOVE_ACTIONS = {"SELL", "SWAP_OUT", "TRANSFER_OUT", "SEND", "FEE"}
+_REMOVE_ACTIONS = {"SELL", "SELLX", "SWAP_OUT", "TRANSFER_OUT", "SEND", "FEE"}
+# Quicken's X-twins, and Mammon already speaks them on the investment side
+# (`investments._CASH_ZERO_ACTIONS`): a trade whose cash arrives or leaves by
+# TRANSFER rather than sitting in the account. Same meaning in coin -- SELLX is a
+# real disposal (gain is booked against the relieved basis) whose proceeds go
+# straight to another account, so this account's cash nets to zero.
+CROSS_ACTIONS = {"BUYX", "SELLX"}
+# Fiat moving in or out of an EXCHANGE account's internal cash sleeve, carrying
+# NO coin: a bank deposit, a cash withdrawal, or dollars arriving from another
+# venue. Deliberately in NEITHER add nor remove set -- they open and relieve no
+# position, and `_apply_txn` already skips a symbol-less row, so the holdings
+# replay ignores them while `crypto_cash` (which sums every non-NULL `amount`)
+# picks them up. A WALLET never has one: it holds no fiat.
+_CASH_ACTIONS = {"DEPOSIT", "WITHDRAW"}
+CASH_ACTIONS = _CASH_ACTIONS
 # A disposal for value books realized gain; a TRANSFER_OUT (basis rides to the
 # other wallet) and a FEE (plain expense) remove coin WITHOUT booking a gain.
-_DISPOSAL_ACTIONS = {"SELL", "SWAP_OUT", "SEND"}
+_DISPOSAL_ACTIONS = {"SELL", "SELLX", "SWAP_OUT", "SEND"}
 # In-kind income: credited as coin, valued at FMV, summed into checkpoint income.
 _INCOME_ACTIONS = {"RECEIVE", "REWARD", "INTEREST", "AIRDROP", "MINING"}
 
-ACTIONS = _ADD_ACTIONS | _REMOVE_ACTIONS
+ACTIONS = _ADD_ACTIONS | _REMOVE_ACTIONS | _CASH_ACTIONS
 
 
 def quantity_context() -> decimal.Context:
@@ -923,6 +937,12 @@ _WALLET_DEBIT_ACTIONS = {"SEND"}
 # writers validate against rather than re-listing the vocabulary somewhere else.
 WALLET_CREDIT_ACTIONS = _WALLET_CREDIT_ACTIONS
 WALLET_DEBIT_ACTIONS = _WALLET_DEBIT_ACTIONS
+# The full coin-direction sets, for surfaces that must render or route an
+# EXCHANGE row too (SELL, SWAP_OUT, TRANSFER_OUT...). Reading these rather than
+# re-listing the vocabulary is what keeps a register column, a review column and
+# the accept path from drifting apart.
+ADD_ACTIONS = _ADD_ACTIONS
+REMOVE_ACTIONS = _REMOVE_ACTIONS
 
 
 def record_wallet_credit(conn, account_id: int, date: str, symbol: str, quantity, *,
@@ -967,6 +987,31 @@ def record_wallet_debit(conn, account_id: int, date: str, symbol: str, quantity,
     return record_event(conn, account_id, date, act, symbol=symbol, quantity=-q,
                         price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                         memo=memo, payee=payee, tx_hash=tx_hash, fitid=fitid,
+                        import_id=import_id)
+
+
+def record_cash(conn, account_id: int, date: str, amount_cents: int, *,
+                action: Optional[str] = None, payee=None, memo=None,
+                tx_hash=None, fitid=None, import_id=None) -> int:
+    """Move FIAT in or out of an exchange account's internal cash sleeve, with no
+    coin leg at all -- a bank deposit, a withdrawal, or dollars arriving from
+    another venue.
+
+    ``amount_cents`` is SIGNED (negative = money out) and its sign chooses the
+    action, so a caller cannot label a withdrawal a deposit; pass ``action``
+    only to name one explicitly. ``symbol``/``quantity``/``price`` stay NULL,
+    which is what keeps this row out of the holdings replay (``_apply_txn`` skips
+    a symbol-less row) while ``crypto_cash`` still counts it.
+
+    A WALLET must never carry one of these -- a paper-wallet address holds no
+    fiat -- but that is the caller's concern; this is the sleeve's writer."""
+    cents = int(amount_cents)
+    act = _norm(action) if action else ("DEPOSIT" if cents >= 0 else "WITHDRAW")
+    if act not in _CASH_ACTIONS:
+        raise ValueError(f"{action!r} is not a cash-sleeve action; "
+                         f"one of {sorted(_CASH_ACTIONS)}")
+    return record_event(conn, account_id, date, act, amount=cents, payee=payee,
+                        memo=memo, tx_hash=tx_hash, fitid=fitid,
                         import_id=import_id)
 
 
@@ -1076,6 +1121,367 @@ def record_wallet_transfer(conn, from_account_id: int, to_account_id: int,
     return out_id, in_id
 
 
+# How far apart two legs of the same movement may be dated and still be
+# recognised as one transfer. A coin send and its arrival are the SAME on-chain
+# event, but two sources date it differently: an exchange stamps when it credited
+# the account, the chain stamps when the block confirmed, and a weekend or a
+# congested network puts days between them. Wider than the cash window because
+# nothing here is ambiguous -- the coin, the quantity and the two accounts must
+# all agree before a date is even consulted.
+TRANSFER_LINK_WINDOW_DAYS = 10
+
+
+def link_as_transfer(conn, txn_id: int, other_account_id: int, *, basis=None):
+    """Turn a one-sided coin movement into a linked transfer PAIR with
+    ``other_account_id``. Returns ``(out_id, in_id)``.
+
+    This is the operation behind naming one of your own accounts as the
+    counterparty. Coin moving between two accounts the user controls is not a
+    disposal: no gain is realized and the cost basis rides along. Left as a
+    SEND on one side and a RECEIVE on the other, the same movement books a
+    realized gain that never happened AND restarts the basis at market -- the
+    coin analogue of the double-counted transfer CLAUDE.md warns about.
+
+    It LINKS an existing counter-leg when one is there, and only creates the
+    mirror when there is none. That distinction is the whole point: a
+    wallet-to-exchange move is usually already recorded TWICE, once from each
+    side's own export, so minting a third row would leave the wallet short. A
+    candidate must match on coin, on magnitude and on direction, and fall within
+    :data:`TRANSFER_LINK_WINDOW_DAYS`; anything less exact is not a match.
+    """
+    row = get_event(conn, txn_id)
+    if row is None:
+        raise KeyError(f"no crypto transaction {txn_id}")
+    if row["transfer_pair_id"] is not None:
+        raise ValueError("this row is already one leg of a transfer")
+    if row["swap_group_id"] is not None:
+        raise ValueError("a swap leg cannot be re-linked as a transfer")
+    other_acct = ledger.get_account(conn, other_account_id)
+    if other_acct is None:
+        raise KeyError(f"no account {other_account_id}")
+    if not is_crypto_account(other_acct):
+        # The other account holds DOLLARS, not coin, so what crosses is the
+        # row's fiat leg -- Quicken's SellX / BuyX. Handled apart from the coin
+        # mirror below because a cash account's rows live in `transactions`, and
+        # writing a coin row into one would be a second writer of the wrong table.
+        return _link_cash_leg(conn, row, other_account_id)
+    symbol = row["symbol"]
+    qty = _D(row["quantity"])
+    if not symbol or qty == 0:
+        # A FIAT row between two crypto accounts: both have cash sleeves, and
+        # dollars move between them as readily as coin does (an exchange venue
+        # and its retail front, say). Mirrored the same way -- adopt the leg the
+        # other account already holds, or mint it -- but in DEPOSIT/WITHDRAW,
+        # because there is no coin here to add to or relieve from a position.
+        return _link_cash_mirror(conn, row, other_account_id)
+    if int(row["account_id"]) == int(other_account_id):
+        raise ValueError("cannot transfer to the same account")
+    if get_account(conn, other_account_id) is None:
+        raise KeyError(f"no account {other_account_id}")
+
+    outgoing = qty < 0
+    from_id = row["account_id"] if outgoing else other_account_id
+    to_id = other_account_id if outgoing else row["account_id"]
+    if basis is None:
+        basis = _basis_to_move(conn, from_id, row["date"], symbol, abs(qty),
+                               get_lot_method(conn, from_id))
+    basis = int(basis)
+
+    other = _find_counter_leg(conn, other_account_id, symbol, qty, row["date"])
+    if other is None:
+        # No leg on the other side: mint the mirror, so the pair is complete.
+        other_id = record_event(
+            conn, other_account_id, row["date"],
+            "TRANSFER_IN" if outgoing else "TRANSFER_OUT", symbol=symbol,
+            quantity=(abs(qty) if outgoing else -abs(qty)),
+            transfer_account_id=row["account_id"], basis=basis,
+            memo=row["memo"], commit=False)
+    else:
+        # Both legs already exist -- adopt them rather than adding a third row.
+        other_id = int(other["id"])
+        _apply_update(conn, other_id, {
+            "action": "TRANSFER_IN" if outgoing else "TRANSFER_OUT",
+            "basis": basis,
+            # A transfer books no proceeds: whatever fiat the source guessed at
+            # for this leg was a valuation, not money that moved.
+            "amount": None,
+        })
+    _apply_update(conn, txn_id, {
+        "action": "TRANSFER_OUT" if outgoing else "TRANSFER_IN",
+        "basis": basis,
+        "amount": None,
+    })
+    conn.execute("UPDATE crypto_transactions SET transfer_account_id=?, "
+                 "transfer_pair_id=? WHERE id=?",
+                 (other_account_id, other_id, txn_id))
+    conn.execute("UPDATE crypto_transactions SET transfer_account_id=?, "
+                 "transfer_pair_id=? WHERE id=?",
+                 (row["account_id"], txn_id, other_id))
+    for aid, d in ((row["account_id"], row["date"]),
+                   (other_account_id, row["date"])):
+        _invalidate_holdings_checkpoints_from(conn, aid, d)
+    conn.commit()
+    for aid in (row["account_id"], other_account_id):
+        rebuild_holdings(conn, aid)
+    return (txn_id, other_id) if outgoing else (other_id, txn_id)
+
+
+def _link_cash_mirror(conn, row, other_account_id: int):
+    """Pair a cash-sleeve movement with its opposite in ANOTHER CRYPTO account.
+
+    The fiat twin of the coin mirror above, and it exists for the same reason:
+    money the user moved between two accounts they hold is one event recorded
+    twice, once by each side's export. Left unpaired it reads as a withdrawal to
+    nowhere and a deposit from nowhere.
+
+    The actions stay DEPOSIT / WITHDRAW -- there is no position to open or
+    relieve, so the coin transfer actions would be wrong here -- and the two
+    amounts are equal and opposite, so the pair nets to zero across the books."""
+    amount = int(row["amount"] or 0)
+    if amount == 0:
+        raise ValueError(
+            "This row moves neither coin nor money, so there is nothing to "
+            "transfer. Set the Action first, so the row states what moved.")
+    txn_id = int(row["id"])
+    other = _find_cash_counter_leg(conn, other_account_id, amount, row["date"])
+    if other is None:
+        other_id = record_cash(conn, other_account_id, row["date"], -amount,
+                               memo=row["memo"] or None)
+    else:
+        other_id = int(other["id"])
+    conn.execute("UPDATE crypto_transactions SET transfer_account_id=?, "
+                 "transfer_pair_id=? WHERE id=?",
+                 (other_account_id, other_id, txn_id))
+    conn.execute("UPDATE crypto_transactions SET transfer_account_id=?, "
+                 "transfer_pair_id=? WHERE id=?",
+                 (row["account_id"], txn_id, other_id))
+    for aid in (row["account_id"], other_account_id):
+        _invalidate_holdings_checkpoints_from(conn, aid, row["date"])
+    conn.commit()
+    return (txn_id, other_id) if amount < 0 else (other_id, txn_id)
+
+
+def _find_cash_counter_leg(conn, account_id: int, amount: int, date: str):
+    """The unpaired cash row in ``account_id`` that is the other half of this
+    money movement: no coin, the exact opposite amount, within
+    :data:`TRANSFER_LINK_WINDOW_DAYS`. Nearest date wins."""
+    import datetime as _date
+    try:
+        anchor = _date.date.fromisoformat(date)
+    except (TypeError, ValueError):
+        return None
+    best = best_gap = None
+    for r in conn.execute(
+            "SELECT * FROM crypto_transactions WHERE account_id=? "
+            "AND symbol IS NULL AND amount=? AND transfer_pair_id IS NULL "
+            "AND transfer_account_id IS NULL", (account_id, -int(amount))).fetchall():
+        try:
+            gap = abs((_date.date.fromisoformat(r["date"]) - anchor).days)
+        except (TypeError, ValueError):
+            continue
+        if gap > TRANSFER_LINK_WINDOW_DAYS:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = r, gap
+    return best
+
+
+def _link_cash_leg(conn, row, cash_account_id: int):
+    """Send a crypto row's FIAT leg to a cash account -- Quicken's SellX / BuyX.
+
+    A sale whose proceeds are wired to a bank never parks the money in the
+    exchange's cash sleeve, and a purchase funded from a bank never takes money
+    out of it. So the crypto row keeps its ``amount`` (that IS what the disposal
+    realized, and the realized gain is computed from it) and gains a
+    ``transfer_account_id``; :func:`crypto_cash` then excludes it from the sleeve,
+    and the matching ordinary transaction in the cash account is where the money
+    actually lands. Counting it in both places would double the cash.
+
+    The cash leg is written through :mod:`mammon.ledger` -- the sole writer of
+    ``transactions`` -- so neither table grows a second writer."""
+    amount = int(row["amount"] or 0)
+    if amount == 0:
+        raise ValueError(
+            "This row moves no money, so there is nothing to transfer to a cash "
+            "account. Set the Action to a trade (or a deposit/withdrawal) first, "
+            "so the row states an amount.")
+    txn_id = int(row["id"])
+    crypto_acct = ledger.get_account(conn, row["account_id"])
+    name = (crypto_acct["name"] if crypto_acct else "") or "crypto"
+    # A REAL double-entry transfer, through ledger.create_transfer -- the one
+    # path that writes `transfer_account_id` and the mirror invariant with it.
+    # Routing around it (a bare INSERT setting that column) would make a second
+    # writer of the transfer relationship, which is the main way to break this
+    # codebase. The crypto row's `amount` stays in the sleeve and this leg takes
+    # it straight back out, so the exchange nets to zero and the money lands in
+    # the bank -- the same arithmetic Quicken's SellX does, expressed as the two
+    # rows it really is.
+    if amount > 0:                       # proceeds leaving the exchange
+        from_id, to_id = int(row["account_id"]), cash_account_id
+    else:                                # a purchase funded from the bank
+        from_id, to_id = cash_account_id, int(row["account_id"])
+    legs = ledger.create_transfer(
+        conn, from_id, to_id, row["date"], abs(amount),
+        memo=row["memo"] or None, payee=name)
+    # A trade whose cash went elsewhere is Quicken's X form. Renaming the action
+    # is not cosmetic: it is how the register SAYS the proceeds left, so a row
+    # reading SELL with a Transfer beside it cannot be mistaken for a sale whose
+    # money is still sitting in the account.
+    act = _norm(row["action"])
+    updates = {"transfer_account_id": cash_account_id}
+    if act in ("SELL", "BUY"):
+        updates["action"] = act + "X"
+    sets = ", ".join(f"{k}=?" for k in updates)
+    conn.execute(f"UPDATE crypto_transactions SET {sets} WHERE id=?",
+                 (*updates.values(), txn_id))
+    _invalidate_holdings_checkpoints_from(conn, row["account_id"], row["date"])
+    conn.commit()
+    rebuild_holdings(conn, row["account_id"])
+    return legs
+
+
+def unlink_transfer(conn, txn_id: int) -> bool:
+    """Break a transfer pair back into two independent one-sided rows, keeping
+    both. The inverse of :func:`link_as_transfer`; returns whether anything was
+    unlinked. Deliberately NOT a delete -- the two movements really happened, and
+    only the claim that they are the same movement is being withdrawn."""
+    row = get_event(conn, txn_id)
+    if row is None:
+        return False
+    if row["transfer_pair_id"] is None:
+        # A cash leg is linked by transfer_account_id alone (its other half lives
+        # in `transactions`, so there is no crypto id to pair with). Unlinking
+        # returns the money to the sleeve and removes the cash row -- that row was
+        # created BY the link and represents nothing without it.
+        if row["transfer_account_id"] is None:
+            return False
+        _unlink_cash_leg(conn, row)
+        return True
+    pair_id = int(row["transfer_pair_id"])
+    for tid in (txn_id, pair_id):
+        r = get_event(conn, tid)
+        if r is None:
+            continue
+        act = _norm(r["action"])
+        if act in ("TRANSFER_OUT", "TRANSFER_IN"):
+            # Only a COIN transfer becomes a plain send/receive. A cash leg keeps
+            # its DEPOSIT/WITHDRAW -- money still moved in or out of the sleeve;
+            # all that is withdrawn is the claim about where it went.
+            _apply_update(conn, tid, {
+                "action": "SEND" if act == "TRANSFER_OUT" else "RECEIVE",
+            })
+        conn.execute("UPDATE crypto_transactions SET transfer_account_id=NULL, "
+                     "transfer_pair_id=NULL WHERE id=?", (tid,))
+        _invalidate_holdings_checkpoints_from(conn, r["account_id"], r["date"])
+    conn.commit()
+    for tid in (txn_id, pair_id):
+        r = get_event(conn, tid)
+        if r is not None:
+            rebuild_holdings(conn, r["account_id"])
+    return True
+
+
+def _unlink_cash_leg(conn, row) -> None:
+    """Undo :func:`_link_cash_leg`: drop the ordinary transaction the link
+    created and return the amount to the exchange's cash sleeve."""
+    txn_id = int(row["id"])
+    # Found by the shape the link itself created (same account, date, amount and
+    # a transfer pointing back here), then deleted through `ledger`, the sole
+    # writer of `transactions`. A plain SELECT to locate it is a READ, which the
+    # single-writer rule does not restrict.
+    hit = conn.execute(
+        "SELECT id FROM transactions WHERE account_id=? AND date=? AND amount=? "
+        "AND transfer_account_id=? ORDER BY id LIMIT 1",
+        (int(row["transfer_account_id"]), row["date"], int(row["amount"] or 0),
+         int(row["account_id"]))).fetchone()
+    if hit is not None:
+        # Deleting either leg of a transfer removes both (the mirror model), so
+        # this one call clears the crypto account's offsetting row too.
+        ledger.delete_transaction(conn, int(hit[0]))
+    # ...and back to the plain trade when the link is withdrawn.
+    act = _norm(row["action"])
+    plain = act[:-1] if act in CROSS_ACTIONS else act
+    conn.execute("UPDATE crypto_transactions SET transfer_account_id=NULL, "
+                 "action=? WHERE id=?", (plain, txn_id))
+    _invalidate_holdings_checkpoints_from(conn, row["account_id"], row["date"])
+    conn.commit()
+    rebuild_holdings(conn, row["account_id"])
+
+
+def find_transfer_candidate(conn, account_id: int, date: str, *, symbol=None,
+                            quantity=None, amount=None):
+    """The OTHER crypto account already holding the counter-leg of this movement,
+    as ``(account_id, name)``, or ``None``.
+
+    Money and coin moved between two accounts the user holds are recorded TWICE,
+    once by each venue's own export. Nothing pairs them automatically -- a review
+    row is new to the account it lands in, whatever another account already
+    knows -- so 43 real transfers arrived as 86 unexplained halves. This is what
+    lets the review offer the answer instead of leaving the user to find it.
+
+    Deliberately exact: same coin and magnitude (or the exact opposite amount for
+    cash), within :data:`TRANSFER_LINK_WINDOW_DAYS`, and only when exactly ONE
+    account has such a leg. A near-miss here silently welds two unrelated
+    movements together, which is worse than offering nothing."""
+    hit = find_transfer_leg(conn, account_id, date, symbol=symbol,
+                            quantity=quantity, amount=amount)
+    if hit is None:
+        return None
+    acct = ledger.get_account(conn, int(hit["account_id"]))
+    return (int(hit["account_id"]), (acct["name"] if acct else "") or "")
+
+
+def find_transfer_leg(conn, account_id: int, date: str, *, symbol=None,
+                      quantity=None, amount=None):
+    """The counter-leg ROW itself (see :func:`find_transfer_candidate`), or
+    ``None`` when no other account has one -- or when more than one does."""
+    hits = []
+    for acct in list_accounts(conn, include_closed=True, include_hidden=True):
+        other = int(acct["id"])
+        if other == int(account_id):
+            continue
+        if symbol and quantity is not None:
+            leg = _find_counter_leg(conn, other, symbol, quantity, date)
+        elif amount:
+            leg = _find_cash_counter_leg(conn, other, int(amount), date)
+        else:
+            leg = None
+        if leg is not None:
+            hits.append(leg)
+    return hits[0] if len(hits) == 1 else None
+
+
+def _find_counter_leg(conn, account_id: int, symbol: str, quantity, date: str):
+    """The unpaired row in ``account_id`` that is the OTHER half of this coin
+    movement, or ``None``. Same coin, opposite direction, equal magnitude, within
+    :data:`TRANSFER_LINK_WINDOW_DAYS`; the nearest date wins. Exactness is the
+    point -- a near-miss here silently welds two unrelated movements together."""
+    import datetime as _date
+    want_positive = _D(quantity) < 0        # an OUT leg needs an IN on the other side
+    try:
+        anchor = _date.date.fromisoformat(date)
+    except (TypeError, ValueError):
+        return None
+    best = None
+    best_gap = None
+    for r in conn.execute(
+            "SELECT * FROM crypto_transactions WHERE account_id=? AND symbol=? "
+            "AND transfer_pair_id IS NULL AND swap_group_id IS NULL",
+            (account_id, symbol)).fetchall():
+        q = _D(r["quantity"])
+        if (q > 0) != want_positive or abs(q) != abs(_D(quantity)):
+            continue
+        try:
+            gap = abs((_date.date.fromisoformat(r["date"]) - anchor).days)
+        except (TypeError, ValueError):
+            continue
+        if gap > TRANSFER_LINK_WINDOW_DAYS:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = r, gap
+    return best
+
+
 def get_event(conn, txn_id: int):
     return conn.execute("SELECT * FROM crypto_transactions WHERE id=?",
                         (txn_id,)).fetchone()
@@ -1182,11 +1588,21 @@ def register_rows(conn, account_id: int) -> list[dict]:
                 fee_label = f"{_qty_text(fq)} {fsym}"
                 if fsym == sym:
                     coin_bal = _qty_text(bals[fsym])
-            camt = int(_row_value(t, "amount") or 0) if a in ("BUY", "SELL") else 0
+            # Fiat moves on a trade AND on a bare cash deposit/withdrawal; every
+            # other action leaves `amount` NULL. Kept in step with `crypto_cash`,
+            # which sums every non-NULL amount -- if these disagree the register's
+            # running Cash Bal stops matching the account's own cash figure.
+            camt = (int(_row_value(t, "amount") or 0)
+                    if a in ("BUY", "SELL") or a in _CASH_ACTIONS else 0)
             cash += camt
 
+            # The linked account is its OWN field, not a label smuggled into the
+            # coin column. A register needs to say WHICH coin moved and WHERE it
+            # went at the same time; folding them into one cell means a transfer
+            # row cannot state its own symbol.
+            transfer_name = _other_wallet(_row_value(t, "transfer_account_id"))
             if a in ("TRANSFER_OUT", "TRANSFER_IN"):
-                label = f"[{_other_wallet(_row_value(t, 'transfer_account_id'))}]"
+                label = f"[{transfer_name}]"
             elif a in ("SWAP_OUT", "SWAP_IN"):
                 pair = swap_pairs.get(_row_value(t, "swap_group_id"), {})
                 o, i = pair.get("out"), pair.get("in")
@@ -1199,6 +1615,7 @@ def register_rows(conn, account_id: int) -> list[dict]:
             row["cash_amt"] = camt
             row["cash_bal"] = cash
             row["label"] = label
+            row["transfer_name"] = transfer_name
             row["fee_label"] = fee_label
             out.append(row)
     return out
@@ -1436,6 +1853,21 @@ class CryptoQuoteSource:
         backend = self._backend or investments.YFinanceQuoteSource()
         return backend.get_quotes(pairs)
 
+    def get_history(self, symbols, *, start=None, end=None, interval="1mo"):
+        """Historical closes for each BARE coin symbol, keyed by the ``'{SYM}-USD'``
+        pair -- the crypto twin of :meth:`investments.YFinanceQuoteSource.get_history`.
+        Delegates to the backend's ``get_history``; a backend that only reports the
+        latest close (no such method) raises :class:`QuoteSourceUnavailable`, so the
+        caller can tell "no history" apart from "no rows"."""
+        pairs = [pair_symbol(s) for s in symbols if (s or "").strip()]
+        backend = self._backend or investments.YFinanceQuoteSource()
+        getter = getattr(backend, "get_history", None)
+        if getter is None:
+            raise QuoteSourceUnavailable(
+                "%s cannot fetch historical quotes; it only reports the latest "
+                "close." % type(backend).__name__)
+        return getter(pairs, start=start, end=end, interval=interval)
+
 
 def default_quote_source():
     """The default crypto quote backend, or raise if none is installed. Only
@@ -1463,3 +1895,93 @@ def fetch_quotes(conn, symbols, source=None) -> list:
         investments.record_price(conn, q.symbol, q.date, q.close,
                                  q.source or default_name)
     return quotes
+
+
+def fetch_quote_history(conn, symbols, *, start=None, end=None, source=None,
+                        interval: str = "1mo") -> int:
+    """Download HISTORICAL USD closes for each BARE coin symbol and store them in
+    ``price_history`` under the ``'{SYM}-USD'`` pair -- the crypto twin of
+    :func:`investments.fetch_quote_history`. The source is handed the bare symbols
+    and returns Quotes already keyed by the pair (see :class:`CryptoQuoteSource`);
+    a source that reports only the latest close (no ``get_history``) raises
+    :class:`QuoteSourceUnavailable`, so "no history support" is distinct from "no
+    rows found". Downloaded rows are REFETCHABLE -- a re-download on a corrected
+    scale replaces the old ones -- while a register-carried ``txn`` price (see
+    :func:`learn_prices_from_transactions`) is kept, exactly as securities do via
+    :data:`investments.REFETCHABLE_SOURCES`. Tests inject a fake ``source``;
+    production omits it and gets yfinance via :func:`default_quote_source`. Returns
+    the number of price rows actually written."""
+    syms: list[str] = []
+    for s in symbols:
+        s = (s or "").strip()
+        if s and s not in syms:
+            syms.append(s)
+    if not syms:
+        return 0
+    src = source or default_quote_source()
+    getter = getattr(src, "get_history", None)
+    if getter is None:
+        raise QuoteSourceUnavailable(
+            "%s cannot fetch historical quotes; it only reports the latest "
+            "close." % type(src).__name__)
+    quotes = getter(syms, start=start, end=end, interval=interval)
+    default_name = getattr(src, "source_name", None)
+    rows = [(q.symbol, q.date, q.close, q.source or default_name) for q in quotes]
+    return investments.record_prices_if_absent(
+        conn, rows, replace_sources=investments.REFETCHABLE_SOURCES)
+
+
+def _price_from_amount(amount, quantity) -> Optional[Decimal]:
+    """The per-unit USD price a fiat ``amount`` (signed cents) and a coin
+    ``quantity`` (Decimal text) imply: ``|amount| / 100 / |quantity|``, or ``None``
+    when either is missing/zero. Computed in the high-precision quantity context so
+    a wei-scale quantity does not lose its low-order digits. Not a guess -- it is
+    the same number the ``price`` column would already hold; the wrappers
+    (``record_buy`` etc.) fill ``price`` for us, so this only rescues a raw
+    :func:`record_event` row that stated a value and a quantity but no price."""
+    if not amount or quantity in (None, ""):
+        return None
+    with decimal.localcontext(quantity_context()):
+        qty = abs(_D(quantity))
+        if qty == 0:
+            return None
+        return (Decimal(abs(int(amount))) / _HUNDRED) / qty
+
+
+def learn_prices_from_transactions(conn, account_id=None, *, txn_id=None) -> int:
+    """Record each crypto event's own per-unit USD price into ``price_history``
+    under the ``'{SYM}-USD'`` pair, so the register ITSELF is a source of price
+    history -- the crypto twin of
+    :func:`investments.learn_prices_from_transactions`. A buy/sell/income/swap row
+    states what one coin was worth on its date (the ``price`` column the wrappers
+    fill from the fiat leg); a raw :func:`record_event` row that stated a value and
+    a quantity but no price has it DERIVED (see :func:`_price_from_amount`) -- the
+    same number, not a guess. Written with source ``txn`` and DO-NOTHING
+    precedence, so an already-recorded quote for the same (pair, date) is KEPT --
+    a single trade's implied price never stomps a market close (and a later
+    current-quote upsert via :func:`fetch_quotes` still supersedes a ``txn`` row).
+    Scope with ``account_id`` (one account) or ``txn_id`` (one row); omit both to
+    walk every crypto account. Returns the number of price rows written."""
+    cols = "symbol, date, price, amount, quantity"
+    if txn_id is not None:
+        rows = conn.execute(
+            "SELECT %s FROM crypto_transactions WHERE id=?" % cols,
+            (txn_id,)).fetchall()
+    elif account_id is not None:
+        rows = conn.execute(
+            "SELECT %s FROM crypto_transactions WHERE account_id=?" % cols,
+            (account_id,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT %s FROM crypto_transactions" % cols).fetchall()
+    priced = []
+    for r in rows:
+        sym = str(r["symbol"] or "").strip()
+        if not sym or not r["date"]:
+            continue
+        price = r["price"]
+        if price in (None, ""):
+            price = _price_from_amount(r["amount"], r["quantity"])
+        if price not in (None, ""):
+            priced.append((pair_symbol(sym), r["date"], price, "txn"))
+    return investments.record_prices_if_absent(conn, priced) if priced else 0

@@ -1122,6 +1122,23 @@ floats and no money math in the UI layer.
   `investments.display_balance` delegates a `'crypto'` account to
   `crypto.display_balance`, so the app's single valuation entry point values any
   account correctly.
+- **Coins get the SAME quote plumbing securities have -- current, historical, and
+  register-sourced -- reusing the investments code rather than duplicating it.**
+  `crypto.fetch_quotes` fetches the latest close per coin (the injectable
+  `CryptoQuoteSource`; a missing yfinance backend is a setup step, never raised);
+  a just-fetched quote counts toward the displayed total because
+  `valuation_as_of` treats a recorded price as activity (§5.5c). Historical
+  backfill mirrors §5.5e: `crypto.fetch_quote_history` asks the source for a
+  monthly series via `get_history` (a source that only reports the latest close
+  says so with `QuoteSourceUnavailable` rather than failing obscurely) and writes
+  it with `record_prices_if_absent`, so a downloaded close is refetchable while a
+  register-carried price is kept. And the register is itself price history:
+  `crypto.learn_prices_from_transactions` records each buy/sell/income/swap row's
+  own per-unit USD price (the mirror of §5.5f -- derived from `|amount|/quantity`
+  when a raw event states value and quantity but no price) under the coin's pair,
+  with DO-NOTHING precedence so a single trade never stomps a market close. Unlike
+  equities there is no name-to-ticker guess to confirm -- a coin symbol IS its
+  ticker.
 - **Net worth breaks out per coin AND per currency, USD applied only at this
   layer (the wallet's rule).** `fx.net_worth_by_asset` returns one line per coin
   (its NATIVE quantity and its USD-converted market value, coin x latest
@@ -3276,8 +3293,12 @@ writer) so the item legs actually reach the ledger. Locked behavior:
   accident may migrate it (the lesson of the acceptance tests). A newer one is
   refused too.
 - **Aggregates first, identifiers never.** The tools wrap the report
-  computations (§5.9a), balances, holdings, upcoming scheduled payments and
-  loan schedules; a bounded `transactions` listing, `search` and a `query`
+  computations (§5.9a), balances, holdings (`holdings` for securities,
+  `crypto_holdings` for coin positions -- quantity, cost basis, price, market
+  value and gain per coin, plus the cash sleeve and total, with the wallet address
+  in `account_number` blanked like every other identifier), upcoming scheduled
+  payments and loan schedules; a bounded `transactions` listing, `search` and a
+  `query`
   (read-only SQL, with `schema`) cover the long tail, each capped by a
   `limit` with a `truncated` flag. `accounts.account_number`, `url` and
   `download_config` are never returned by any tool: the SQL tool runs under an

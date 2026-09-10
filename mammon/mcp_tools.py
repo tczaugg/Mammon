@@ -28,8 +28,8 @@ import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Iterable, Optional
 
-from mammon import (budgets, category_types, db, investments, ledger, loans,
-                    portfolio, rebalance, scheduled, security_mix)
+from mammon import (budgets, category_types, crypto, db, investments, ledger,
+                    loans, portfolio, rebalance, scheduled, security_mix)
 from mammon.reports import balances as _balances
 from mammon.reports import budget as _budget
 # Import the function straight from the submodule: the reports package re-exports
@@ -446,6 +446,28 @@ def holdings(conn, account, as_of: Optional[str] = None) -> dict:
             "unpriced": list(v.unpriced)}
 
 
+def crypto_holdings(conn, account, as_of: Optional[str] = None) -> dict:
+    """A crypto account's coin positions valued at market: quantity, cost basis,
+    price, market value and gain per coin, plus the internal cash sleeve and
+    total. Quantities and per-coin prices are exact decimal strings (wei-scale),
+    money is decimal dollars; a coin with no recorded quote is listed under
+    ``unpriced`` and valued at 0 rather than guessed at. The wallet address (kept
+    in the same protected column as an account number) is never returned."""
+    aid = resolve_account(conn, account)
+    d = _date(as_of, "as_of") if as_of else None
+    v = crypto.account_valuation(conn, aid, d)
+    acct = ledger.get_account(conn, aid)
+    return {"account": acct["name"] if acct else str(aid), "as_of": d or "latest",
+            "cash": dollars(v.cash), "securities": dollars(v.securities),
+            "total": dollars(v.total),
+            "holdings": [{"symbol": h.symbol, "quantity": str(h.quantity),
+                          "cost_basis": dollars(h.cost_basis),
+                          "price": None if h.price is None else str(h.price),
+                          "market_value": dollars(h.market_value),
+                          "gain": dollars(h.gain)} for h in v.holdings],
+            "unpriced": list(v.unpriced)}
+
+
 def upcoming(conn, days: int = 30) -> dict:
     """Scheduled payments (bills, subscriptions, loan payments) due within
     ``days`` of today, from the app's own scheduled definitions."""
@@ -850,6 +872,7 @@ TOOLS: dict[str, Callable[..., dict]] = {
     "transactions": transactions,
     "search": search,
     "holdings": holdings,
+    "crypto_holdings": crypto_holdings,
     "lots": lots,
     "capital_gains": capital_gains,
     "performance": performance,
