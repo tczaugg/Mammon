@@ -735,6 +735,26 @@ floats and no money math in the UI layer.
   is not evidence of what a house was worth in 2012, and letting one leak
   backwards would rewrite every historical net-worth figure the first time the
   user clicked Get Value.
+- **A security valuation is as-of on BOTH the price and the share count.** The same
+  leak in the other direction was the historical-net-worth bug: `holding_values`
+  threaded the as-of date into the price but sourced its positions from the derived
+  `holdings` table (today's share counts, no date), so every past date valued the
+  shares held NOW. A position since sold vanished from the past and an account
+  closed out years ago reported its cash sleeve alone at every historical date --
+  the whole net-worth curve understated history. Given an explicit `as_of`,
+  `holding_values` now REPLAYS positions to that date via `compute_holdings`
+  (snapshot-seeded through `holdings_checkpoints`, the same fast path the 40-year
+  open relies on) and values the shares actually held then; a position closed by
+  the date is dropped, exactly as the derived table drops it. With no `as_of` it
+  keeps the fast `holdings`-table read, so today's totals are unchanged. This is
+  the source set behind `account_valuation` / `investments.net_worth` /
+  `ledger.net_worth` / `reports.net_worth_series` / `fx.net_worth_by_currency`
+  (all via `display_balance`), so the whole net-worth stack is point-in-time
+  correct. (The Holdings window and a security-filtered register instead read
+  `security_positions`, which by design freezes the share count at today and caps
+  only the price -- "what I hold now, priced then" -- so those two views and the
+  valuation stack agree at the current date and diverge, intentionally, for a
+  historical as-of.)
 - **Fetching is source-injected** (`asset_values.fetch_values`), exactly like
   `investments.fetch_quotes`: any object with `get_values(requests)`, so the
   network lives inside the source and tests inject a fake.

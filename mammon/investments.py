@@ -452,6 +452,71 @@ def update_investment(
     conn.commit()
 
 
+def update_investment_fields(conn, txn_id: int, **changes) -> bool:
+    """Change a SUBSET of an investment transaction's editable columns, keeping
+    the rest as they are, then write through :func:`update_investment` (the
+    full-row writer). A single-field correction or a batch edit stays on the ONE
+    investment write path instead of minting a second UPDATE. Returns False if
+    the row is gone. ``changes`` keys are :func:`update_investment`'s parameter
+    names (date, action, symbol, quantity, price, amount, commission, memo,
+    transfer_account_id, split_num, split_den)."""
+    prior = get_investment_txn(conn, txn_id)
+    if prior is None:
+        return False
+
+    def pick(name):
+        return changes[name] if name in changes else prior[name]
+
+    update_investment(
+        conn, txn_id, pick("date"), pick("action"),
+        symbol=pick("symbol"), quantity=pick("quantity"), price=pick("price"),
+        amount=pick("amount"), commission=pick("commission"), memo=pick("memo"),
+        transfer_account_id=pick("transfer_account_id"),
+        split_num=pick("split_num"), split_den=pick("split_den"))
+    return True
+
+
+def is_void_investment(txn) -> bool:
+    """True when the investment row carries Quicken's void mark.
+
+    The cash register stamps ``**VOID**`` on the (visible) payee; an
+    ``investment_transactions`` row has no payee, so the mark lives on the memo --
+    the only free text such a row carries -- and the register renders it on the
+    Action cell (see :class:`mammon.ui.models.InvestmentRegisterModel`)."""
+    return str((_row_value(txn, "memo")) or "").startswith(ledger.VOID_PREFIX)
+
+
+def void_investment(conn, txn_id: int) -> bool:
+    """Quicken's Void for an investment transaction: keep the row as a record but
+    take it out of the money AND out of the share math.
+
+    The mirror of :func:`ledger.void_transaction`, on the
+    ``investment_transactions`` schema (which has no payee to stamp and no split
+    lines to drop). ``amount``/``commission``/``quantity``/``price`` all go to
+    zero, so :func:`register_rows`'s running cash and share balances -- and
+    :func:`rebuild_holdings` -- treat the row as inert, and the memo gains the
+    ``**VOID**`` prefix the register shows, with the original amount noted so
+    nothing is lost. Idempotent: returns False (changing nothing) when the row is
+    already void. Does NOT rebuild holdings -- the caller does, exactly as
+    update/delete do. Raises ``KeyError`` if the id is unknown."""
+    prior = get_investment_txn(conn, txn_id)
+    if prior is None:
+        raise KeyError(f"no investment transaction {txn_id}")
+    if is_void_investment(prior):
+        return False
+    was = abs(int(prior["amount"] or 0))
+    note = f"voided; was {was // 100:,}.{was % 100:02d}"
+    memo = (prior["memo"] or "").strip()
+    new_memo = f"{ledger.VOID_PREFIX} {memo}".strip() + f" ({note})"
+    conn.execute(
+        "UPDATE investment_transactions SET amount=0, commission=0,"
+        " quantity=NULL, price=NULL, memo=? WHERE id=?",
+        (new_memo, txn_id))
+    _invalidate_holdings_checkpoints_from(conn, prior["account_id"], prior["date"])
+    conn.commit()
+    return True
+
+
 def symbols_used(conn, account_id: int) -> list:
     """Distinct security symbols already recorded on an account, in first-seen
     order (blank/cash rows dropped). Seeds the new/edit dialog's Security combo;
@@ -1769,15 +1834,46 @@ class AccountValuation:
     unpriced: list = field(default_factory=list)    # symbols with no price
 
 
+def _holdings_as_of(conn, account_id: int, as_of: Optional[str]):
+    """Yield ``(symbol, quantity, cost_basis_cents)`` for the securities the
+    account held on ``as_of`` -- the SOURCE SET :func:`holding_values` values.
+
+    With no ``as_of`` this reads the DERIVED ``holdings`` table: one indexed
+    SELECT, and the fast path the 40-year open leans on. With an explicit
+    ``as_of`` it REPLAYS positions to that date via :func:`compute_holdings`
+    (snapshot-seeded through ``holdings_checkpoints``, so the replay stays cheap),
+    and a position closed by ``as_of`` (qty 0) is dropped -- exactly as the
+    ``holdings`` table excludes a fully-closed position.
+
+    Sourcing from ``holdings`` regardless of ``as_of`` was the historical-
+    valuation bug: every past date valued TODAY's share counts, so a since-sold
+    position vanished from the past (and an account closed out years ago reported
+    its cash sleeve alone), making the whole net-worth curve understate history.
+    The two row shapes -- ``holdings`` rows (symbol/quantity/cost_basis) and
+    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalised HERE,
+    at the one boundary, so every caller above sees a single shape."""
+    if as_of is None:
+        for h in list_holdings(conn, account_id):
+            yield h["symbol"], _D(h["quantity"]), (h["cost_basis"] or 0)
+    else:
+        for sym, lot in sorted(compute_holdings(conn, account_id, as_of).items()):
+            if lot.qty == 0:
+                continue
+            yield sym, lot.qty, lot.cost
+
+
 def holding_values(conn, account_id: int, as_of: Optional[str] = None,
                    prices: Optional[dict] = None) -> list[HoldingValue]:
-    """Value each holding at its latest price (or an injected ``prices`` override,
-    symbol -> price). Unpriced holdings get market_value 0 and gain None."""
+    """Value each holding at its latest price on/before ``as_of`` (or an injected
+    ``prices`` override, symbol -> price). Unpriced holdings get market_value 0
+    and gain None.
+
+    ``as_of`` rewinds the POSITIONS too, not just the price: the shares valued are
+    those actually held on that date (:func:`_holdings_as_of`), so a historical
+    net-worth figure reflects the past holdings rather than today's. With ``as_of``
+    None the current holdings are valued at their latest price (the fast path)."""
     out: list[HoldingValue] = []
-    for h in list_holdings(conn, account_id):
-        sym = h["symbol"]
-        qty = _D(h["quantity"])
-        cost = h["cost_basis"] or 0
+    for sym, qty, cost in _holdings_as_of(conn, account_id, as_of):
         price = _resolve_price(conn, sym, as_of, prices, account_id)
         if price is None:
             out.append(HoldingValue(sym, qty, cost, None, 0, None))
@@ -1854,8 +1950,13 @@ def security_positions(conn, account_id: int, as_of: Optional[str] = None,
     of ``as_of``, sorted by symbol. Includes previously-held positions (now zero
     shares) so the Holdings window can list them in their own tab with each one's
     realized P/L. A bare dividend/interest-only symbol (never actually held) is
-    excluded. As-of caps only the valuation price, never the replay -- so the
-    open positions here match :func:`compute_holdings` / :func:`holding_values`."""
+    excluded. As-of here caps only the valuation PRICE, never the replay -- the
+    share counts are always TODAY's. So the open positions here match
+    :func:`compute_holdings` and match :func:`holding_values` only at the current
+    date (as-of None or the latest activity date); for a historical as-of
+    ``holding_values`` rewinds the share counts to that date and these do not,
+    deliberately -- this view answers "what I hold now, priced then", the
+    valuation path answers "what I held then, priced then"."""
     positions = _replay_positions(conn, account_id)
     return [
         _value_position(conn, account_id, sym, positions[sym], as_of, prices)
