@@ -284,6 +284,28 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   the highlighted result or on every result, replacing the WHOLE field
   (Quicken's semantics; blank clears). Category skips transfers and splits and
   teaches the payee mapping. Confirms first; open registers reload after.
+- **The investment register shares this whole toolkit** (parity roadmap item 2 /
+  upgrade_priorities #5), reusing the cash register's pattern and differing only
+  where the content does. `InvestmentRegisterModel` gains the same
+  `_view`-projection indirection, so a header click sorts (Quantity / Price /
+  Share Bal by Decimal magnitude, Inv Amt / Cash Amt / Cash Bal by cents, Action
+  and Security / Category by text, Date the identity); a filter bar
+  (`InvestmentFilter`) narrows by text over action / security / memo / amount, a
+  date range and an amount range, reporting "Showing n of m"; a header-menu
+  column chooser hides Price / Share Bal / Inv Amt / Cash Amt, persisted through
+  `ui/prefs.hidden_columns` under its OWN scope (`investment_register`) so it
+  never collides with the cash names; a multi-row selection batch-changes the
+  memo, voids or deletes; and a memo/security find-and-replace rewrites matching
+  rows. **Void** has no payee to stamp and no splits to drop, so
+  `investments.void_investment` zeros amount / commission / quantity / price
+  (taking the row out of BOTH the money and the share math), prefixes `**VOID**`
+  to the memo with the original amount noted, and the register renders the mark
+  on the Action cell; idempotent, like the cash void. **Every write still goes
+  through `mammon.investments`** (the sole `investment_transactions` writer) --
+  batch edits via `update_investment_fields`, so no second write path opens and
+  a cash-only transfer leg shown here is skipped rather than mis-resolved against
+  the shared id space. Only the CONTENT differs (shares/price columns, an action
+  verb, no cash-only payee/category cells); the behaviour matches.
 - **Tags** (the register's Tag column): a transaction carries any number of tags,
   entered and edited as ONE comma-separated string in the single Tag cell -- a
   free-text slot, NOT a multi-widget picker (explicit UX choice). Commas separate;
@@ -509,6 +531,10 @@ floats and no money math in the UI layer.
 - Retrieve updated quotes automatically via a Python package where one exists
   (e.g. yfinance for public tickers), falling back to webSlinger only where no
   package covers a source.
+- The investment register offers the same register toolkit as the cash register
+  -- sort, filter, column chooser, multi-row batch edit, find-and-replace and
+  Void -- over the investment columns; see §5.1b for the shared behaviour and the
+  investment-specific Void.
 
 ### 5.8b Stock splits
 - A split's ratio is stored EXACTLY, as an integer `split_num`/`split_den` pair

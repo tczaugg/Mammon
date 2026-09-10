@@ -1673,6 +1673,58 @@ class RegisterModel(QAbstractTableModel):
 # ---------------------------------------------------------------------------
 # investment register model
 # ---------------------------------------------------------------------------
+@dataclass
+class InvestmentFilter:
+    """What the investment register's filter bar narrows to -- the investment
+    parallel of :class:`RegisterFilter`, over the investment columns.
+
+    ``text`` is a case-insensitive substring over the action, the security /
+    category, the memo AND the formatted amount, so typing part of a symbol, a
+    fee's description or ``520`` all find their rows. ``action`` matches one
+    action verb exactly (case-insensitive). Amount bounds are absolute cents over
+    the row's own stored amount (a buy and a sell of the same size both fall in a
+    range). An empty field is no constraint; :meth:`is_empty` means the whole
+    filter is a no-op."""
+
+    text: str = ""
+    date_from: str = ""            # ISO, inclusive
+    date_to: str = ""              # ISO, inclusive
+    amount_min: int | None = None  # absolute cents
+    amount_max: int | None = None
+    action: str = ""
+
+    def is_empty(self) -> bool:
+        return not (self.text.strip() or self.date_from or self.date_to
+                    or self.amount_min is not None or self.amount_max is not None
+                    or self.action.strip())
+
+    def matches(self, r: dict) -> bool:
+        needle = self.text.strip().lower()
+        if needle:
+            hay = " | ".join(
+                str(r.get(k) or "")
+                for k in ("action", "symbol", "memo", "category_label"))
+            amt = r.get("amount")
+            if amt is not None:
+                hay = f"{hay} | {fmt_cents(abs(int(amt)))}"
+            if needle not in hay.lower():
+                return False
+        if self.date_from and r["date"] < self.date_from:
+            return False
+        if self.date_to and r["date"] > self.date_to:
+            return False
+        if self.amount_min is not None or self.amount_max is not None:
+            magnitude = abs(int(r.get("amount") or 0))
+            if self.amount_min is not None and magnitude < self.amount_min:
+                return False
+            if self.amount_max is not None and magnitude > self.amount_max:
+                return False
+        want = self.action.strip().lower()
+        if want and (r.get("action") or "").strip().lower() != want:
+            return False
+        return True
+
+
 class InvestmentRegisterModel(QAbstractTableModel):
     """One investment account's activity as a table with the classic Quicken
     investment columns (the user's data/InvestmentRegister.png).
@@ -1703,6 +1755,14 @@ class InvestmentRegisterModel(QAbstractTableModel):
         self.account_id = account_id
         self._rows: list = []
         self._symbol_filter = None       # None -> show every security
+        # The VIEW: _rows (application order) projected through the current sort
+        # and free-text filter -- the exact pattern the cash RegisterModel uses.
+        # Every row-indexed method reads _view; only reload() and _project() touch
+        # _rows. (The security combo pre-filters into _rows so a filtered row still
+        # carries its correct running share balance; sort/filter layer on top.)
+        self._view: list = []
+        self._sort: tuple[int, int] = (self.DATE, Qt.AscendingOrder)
+        self._filter: InvestmentFilter | None = None
         # The not-yet-accepted review row, edited in place at the bottom of the
         # register before it is committed -- the same gesture the cash register
         # offers. {"entry": ReviewEntry, "buf": {field: text}} or None.
@@ -1764,11 +1824,11 @@ class InvestmentRegisterModel(QAbstractTableModel):
         return self._pending is not None
 
     def pending_row(self) -> int:
-        """Index of the pending row -- always last, after the real history."""
-        return len(self._rows)
+        """Index of the pending row -- always last, after the shown history."""
+        return len(self._view)
 
     def is_pending_row(self, row) -> bool:
-        return self._pending is not None and row == len(self._rows)
+        return self._pending is not None and row == len(self._view)
 
     def pending_entry(self):
         return self._pending["entry"] if self._pending else None
@@ -1826,19 +1886,187 @@ class InvestmentRegisterModel(QAbstractTableModel):
         if self._symbol_filter is not None:
             rows = [r for r in rows if r["symbol"] == self._symbol_filter]
         self._rows = rows
+        self._view = self._project()
         self.endResetModel()
+
+    # ---- sort + filter (the view's projection, parity with the cash register) --
+    def sort(self, column, order=Qt.AscendingOrder):   # QAbstractItemModel API
+        self.set_sort(column, order)
+
+    def set_sort(self, column, order=Qt.AscendingOrder) -> None:
+        """Order the displayed rows by ``column``. Date ascending is the ledger
+        order itself, so it is the identity projection; Date descending its
+        reverse. Ties in any other column fall back to (date, id), so the result
+        is stable across reloads."""
+        column = int(column)
+        order = Qt.DescendingOrder if order == Qt.DescendingOrder else Qt.AscendingOrder
+        if (column, order) == self._sort:
+            return
+        self._sort = (column, order)
+        self._reproject()
+
+    def sort_state(self) -> tuple[int, int]:
+        return self._sort
+
+    def set_filter(self, flt: "InvestmentFilter | None") -> None:
+        """Narrow the displayed rows to those ``flt`` matches (``None`` or an
+        empty filter shows everything). The pending review row is unaffected."""
+        if flt is not None and flt.is_empty():
+            flt = None
+        if flt == self._filter:
+            return
+        self._filter = flt
+        self._reproject()
+
+    def filter_state(self) -> "InvestmentFilter | None":
+        return self._filter
+
+    def view_counts(self) -> tuple[int, int]:
+        """``(shown, total)`` real rows -- the filter bar's 'Showing n of m'."""
+        return len(self._view), len(self._rows)
+
+    def _reproject(self) -> None:
+        self.beginResetModel()
+        self._view = self._project()
+        self.endResetModel()
+
+    def _project(self) -> list:
+        rows = self._rows
+        flt = self._filter
+        if flt is not None and not flt.is_empty():
+            rows = [r for r in rows if flt.matches(r)]
+        column, order = self._sort
+        if column == self.DATE:
+            return list(rows) if order == Qt.AscendingOrder else list(reversed(rows))
+        return sorted(rows, key=self._sort_key(column),
+                      reverse=(order == Qt.DescendingOrder))
+
+    def _sort_key(self, column):
+        """A total order for one column, (date, id) breaking ties. Quantity/Price/
+        Share Bal sort by their Decimal magnitude (blank counts as 0); the money
+        columns by their signed cents; Action and Security/Category by text."""
+        def dec(key):
+            def f(r):
+                v = r.get(key)
+                if v in (None, ""):
+                    return Decimal(0)
+                try:
+                    return Decimal(str(v))
+                except (InvalidOperation, ValueError):
+                    return Decimal(0)
+            return f
+
+        def cents(key):
+            return lambda r: int(r.get(key) or 0)
+
+        keys = {
+            self.ACTION: lambda r: (self._action_label(r) or "").lower(),
+            self.SECURITY: lambda r: (r.get("symbol") or r.get("category_label") or "").lower(),
+            self.QUANTITY: dec("quantity"),
+            self.PRICE: dec("price"),
+            self.SHARE_BAL: dec("share_bal"),
+            self.INV_AMT: cents("inv_amt"),
+            self.CASH_AMT: cents("cash_amt"),
+            self.CASH_BAL: cents("cash_bal"),
+        }
+        primary = keys.get(column, lambda r: r["date"])
+        return lambda r: (primary(r), r["date"], r["id"])
+
+    # ---- multi-row batch edits, void, find/replace (parity) ---------------
+    def txn_ids_at(self, rows) -> list[int]:
+        """The ``investment_transactions`` ids behind display rows, skipping the
+        pending row and any cash-only transfer leg. A cash leg's id belongs to the
+        ``transactions`` table -- a DIFFERENT id space -- so feeding it to
+        :func:`investments.get_investment_txn` would silently hit an unrelated
+        investment row (the shared-id-space hazard)."""
+        out = []
+        for row in rows:
+            t = self.txn_at(row)
+            if t and not t.get("cash_leg"):
+                out.append(int(t["id"]))
+        return out
+
+    def apply_to_investments(self, txn_ids, fn) -> tuple[int, int]:
+        """Run ``fn(txn_row)`` for each id; ``fn`` returns True when it changed the
+        row, False to report it skipped (a ValueError/KeyError counts as skipped
+        too). Returns ``(changed, skipped)``. Does NOT rebuild holdings or reload
+        -- the widget does that once, after (matching the single-edit path)."""
+        changed = skipped = 0
+        for tid in txn_ids:
+            t = investments.get_investment_txn(self.conn, tid)
+            if t is None:
+                continue
+            try:
+                ok = fn(t)
+            except (ValueError, KeyError):
+                ok = False
+            if ok:
+                changed += 1
+            else:
+                skipped += 1
+        return changed, skipped
+
+    def batch_set_memo(self, txn_ids, text: str) -> tuple[int, int]:
+        """Set the memo on many investment rows (``""`` clears it)."""
+        value = (text or "").strip() or None
+        return self.apply_to_investments(
+            txn_ids,
+            lambda t: investments.update_investment_fields(self.conn, t["id"], memo=value))
+
+    def batch_void(self, txn_ids) -> tuple[int, int]:
+        return self.apply_to_investments(
+            txn_ids, lambda t: investments.void_investment(self.conn, t["id"]))
+
+    def batch_delete(self, txn_ids) -> tuple[int, int]:
+        return self.apply_to_investments(
+            txn_ids, lambda t: investments.delete_investment(self.conn, t["id"]))
+
+    def void_row(self, row) -> bool:
+        """Quicken's Void on one investment row (see
+        :func:`investments.void_investment`)."""
+        t = self.txn_at(row)
+        if t is None or t.get("cash_leg"):
+            return False
+        return investments.void_investment(self.conn, t["id"])
+
+    def find_replace(self, field: str, find: str, replace: str) -> int:
+        """Case-insensitive substring find-and-replace over one text field
+        (``memo`` or ``symbol``) across this account's shown rows, each change
+        written through :func:`investments.update_investment_fields`. Returns the
+        number of rows changed. (The security field also has the richer, holding-
+        fusing rename in :func:`investments.plan_security_rename`; this is the memo
+        counterpart plus a plain symbol substitution.)"""
+        if field not in ("memo", "symbol"):
+            raise ValueError(f"cannot find/replace {field!r}")
+        needle = find or ""
+        if not needle:
+            return 0
+        low = needle.lower()
+        changed = 0
+        for r in list(self._rows):
+            if r.get("cash_leg"):
+                continue
+            current = r.get(field) or ""
+            if low not in current.lower():
+                continue
+            new = re.sub(re.escape(needle), lambda _m: replace, current,
+                         flags=re.IGNORECASE)
+            investments.update_investment_fields(
+                self.conn, int(r["id"]), **{field: new or None})
+            changed += 1
+        return changed
 
     def account_name(self) -> str:
         acct = ledger.get_account(self.conn, self.account_id)
         return acct["name"] if acct else ""
 
     def txn_at(self, row):
-        return self._rows[row] if 0 <= row < len(self._rows) else None
+        return self._view[row] if 0 <= row < len(self._view) else None
 
     def row_for_txn(self, txn_id) -> int:
-        """Index of the row for ``txn_id`` in the CURRENT (possibly
-        security-filtered) view, or -1 if it is not shown."""
-        for i, r in enumerate(self._rows):
+        """Index of the row for ``txn_id`` in the CURRENT (security-filtered,
+        sorted, text-filtered) view, or -1 if it is not shown."""
+        for i, r in enumerate(self._view):
             if r["id"] == txn_id:
                 return i
         return -1
@@ -1847,7 +2075,7 @@ class InvestmentRegisterModel(QAbstractTableModel):
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        return len(self._rows) + (1 if self._pending is not None else 0)
+        return len(self._view) + (1 if self._pending is not None else 0)
 
     def columnCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.HEADERS)
@@ -1904,9 +2132,9 @@ class InvestmentRegisterModel(QAbstractTableModel):
                 ct = style.cell_text_color()
                 return QBrush(QColor(ct)) if ct else None
             return None
-        if not (0 <= index.row() < len(self._rows)):
+        if not (0 <= index.row() < len(self._view)):
             return None  # stale/out-of-range index after a shrink+reload
-        r = self._rows[index.row()]
+        r = self._view[index.row()]
         col = index.column()
         if role in (Qt.DisplayRole, Qt.EditRole):
             return self._cell_text(r, col)
@@ -1941,8 +2169,15 @@ class InvestmentRegisterModel(QAbstractTableModel):
         # every other action shows verbatim as imported.
         act = r["action"] or ""
         if act.strip().lower() == "cash":
-            return "MiscInc" if (r.get("cash_amt") or 0) >= 0 else "MiscExp"
-        return act
+            label = "MiscInc" if (r.get("cash_amt") or 0) >= 0 else "MiscExp"
+        else:
+            label = act
+        # A voided row has no payee to stamp (investment_transactions has none),
+        # so the **VOID** mark lives on the memo; surface it on the Action cell --
+        # the register's parallel to the cash register's voided payee.
+        if investments.is_void_investment(r):
+            return f"{ledger.VOID_PREFIX} {label}".strip()
+        return label
 
     def _cell_text(self, r, col) -> str:
         if col == self.DATE:

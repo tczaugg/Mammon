@@ -46,8 +46,9 @@ from mammon.ui.delegates import (
     date_edit_iso, make_category_combo, make_date_edit, refresh_date_format,
 )
 from mammon.ui.models import (
-    AccountsModel, CryptoRegisterModel, InvestmentRegisterModel,
-    NetWorthByAssetModel, RegisterFilter, RegisterModel, SearchResultsModel,
+    AccountsModel, CryptoRegisterModel, InvestmentFilter,
+    InvestmentRegisterModel, NetWorthByAssetModel, RegisterFilter,
+    RegisterModel, SearchResultsModel,
     fmt_amount_ccy, fmt_cents, fmt_date, fmt_money, fmt_qty, parse_amount,
 )
 
@@ -2415,6 +2416,18 @@ class InvestmentRegisterWidget(QWidget):
             "a fund's full name to its ticker, or fuse two names for the same "
             "security.")
         self.act_rename_security.triggered.connect(self.rename_security)
+        # Register toolkit parity: a filter toggle and a memo/security find-and-
+        # replace. (Security-name find/replace also lives in Rename Security,
+        # which additionally fuses holdings; this is the memo counterpart.)
+        self.act_filter = self.gear_menu.addAction("Filter")
+        self.act_filter.setCheckable(True)
+        self.act_filter.setToolTip("Show a bar to narrow the register by text, "
+                                   "date or amount.")
+        self.act_filter.toggled.connect(self.set_filter_visible)
+        self.act_find_replace = self.gear_menu.addAction("Find & Replace…")
+        self.act_find_replace.setToolTip("Substitute text in the memo or the "
+                                         "security across this account's rows.")
+        self.act_find_replace.triggered.connect(self.find_replace)
         # The portfolio windows (roadmap item 7): what the register cannot show.
         self.gear_menu.addSeparator()
         self.act_lots = self.gear_menu.addAction("Lots…")
@@ -2467,11 +2480,20 @@ class InvestmentRegisterWidget(QWidget):
         filter_bar.addWidget(self.security_summary)
         layout.addLayout(filter_bar)
 
+        # Free-text / date / amount filter bar (parity with the cash register),
+        # hidden until the gear's Filter toggle shows it.
+        self.filter_bar = self._build_filter_bar()
+        self.filter_bar.setVisible(False)
+        layout.addWidget(self.filter_bar)
+
         self.view = QTableView()
         self.view.setModel(self.model)
         self.view.setAlternatingRowColors(True)
         self.view.verticalHeader().setVisible(False)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # Multi-select so a batch memo/void/delete can act on several rows at once
+        # (parity with the cash register). Single-row edit/delete still work.
+        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         # Posted rows stay read-only -- InvestmentRegisterModel.flags() only
         # marks the PENDING review row editable. Leaving the view on
         # NoEditTriggers meant that flag could never be exercised: the pending
@@ -2480,6 +2502,17 @@ class InvestmentRegisterWidget(QWidget):
             QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked
             | QAbstractItemView.EditKeyPressed | QAbstractItemView.AnyKeyPressed)
         self._configure_columns()
+        # Header click sorts, right-click chooses columns -- parity with the cash
+        # register, wired the same way (by hand, not setSortingEnabled, so the
+        # indicator starts on Date ascending without a spurious first sort).
+        hh = self.view.horizontalHeader()
+        hh.setSectionsClickable(True)
+        hh.setSortIndicatorShown(True)
+        hh.setSortIndicator(InvestmentRegisterModel.DATE, Qt.AscendingOrder)
+        hh.sortIndicatorChanged.connect(self._on_sort_changed)
+        hh.setContextMenuPolicy(Qt.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._header_menu)
+        self._apply_column_visibility()
         # Double-click a Security cell -> its price-history chart; right-click any
         # cell of a row with a security -> a 'Price history' menu. Reaches ANY
         # security ever traded here, not just the current holdings (Task 48).
@@ -2699,6 +2732,273 @@ class InvestmentRegisterWidget(QWidget):
         self.view.setColumnWidth(M.ACTION, 96)
         hh.setSectionResizeMode(M.SECURITY, QHeaderView.Stretch)
 
+    # ---- sort (header click re-projects the model) ------------------------
+    def _on_sort_changed(self, column, order) -> None:
+        self.model.set_sort(column, order)
+
+    # ---- free-text / date / amount filter (parity with the cash register) --
+    def _build_filter_bar(self) -> QFrame:
+        bar = QFrame(self)
+        bar.setObjectName("registerFilterBar")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.filter_text = QLineEdit(bar)
+        self.filter_text.setPlaceholderText(
+            "Filter action, security, memo or amount…")
+        self.filter_text.setClearButtonEnabled(True)
+        self.filter_from = make_date_edit(bar, blank_ok=True)
+        self.filter_to = make_date_edit(bar, blank_ok=True)
+        for edit in (self.filter_from, self.filter_to):
+            edit.setDate(edit.minimumDate())      # start BLANK, not at today
+        self.filter_min = QLineEdit(bar)
+        self.filter_min.setPlaceholderText("min")
+        self.filter_min.setFixedWidth(72)
+        self.filter_max = QLineEdit(bar)
+        self.filter_max.setPlaceholderText("max")
+        self.filter_max.setFixedWidth(72)
+        clear_btn = QPushButton("Clear", bar)
+        clear_btn.setAutoDefault(False)
+        clear_btn.clicked.connect(self._clear_filter)
+        self.filter_count = QLabel("", bar)
+        self.filter_count.setObjectName("registerSub")
+        lay.addWidget(QLabel("Filter", bar))
+        lay.addWidget(self.filter_text, 1)
+        lay.addWidget(QLabel("From", bar))
+        lay.addWidget(self.filter_from)
+        lay.addWidget(QLabel("To", bar))
+        lay.addWidget(self.filter_to)
+        lay.addWidget(QLabel("Amount", bar))
+        lay.addWidget(self.filter_min)
+        lay.addWidget(QLabel("to", bar))
+        lay.addWidget(self.filter_max)
+        lay.addWidget(clear_btn)
+        lay.addWidget(self.filter_count)
+        self.filter_text.textChanged.connect(self._apply_filter)
+        self.filter_from.dateChanged.connect(self._apply_filter)
+        self.filter_to.dateChanged.connect(self._apply_filter)
+        self.filter_min.editingFinished.connect(self._apply_filter)
+        self.filter_max.editingFinished.connect(self._apply_filter)
+        return bar
+
+    def current_filter(self) -> InvestmentFilter:
+        """The filter the bar's controls describe (empty when all are blank)."""
+        def cents(text):
+            t = (text or "").strip()
+            return abs(parse_amount(t)) if t else None
+        return InvestmentFilter(
+            text=self.filter_text.text(),
+            date_from=date_edit_iso(self.filter_from),
+            date_to=date_edit_iso(self.filter_to),
+            amount_min=cents(self.filter_min.text()),
+            amount_max=cents(self.filter_max.text()))
+
+    def _apply_filter(self, *_args) -> None:
+        if self.filter_bar.isHidden():
+            return
+        flt = self.current_filter()
+        self.model.set_filter(None if flt.is_empty() else flt)
+        self._update_filter_count()
+
+    def _clear_filter(self) -> None:
+        widgets = (self.filter_text, self.filter_from, self.filter_to,
+                   self.filter_min, self.filter_max)
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.filter_text.clear()
+            self.filter_min.clear()
+            self.filter_max.clear()
+            for edit in (self.filter_from, self.filter_to):
+                edit.setDate(edit.minimumDate())   # the blank_ok sentinel
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self.model.set_filter(None)
+        self._update_filter_count()
+
+    def set_filter_visible(self, on: bool) -> None:
+        """Show the filter bar (and focus its text box) or hide it, clearing the
+        filter so a closed bar never leaves the register narrowed."""
+        on = bool(on)
+        self.filter_bar.setVisible(on)
+        if hasattr(self, "act_filter") and self.act_filter.isChecked() != on:
+            self.act_filter.setChecked(on)
+        if on:
+            self.filter_text.setFocus()
+            self._apply_filter()
+        else:
+            self._clear_filter()
+
+    def _update_filter_count(self) -> None:
+        if self.model.filter_state() is None:
+            self.filter_count.setText("")
+            return
+        shown, total = self.model.view_counts()
+        self.filter_count.setText(f"Showing {shown:,} of {total:,}")
+
+    # ---- column chooser (persisted through ui/prefs, its own scope) -------
+    # The columns a user may hide. Date/Action/Security/Quantity and the running
+    # Cash Bal are the register's spine; hiding them would leave rows unreadable.
+    HIDEABLE_COLUMNS = (InvestmentRegisterModel.PRICE,
+                        InvestmentRegisterModel.SHARE_BAL,
+                        InvestmentRegisterModel.INV_AMT,
+                        InvestmentRegisterModel.CASH_AMT)
+    _COLUMN_SCOPE = "investment_register"
+
+    def _apply_column_visibility(self) -> None:
+        """The one place investment-register column visibility is decided: what
+        the user hid in the column chooser (ui/prefs.hidden_columns, its own
+        scope so it never collides with the cash register's column names)."""
+        M = InvestmentRegisterModel
+        user_hidden = set(prefs.hidden_columns(scope=self._COLUMN_SCOPE))
+        for col in range(len(M.HEADERS)):
+            hide = col in self.HIDEABLE_COLUMNS and M.HEADERS[col] in user_hidden
+            self.view.setColumnHidden(col, hide)
+
+    def user_hidden_columns(self) -> set:
+        names = set(prefs.hidden_columns(scope=self._COLUMN_SCOPE))
+        return {c for c in self.HIDEABLE_COLUMNS
+                if InvestmentRegisterModel.HEADERS[c] in names}
+
+    def set_column_hidden(self, col: int, hidden: bool) -> None:
+        """Hide or show one hideable column, remembered across sessions."""
+        if col not in self.HIDEABLE_COLUMNS:
+            return
+        name = InvestmentRegisterModel.HEADERS[col]
+        names = [n for n in prefs.hidden_columns(scope=self._COLUMN_SCOPE)
+                 if n != name]
+        if hidden:
+            names.append(name)
+        prefs.set_hidden_columns(names, scope=self._COLUMN_SCOPE)
+        self._apply_column_visibility()
+
+    def _header_menu(self, pos) -> None:
+        menu = _GearMenu(self)
+        acts = {}
+        hidden = self.user_hidden_columns()
+        for col in self.HIDEABLE_COLUMNS:
+            act = menu.addAction(InvestmentRegisterModel.HEADERS[col])
+            act.setCheckable(True)
+            act.setChecked(col not in hidden)
+            acts[act] = col
+        menu.addSeparator()
+        show_all = menu.addAction("Show All Columns")
+        chosen = menu.exec_(self.view.horizontalHeader().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == show_all:
+            prefs.set_hidden_columns([], scope=self._COLUMN_SCOPE)
+            self._apply_column_visibility()
+            return
+        col = acts.get(chosen)
+        if col is not None:
+            # Qt has already toggled the checkable action by the time exec_ returns.
+            self.set_column_hidden(col, not chosen.isChecked())
+
+    # ---- multi-row selection: batch memo/void/delete ----------------------
+    def _selected_rows(self) -> list:
+        """The selected REAL rows (the pending row excluded), ascending."""
+        rows = sorted({i.row() for i in self.view.selectionModel().selectedRows()})
+        return [r for r in rows if not self.model.is_pending_row(r)]
+
+    def _ask_batch_text(self, title: str, label: str):
+        """Seam (tests override): the text a batch edit applies, or None."""
+        text, ok = QInputDialog.getText(self, title, label)
+        return text if ok else None
+
+    def _notify(self, title: str, text: str) -> None:
+        """Seam (tests override): a notice for a partly-skipped batch."""
+        QMessageBox.information(self, title, text)
+
+    def _report_batch(self, verb: str, result) -> None:
+        changed, skipped = result
+        self.last_batch = (verb, changed, skipped)
+        if skipped:
+            self._notify(
+                "Batch edit",
+                f"{verb} {changed} transaction(s); {skipped} skipped "
+                "(a transfer leg or a missing row).")
+
+    def _batch_memo(self, rows) -> None:
+        ids = self.model.txn_ids_at(rows)
+        if not ids:
+            return
+        text = self._ask_batch_text(f"Change memo for {len(ids)} transactions",
+                                    "New memo (blank clears it):")
+        if text is None:
+            return
+        self._report_batch("Changed memo on", self.model.batch_set_memo(ids, text))
+        self._after_write()
+
+    def _void_row(self, row) -> None:
+        txn = self.model.txn_at(row)
+        if not txn or txn.get("cash_leg") or investments.is_void_investment(txn):
+            return
+        if QMessageBox.question(
+                self, "Void transaction",
+                f"Void the {fmt_date(txn['date'])} transaction? Its amount and "
+                "shares become zero and the row stays as a **VOID** record.",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.model.void_row(row)
+            self._after_write()
+
+    def _void_rows(self, rows) -> None:
+        ids = self.model.txn_ids_at(rows)
+        if not ids:
+            return
+        if QMessageBox.question(
+                self, "Void transactions",
+                f"Void {len(ids)} transactions? Their amounts and shares become "
+                "zero and the rows stay as **VOID** records.",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._report_batch("Voided", self.model.batch_void(ids))
+            self._after_write()
+
+    def _delete_rows(self, rows) -> None:
+        ids = self.model.txn_ids_at(rows)
+        if not ids:
+            return
+        if QMessageBox.question(
+                self, "Delete transactions",
+                f"Delete {len(ids)} transactions?",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._report_batch("Deleted", self.model.batch_delete(ids))
+            self._after_write()
+
+    # ---- find & replace over memo / security -----------------------------
+    def _ask_find_replace(self):
+        """Seam (tests override): ``(field, find, replace)`` or None."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Find & Replace")
+        lay = QFormLayout(dlg)
+        field = QComboBox(dlg)
+        field.addItem("Memo", "memo")
+        field.addItem("Security", "symbol")
+        find = QLineEdit(dlg)
+        repl = QLineEdit(dlg)
+        lay.addRow("Field", field)
+        lay.addRow("Find", find)
+        lay.addRow("Replace with", repl)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addRow(buttons)
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        return field.currentData(), find.text(), repl.text()
+
+    def find_replace(self) -> None:
+        got = self._ask_find_replace()
+        if not got:
+            return
+        field, find, repl = got
+        if not (find or "").strip():
+            return
+        n = self.model.find_replace(field, find, repl)
+        self._after_write()
+        self._notify("Find & Replace", f"Replaced in {n} transaction(s).")
+
     def _refresh_header(self):
         """Re-read the account name and its market valuation (cash + securities).
         Valued as of the ledger's last activity -- the same basis the account bar
@@ -2793,6 +3093,7 @@ class InvestmentRegisterWidget(QWidget):
         # reason for having the dialog. Delete stays posted-only: a pending row is
         # discarded from the review list, not deleted from the register.
         posted = index.isValid() and not self.model.is_pending_row(index.row())
+        sel = self._selected_rows()
         menu = QMenu(self)
         act_new = menu.addAction("New…")
         act_edit = menu.addAction("Edit…") if index.isValid() else None
@@ -2801,6 +3102,21 @@ class InvestmentRegisterWidget(QWidget):
         # duplicate, a fee booked against the wrong security -- and until now
         # they could be edited but never removed.
         act_delete = menu.addAction("Delete") if posted else None
+        # Void a posted, not-already-void, non-transfer-leg row (Quicken's Void:
+        # keep the record, take it out of the money and the share math).
+        act_void = None
+        if posted:
+            row_txn = self.model.txn_at(index.row())
+            if (row_txn and not row_txn.get("cash_leg")
+                    and not investments.is_void_investment(row_txn)):
+                act_void = menu.addAction("Void")
+        # Batch actions over a multi-row selection (parity with the cash register).
+        act_bmemo = act_bvoid = act_bdelete = None
+        if len(sel) > 1:
+            menu.addSeparator()
+            act_bmemo = menu.addAction(f"Change memo for {len(sel)}…")
+            act_bvoid = menu.addAction(f"Void {len(sel)}")
+            act_bdelete = menu.addAction(f"Delete {len(sel)}")
         act_price = None
         if symbol:
             menu.addSeparator()
@@ -2821,6 +3137,14 @@ class InvestmentRegisterWidget(QWidget):
             self._edit_row(index.row())
         elif act_delete is not None and chosen is act_delete:
             self._delete_row(index.row())
+        elif act_void is not None and chosen is act_void:
+            self._void_row(index.row())
+        elif act_bmemo is not None and chosen is act_bmemo:
+            self._batch_memo(sel)
+        elif act_bvoid is not None and chosen is act_bvoid:
+            self._void_rows(sel)
+        elif act_bdelete is not None and chosen is act_bdelete:
+            self._delete_rows(sel)
         elif act_price is not None and chosen is act_price:
             _chart_price_history(self, self.conn, symbol)
         elif act_lots is not None and chosen is act_lots:
@@ -3193,6 +3517,7 @@ class InvestmentRegisterWidget(QWidget):
         font = QFont(prefs.font_family(), prefs.font_size())
         self.view.setFont(font)
         self.view.horizontalHeader().setFont(font)
+        self._apply_column_visibility()
         self._refresh_header()
         self.view.viewport().update()
 
