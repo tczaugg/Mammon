@@ -181,6 +181,12 @@ def test_convert_missing_rate_raises(conn):
         fx.convert_cents(conn, 100_00, "USD", "JPY")
 
 
+def test_convert_zero_needs_no_rate(conn):
+    # Zero converts to zero at any rate: short-circuit BEFORE the lookup so an
+    # empty foreign account never demands an FX rate. fx_rates is empty here.
+    assert fx.convert_cents(conn, 0, "CAD", "USD") == 0
+
+
 # ---------------------------------------------------------------------------
 # net worth by currency + optional FX total
 # ---------------------------------------------------------------------------
@@ -215,11 +221,23 @@ def test_total_in_currency_folds_through_fx(conn):
 
 
 def test_total_in_currency_missing_rate_raises(conn):
+    # REGRESSION: a NON-zero foreign balance with no recorded rate must still
+    # raise -- the zero-guard must not soften the honest failure for real money.
     ledger.create_account(conn, "US Checking", "checking", opening_balance=100_00)
     eur = ledger.create_account(conn, "EU Cash", "cash", opening_balance=50_00)
     fx.set_account_currency(conn, eur, "EUR")
     with pytest.raises(fx.FxRateUnavailable):
         fx.total_in_currency(conn, "USD")
+
+
+def test_total_in_currency_zero_foreign_balance_needs_no_rate(conn):
+    # A foreign account with an exactly-zero balance and no rows in fx_rates must
+    # not sink the whole net-worth total: its bucket converts to zero for free.
+    ledger.create_account(conn, "US Checking", "checking", opening_balance=100_00)
+    cad = ledger.create_account(conn, "CAD Cash", "cash", opening_balance=0)
+    fx.set_account_currency(conn, cad, "CAD")
+    assert fx.get_rate(conn, "CAD", "USD") is None      # no recorded rate
+    assert fx.total_in_currency(conn, "USD") == 100_00
 
 
 # ---------------------------------------------------------------------------

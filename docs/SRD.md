@@ -451,7 +451,12 @@ floats and no money math in the UI layer.
   BASE_CURRENCY)`; when a needed rate is missing it falls back to the naive
   base-currency sum rather than breaking — identical to the figure shown before
   any foreign account existed, and byte-identical for an all-USD ledger. All the
-  cents arithmetic and rate lookup live in `mammon/fx.py`, not the UI.
+  cents arithmetic and rate lookup live in `mammon/fx.py`, not the UI. A
+  **zero-valued bucket needs no rate**: `convert_cents` returns 0 for a
+  zero amount before any rate lookup (zero converts to zero at any rate), so an
+  empty foreign account (balance 0, no recorded rate) never forces the fallback
+  and cannot sink the fold — while a *non-zero* foreign balance with no rate
+  still raises `FxRateUnavailable`, the honest signal that drives the fallback.
 - The app holds no FX credentials; rate fetching is behind the same injectable
   seam as investment quotes (`fx.fetch_rates`, default yfinance source).
 - **Rates are entered and refreshed from a file-wide "Exchange Rates" manager**

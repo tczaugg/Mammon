@@ -175,6 +175,12 @@ def convert_cents(conn: sqlite3.Connection, amount_cents: int, from_ccy, to_ccy,
 
     Raises :class:`FxRateUnavailable` when no rate (direct or inverse) is known.
     """
+    # Zero converts to zero at any rate, so short-circuit BEFORE the lookup: an
+    # empty foreign account (balance 0, no recorded rate) must not sink the whole
+    # net-worth total. The raise below still fires for every non-zero amount --
+    # that strictness is deliberate (see docstring), do not soften it.
+    if amount_cents == 0:
+        return 0
     from_ccy = _norm_ccy(from_ccy)
     to_ccy = _norm_ccy(to_ccy)
     if from_ccy == to_ccy:
@@ -227,6 +233,8 @@ def total_in_currency(conn: sqlite3.Connection, target_ccy, as_of: Optional[str]
     total = 0
     buckets = net_worth_by_currency(conn, as_of, include_hidden=include_hidden)
     for ccy, cents in buckets.items():
+        if cents == 0:
+            continue  # a zero bucket needs no rate; convert_cents guards this too
         total += convert_cents(conn, cents, ccy, target, as_of)
     return total
 
