@@ -246,6 +246,7 @@ def test_report_period_dropdown_options_and_default(qapp, tmp_path):
     # The UNION of the calendar and rolling presets (§5.9b) -- both sets survive.
     assert labels == ["Last 7 days", "Last 30 days", "This Month", "Last Month",
                       "This quarter", "Last quarter", "Last 12 months",
+                      "Last 3 years", "Last 5 years", "Last 10 years",
                       "Year-to-Date", "This Year", "Last Year",
                       "Earliest to date", "Custom"]
     # DEFAULT selection is Year-to-Date (the shared default for report windows).

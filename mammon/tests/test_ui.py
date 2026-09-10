@@ -4157,7 +4157,7 @@ def test_loan_wizard_reloads_and_edits_existing(qapp, conn):
     # first-payment date reproduces (origination + one interval)
     assert date_edit_iso(wiz.first_payment) == "2024-02-01"
     assert wiz.rates_table.rowCount() == 1
-    assert wiz._cell_text(wiz.rates_table, 0, 0) == "2024-02-01"
+    assert wiz._date_cell_iso(wiz.rates_table, 0, 0) == "2024-02-01"
     assert wiz.extras_table.rowCount() == 1
     assert wiz._extra_category(0) == "Escrow"
 
@@ -4210,8 +4210,8 @@ def test_loan_wizard_extras_carry_effective_dates(qapp, conn):
     # reopening the wizard reloads the dated rows into the extras table
     wiz2 = LoanSetupWizard(conn, account_id=aid)
     assert wiz2.extras_table.rowCount() == 2
-    assert wiz2._cell_text(wiz2.extras_table, 0, 2) == "2024-02-01"
-    assert wiz2._cell_text(wiz2.extras_table, 1, 2) == "2025-01-01"
+    assert wiz2._date_cell_iso(wiz2.extras_table, 0, 2) == "2024-02-01"
+    assert wiz2._date_cell_iso(wiz2.extras_table, 1, 2) == "2025-01-01"
 
 
 def test_loan_wizard_new_total_payment_persists_and_defaults(qapp, conn):
