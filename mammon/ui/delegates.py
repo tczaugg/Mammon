@@ -81,21 +81,39 @@ def parent_autocomplete(typed: str, completion: str) -> str:
     return ":".join(parts[:level] + [seg]) + ":"
 
 
+# The focus reasons that genuinely mean "the editor just opened", so the shown
+# value should be selected for replacement. A WHITELIST on purpose -- see
+# select_all_on_focus for why "everything but the mouse" loses typed characters.
+_FRESH_OPEN = (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason,
+               Qt.OtherFocusReason)
+
+
 def select_all_on_focus(reason) -> bool:
     """Whether an editor gaining focus for the Qt focus ``reason`` should SELECT
     ALL its text -- so the first keystroke REPLACES the highlighted value (True) --
-    or leave the caret where it is so typing APPENDS (False).
+    or leave the caret and any selection alone so typing APPENDS (False).
 
-    Tab, backtab, shortcut and the programmatic focus a view gives a freshly opened
-    editor all mean the user did not aim a caret at a spot, so the highlighted value
-    is replaced -- matching the click-to-edit path (RegisterWidget._edit_cell),
-    which select-alls too. The ONE case that appends is a mouse click, which places
-    the caret where the user pressed. Previously EVERY keyboard/Tab open appended
-    while a click replaced, so Tab and click disagreed on the same field (BUG 2);
-    keying the choice on the focus reason makes Tab behave like click.
+    Only the reasons in ``_FRESH_OPEN`` select-all: Tab/backtab, a shortcut, and
+    ``OtherFocusReason`` -- the programmatic ``setFocus`` a view gives a freshly
+    created editor. Those mean the user did not aim a caret at a spot, so the
+    highlighted value is replaced, matching the click-to-edit path
+    (RegisterWidget._edit_cell). A mouse click (``MouseFocusReason``) appends at the
+    caret it placed. This is BUG 2: previously EVERY keyboard/Tab open appended
+    while a click replaced, so Tab and click disagreed on the same field.
+
+    A WHITELIST, not "everything but the mouse", because a re-focus that is NOT a
+    fresh open must not re-select. Typing a brand-new payee whose prefix matches no
+    known name makes QCompleter hide its popup, and Qt then delivers a FocusIn
+    carrying ``PopupFocusReason`` back to the line edit; the old blacklist
+    select-all'd there, so after two or three characters the typed prefix turned
+    blue (selected) and the next keystroke replaced everything typed so far --
+    characters lost entering a never-seen payee. ``ActiveWindowFocusReason``
+    (alt-tab out mid-entry and back) and ``MenuBarFocusReason`` shared the defect.
+    None of those mean a fresh open, so they fall through to APPEND and leave the
+    caret and selection untouched.
 
     A pure function of the reason so it is unit-testable headless."""
-    return reason != Qt.MouseFocusReason
+    return reason in _FRESH_OPEN
 
 
 def apply_focus_selection(line_edit, reason) -> None:

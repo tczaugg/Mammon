@@ -36,14 +36,21 @@ def _focus(widget, reason):
 # ---------------------------------------------------------------------------
 # the pure decision
 # ---------------------------------------------------------------------------
-def test_select_all_on_focus_is_true_for_every_reason_but_a_mouse_click():
+def test_select_all_on_focus_whitelists_only_fresh_opens():
     from PyQt5.QtCore import Qt
+    # A genuine fresh open (Tab/backtab/shortcut and the view's programmatic
+    # setFocus on a new editor) selects-all so the first keystroke replaces.
     assert delegates.select_all_on_focus(Qt.TabFocusReason) is True
     assert delegates.select_all_on_focus(Qt.BacktabFocusReason) is True
     assert delegates.select_all_on_focus(Qt.ShortcutFocusReason) is True
     assert delegates.select_all_on_focus(Qt.OtherFocusReason) is True
-    # The ONE case that appends: a click that places the caret with no selection.
+    # Everything else APPENDS. A mouse click places the caret; a popup-close,
+    # an alt-tab return and a menu-bar focus are RE-focus events mid-entry that
+    # must not re-select (that lost typed characters -- the never-seen payee bug).
     assert delegates.select_all_on_focus(Qt.MouseFocusReason) is False
+    assert delegates.select_all_on_focus(Qt.PopupFocusReason) is False
+    assert delegates.select_all_on_focus(Qt.ActiveWindowFocusReason) is False
+    assert delegates.select_all_on_focus(Qt.MenuBarFocusReason) is False
 
 
 # ---------------------------------------------------------------------------
