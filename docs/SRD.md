@@ -454,6 +454,24 @@ floats and no money math in the UI layer.
   cents arithmetic and rate lookup live in `mammon/fx.py`, not the UI.
 - The app holds no FX credentials; rate fetching is behind the same injectable
   seam as investment quotes (`fx.fetch_rates`, default yfinance source).
+- **Rates are entered and refreshed from a file-wide "Exchange Rates" manager**
+  (`ui/fx_rates_dialog.py`, Tools menu). It lists the dated `fx_rates` store
+  (`fx.list_rates`, a pure read — the UI keeps no SQL of its own), lets the user
+  ENTER a rate for a (from-currency, to-currency, date) — "how many *to* units
+  equal 1 *from* unit on this date" — and REFRESH the rates every account's
+  currency implies against the base, plus every pair already recorded. Dates use
+  the standard `ui/delegates.make_date_edit` / `date_edit_iso` chokepoints and
+  render through `ui/models.fmt_date`. Every write funnels through
+  `fx.set_rate` — the store's single writer, an upsert on (date, from, to) —
+  including a refresh (`fx.fetch_rates` calls `set_rate` for each fetched rate),
+  so the UI adds **no second write path** to `fx_rates`. There is no
+  delete-rate writer by design, so editing an existing rate corrects its value
+  in place with the (from/to/date) key locked. The network fetch is behind the
+  `_fetch_rates` seam and the result notice behind an overridable `_notify`, so
+  a headless test injects a fake source and opens no blocking modal. Entering or
+  refreshing a rate immediately revalues the open registers' foreign-currency
+  accounts (the dialog's `changed` signal drives a refresh, and net worth folds
+  through the newest stored rate on/before the date).
 
 ### 5.5 Auto-categorization from history
 - When a payee recurs, Mammon learns its category and auto-fills/suggests the

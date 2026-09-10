@@ -7566,6 +7566,10 @@ class MainWindow(QMainWindow):
         # one register would leave the others broken, so it does not belong on
         # the investment register's gear beside the per-account actions.
         tools.addAction("Securities…", self._securities_dialog)
+        # Exchange Rates is FILE-wide, not per-account: one dated rate for a
+        # currency pair values every account in that currency, so it lives here
+        # beside the other file-wide managers, not on a register's gear.
+        tools.addAction("Exchange Rates…", self._fx_rates_dialog)
         tools.addAction("Rules Manager…", self._rules_manager_dialog)
         self.act_scheduled = tools.addAction("Scheduled Payments…",
                                              self._scheduled_payments_dialog)
@@ -9090,6 +9094,18 @@ class MainWindow(QMainWindow):
         held it, so this refreshes the open registers rather than only itself."""
         from mammon.ui.securities_dialog import SecuritiesDialog
         dlg = SecuritiesDialog(self.conn, parent=self)
+        dlg.changed.connect(self._refresh_all)
+        dlg.exec_()
+
+    def _fx_rates_dialog(self):
+        """Open the Exchange Rates manager (Tools menu): enter a dated FX rate for
+        a currency pair, or refresh rates from the network, so foreign-currency
+        accounts value correctly against the base currency. Every write funnels
+        through mammon.fx.set_rate -- nothing here is a second writer of fx_rates
+        -- and a change revalues the open registers (net worth folds foreign
+        accounts through the newest stored rate)."""
+        from mammon.ui.fx_rates_dialog import FxRatesDialog
+        dlg = FxRatesDialog(self.conn, parent=self)
         dlg.changed.connect(self._refresh_all)
         dlg.exec_()
 

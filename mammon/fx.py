@@ -105,6 +105,28 @@ def set_rate(conn: sqlite3.Connection, date: str, base, quote, rate) -> None:
     conn.commit()
 
 
+def list_rates(conn: sqlite3.Connection, base=None, quote=None) -> list:
+    """Every recorded FX rate as ``{date, base, quote, rate}`` dicts, newest date
+    first then by pair -- the dated store laid out for display and editing.
+
+    A pure read over the same table :func:`set_rate` writes and :func:`get_rate`
+    reads; the FX-rate UI lists through here so the UI layer keeps no SQL of its
+    own (CLAUDE.md). ``base``/``quote`` optionally narrow to one pair (both
+    normalised)."""
+    sql = "SELECT date, base, quote, rate FROM fx_rates"
+    clauses, params = [], []
+    if base is not None:
+        clauses.append("base=?")
+        params.append(_norm_ccy(base))
+    if quote is not None:
+        clauses.append("quote=?")
+        params.append(_norm_ccy(quote))
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY date DESC, base, quote"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
 def _lookup_rate(conn: sqlite3.Connection, base: str, quote: str,
                  date: Optional[str]) -> Optional[str]:
     """Raw rate text for base->quote as of ``date`` (most recent on/before), or
