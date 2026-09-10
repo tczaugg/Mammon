@@ -1233,6 +1233,61 @@ floats and no money math in the UI layer.
   belongs beside `mapped_from_crypto_record`, keyed off the account kind, and must
   not be guessed at in advance: the field names come from the generated script.
 
+### 5.8i-2 Cryptocurrency import (custodial exchange history)
+
+- A custodial exchange's transaction history (Coinbase's per-year "Transactions"
+  CSV is the reference shape) lands on a `kind='exchange'` crypto account.
+  `importers/coinbase_csv.parse_coinbase(text) -> list[ExchangeRecord]` is the
+  pure parser -- the exchange twin of `parse_etherscan` -- and the same
+  `crypto_core` / `import_review` machinery does everything DB-facing.
+- **The FILE picks the reader; the ACCOUNT only decides whether USD rides along.**
+  `crypto_core.parse_export_file` returns `(shape, records)`, sniffing the two
+  signatures (`looks_like_coinbase` / `looks_like_etherscan`). Both documents are
+  CSVs imported into crypto accounts and only their CONTENT tells them apart, so
+  routing by account kind hands one of them a reader that cannot read it and then
+  blames the file -- the reported failure. The account kind gets exactly one say:
+  an on-chain export into a WALLET is coin-native with no USD on the row, while
+  into an EXCHANGE the export's historical price rides along
+  (`mapped_from_crypto_record(with_price=True)`), because an exchange keeps cost
+  basis and a disposal without an FMV books a phantom loss equal to its basis.
+- **The header is not the first line.** The export opens with a blank line, a
+  `Transactions` title and a `User,<name>,<uuid>` line. The header is located by
+  its `Transaction Type` / `Asset` columns, as the Etherscan reader locates its
+  own by `Transaction Hash`.
+- **The SIGN on `Quantity Transacted` fixes direction; the type only chooses
+  which action of that direction.** The same `Withdrawal` is coin leaving on one
+  row and dollars leaving on the next, and `Exchange Withdrawal` is money
+  ARRIVING (withdrawn from the exchange venue INTO this account). Reading
+  direction off the word inverts those.
+- **A row can be pure FIAT.** When `Asset` equals `Price Currency` the row moves
+  dollars against the cash sleeve and opens no position; a reader that assumes
+  every row carries a coin books a phantom `USD` holding. Conversely a coin move
+  that is NOT a trade moves no cash at all -- the export prints a USD figure on
+  it for tax purposes, and that is a valuation, not money the account saw.
+- **Coin moved between the user's own venues is a TRANSFER, never a disposal.**
+  `Pro Deposit` / `Pro Withdrawal` / `Exchange Deposit` / `Exchange Withdrawal`
+  map to `TRANSFER_IN` / `TRANSFER_OUT` (basis rides, no gain booked); booking
+  them as SEND would realize a gain on coin that never left the user's control.
+  A one-sided leg is legitimate here: the other end is a sub-ledger Mammon does
+  not model.
+- **An unknown Transaction Type is NOT an error.** The vocabulary is open and
+  Coinbase keeps extending it; an unrecognised type falls back to the direction
+  the sign already fixed, and the raw type is kept (`raw_type`, surfaced as the
+  Action cell's tooltip) so the review row shows what the file actually said and
+  the user corrects the action before accepting. Refusing a file over one
+  unrecognised word would make every future Coinbase product a broken import.
+- **A pure cash move needs its own writer.** `crypto.record_cash` (actions
+  `DEPOSIT` / `WITHDRAW`, `crypto.CASH_ACTIONS`) writes fiat with `symbol`,
+  `quantity` and `price` NULL -- which is what keeps the row out of the holdings
+  replay (`_apply_txn` skips a symbol-less row) while `crypto_cash` and the
+  register's running Cash Bal still count it. A WALLET never carries one.
+- **An exchange import goes through the review queue like every other source.**
+  It used to write straight through; its rows need MORE judgement than a
+  wallet's, not less, precisely because the source's product names only
+  approximate what happened. `import_review.build_exchange_review` shares one
+  body (`_build_crypto_entries`) with the wallet builder so the two can never
+  dedupe by different rules.
+
 ### 5.8j Cryptocurrency accounts in the UI (register, holdings, grouping)
 - **Grouping is already investment-like, by the shared constant.** A `type='crypto'`
   wallet appears under the sidebar's "Investing" section next to equity brokerages
@@ -1273,8 +1328,7 @@ floats and no money math in the UI layer.
   `swap_group_id` legs BOTH read as one paired `OUT->IN` trade; a same-coin wallet
   transfer renders as `[Other Wallet]` (the mirror model in coin, consuming no
   category, SRD 5.8h); gas that rides an event shows as a `<qty> <SYM>` entry in the
-  Fee column. Events are entered by import, so the register is read-only (no inline
-  editor to defer out of `setModelData`).
+  Fee column.
 - **The crypto register carries the same import-review pane as the cash and
   investment registers.** It mounts an `ImportReviewPanel` below its button row and
   exposes `show_review` / `reopen_review` / `_sync_review_action`, so the shared
@@ -1285,11 +1339,10 @@ floats and no money math in the UI layer.
   crypto import wrote `review_items` (lighting the sidebar's red dot, whose
   `count_pending` has no account-type filter) but NO widget showed them and the
   `Review…` action stayed permanently disabled — the pane never appeared and the
-  menu item read as grayed. Because the crypto grid is READ-ONLY (no in-place
-  editable pending row), a NEW row is accepted with the importer's mapped values
-  as-is through the single `import_review` chokepoint, posting into the account's
-  fiat cash sleeve (`transactions`, which `crypto.account_valuation` folds in) — a
-  MATCHING row still points at its existing register line where one can be found.
+  menu item read as grayed. A NEW row is accepted from its editable PENDING
+  register line through the single `import_review` chokepoint (`_save_crypto` for
+  a coin-native wallet row, into `crypto_transactions`; a MATCHING row still
+  points at its existing register line where one can be found).
 - **A crypto review row opens a PENDING register line, like every other kind.**
   Selecting a NEW row shows the line about to be added at the bottom of the
   register with an Accept button on it. Most of a chain row is fact and stays
@@ -1302,6 +1355,48 @@ floats and no money math in the UI layer.
   the vocabulary the domain layer validates (`ChoiceDelegate`), scoped to the
   direction the chain already fixed — a typo would otherwise surface as an
   exception at accept, with the row already gone from the list.
+- **The crypto review list auto-renames the payee through the SAME rename tree the
+  cash review uses.** The pending line's payee is resolved first, exactly as the
+  cash register's is (`import_review.predict_crypto_payee` → `rename_tree.suggest`,
+  `kind='payee'`): once the user has renamed a counterparty ADDRESS to a friendly
+  name on enough accepted rows (`rename_tree.MIN_FILL`), the next import of that
+  address auto-fills the name instead of showing the raw hex; an address the user
+  has not yet named stays the honest address, because the tree fills only from
+  CORRECTIONS. The content differs from the cash path — a crypto row's stable
+  identifier is the on-chain address, not a bank's statement text, so that address
+  is what drives the rename (`_crypto_rename_source`) — but the path is identical:
+  accepting a corrected payee feeds `rename_tree.learn` (`_learn_crypto_rename`),
+  and only a genuine rename (final ≠ the raw address) teaches anything. Crypto
+  examples are stored with **`txn_id=None`**: the rename corpus reads a live label
+  by joining `rename_examples.txn_id` against the `transactions` table, and a
+  crypto id lives in the overlapping id space of `crypto_transactions`, so
+  forwarding it could let an unrelated cash row's payee masquerade as the label —
+  storing the label directly sidesteps that collision.
+- **The crypto register FUNCTIONS like the cash register (behavioural parity),
+  differing only where the content requires it.** The gaps closed:
+  - a per-row **context menu** (right-click) offering New / Edit / Delete. Edit
+    opens `CryptoTransactionDialog` — the crypto twin of the cash
+    `TransactionDialog` — where the fields that are facts (date, coin, quantity,
+    price, fee) are corrected through `crypto.update_event`; Delete removes the
+    row (both legs of a transfer or all legs of a swap) through
+    `crypto.delete_event`. Both rebuild holdings afterward. The numbers stay OUT
+    of inline editing on purpose, so a stray click cannot rewrite chain history;
+    the dialog is the deliberate place to change them.
+  - a trailing **blank quick-entry row**, the cash register's manual-entry
+    gesture, that records a brand-new event through `mammon.crypto` (a wallet's
+    Coin In / Coin Out → `record_wallet_credit` / `record_wallet_debit`, an
+    exchange's trade/deposit → `record_buy` / `record_sell` / `record_cash` /
+    `record_event`). It commits on Enter (not per keystroke as the two-field cash
+    row can): a crypto event spans several fields, so a partial auto-commit would
+    post a wrong transaction. No second write path — `crypto.py` stays the sole
+    writer of `crypto_*`, and a wallet write never touches the cash `transactions`.
+  - **field navigation identical to the cash register**: keyboard-only edit
+    triggers (no double-click-to-edit), a SINGLE click opens the editor, and the
+    coin/text cells use the same focus-select editor the cash Payee/Memo cells use
+    (`FocusSelectDelegate` → `_FocusSelectLineEdit`: Tab replaces the value, a
+    mouse click appends), with the calendar `DateDelegate` on Date.
+  Only the CONTENT differs (coin quantities as Decimal text, a coin-denominated
+  fee, and a wallet's absent Price / Amount / Cash Bal); the behaviour is the same.
   `show_review` must re-fire the selection handler AFTER revealing the panel:
   `set_entries` selects row 0 and emits while the panel is still hidden, so the
   first row — the one already selected, whose re-click changes no selection and
@@ -1315,6 +1410,13 @@ floats and no money math in the UI layer.
   both ends, with a header minimum so no section can collapse. Past the cap the
   number elides and the cell's tooltip carries the full value: two fields that
   both need room is a scrollbar problem, not a reason to lose either.
+- **The review PANE has a FOURTH column set for an exchange.** Status, Date,
+  Payee, Memo, **Action**, Coin, Quantity, Price, Amount -- a wallet's fields
+  plus the fiat a custodial account really does move. The cash layout hid the
+  coin entirely (a dollar figure and no asset, for rows whose whole content is
+  "0.25 ETH moved"); the wallet layout would hide what a Buy cost. The ACTION is
+  shown because on this source it is the least certain field, with the export's
+  own product name on its tooltip whenever it differs from the mapped action.
 - **The review PANE has a third column set for a wallet.** The cash layout
   (Status, Date, Num, Payee, Memo, Amount) and the investment one (Status, Date,
   Security, Action, Shares, Price, Amount) are both wrong for an address: a wallet
