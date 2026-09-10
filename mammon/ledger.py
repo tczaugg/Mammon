@@ -894,8 +894,21 @@ def net_worth(conn: sqlite3.Connection, as_of: Optional[str] = None, *,
     Hidden accounts are EXCLUDED -- hiding is how the user marks an account whose
     records are incomplete (see :func:`investments.net_worth`). Pass
     ``include_hidden=True`` for the fuller historical picture, which is what the
-    report bar's checkbox does. ``account_ids`` restricts to a chosen subset."""
-    from mammon import investments
+    report bar's checkbox does. ``account_ids`` restricts to a chosen subset.
+
+    Multi-currency: when accounts span more than one native currency the total is
+    each currency's subtotal converted into the base currency and summed, with a
+    non-zero foreign balance that has no FX rate left OUT rather than folded in at
+    1:1 (see :func:`fx.net_worth_currencies`). A single-currency ledger -- the
+    common case -- takes a fast path that delegates straight to
+    :func:`investments.net_worth`, so an all-USD file is byte-for-byte unchanged
+    and never pays for the currency machinery."""
+    from mammon import fx, investments
+    if len(fx.account_currencies(conn, include_hidden=include_hidden,
+                                 account_ids=account_ids)) > 1:
+        return fx.net_worth_currencies(
+            conn, as_of, include_hidden=include_hidden,
+            account_ids=account_ids).total_cents
     return investments.net_worth(conn, as_of, account_ids=account_ids,
                                  include_hidden=include_hidden)
 
