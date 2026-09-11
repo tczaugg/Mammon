@@ -446,17 +446,33 @@ floats and no money math in the UI layer.
   header (a foreign register names its currency once, in the title, and shows its
   ending balance in that currency). Formatting is presentation only — the cents
   are unconverted.
-- **Net worth folds to the base currency through `mammon.fx`.** The accounts
-  overview / account bar net-worth figure is `fx.total_in_currency(conn,
-  BASE_CURRENCY)`; when a needed rate is missing it falls back to the naive
-  base-currency sum rather than breaking — identical to the figure shown before
-  any foreign account existed, and byte-identical for an all-USD ledger. All the
-  cents arithmetic and rate lookup live in `mammon/fx.py`, not the UI. A
-  **zero-valued bucket needs no rate**: `convert_cents` returns 0 for a
-  zero amount before any rate lookup (zero converts to zero at any rate), so an
-  empty foreign account (balance 0, no recorded rate) never forces the fallback
-  and cannot sink the fold — while a *non-zero* foreign balance with no rate
-  still raises `FxRateUnavailable`, the honest signal that drives the fallback.
+- **Net worth is a per-currency presentation folded to the base through
+  `mammon.fx`.** `fx.net_worth_currencies(conn)` returns a `NetWorthCurrencies`:
+  one `CurrencyLine` per native currency (the base currency first, then the rest
+  A→Z), each carrying its **native subtotal** (signed cents in that currency),
+  its **converted** value in the base currency, and a **grand total** equal to
+  the sum of the converted lines — the layout the user asked for: each currency
+  listed, then its conversion, then one USD total. The accounts overview / account
+  bar figure is `net_worth_currencies(conn).total_cents`; `ledger.net_worth`
+  (hence the whole reports/charts stack and every AS-OF sample of
+  `net_worth_series`) folds through the same object, taking a single-currency fast
+  path that delegates straight to `investments.net_worth` so an all-USD ledger is
+  byte-for-byte unchanged and never pays for the currency machinery. All the cents
+  arithmetic and rate lookup live in `mammon/fx.py`, not the UI.
+- **A missing rate is surfaced, never folded at 1:1.** A **non-zero** foreign
+  balance with no recorded FX rate becomes an UNCONVERTED line
+  (`converted_cents is None`, `rate_missing`) and is **excluded** from
+  `total_cents`; `NetWorthCurrencies.unconverted` names those currencies and
+  `is_complete` is false, so the total is honestly *incomplete* rather than
+  silently overstated by the raw foreign number. Adding such a balance at 1:1
+  would overstate net worth by the whole foreign amount — the same shape of error
+  as a double-counted transfer — so the code refuses to. A **zero-valued bucket
+  needs no rate**: `convert_cents` returns 0 for a zero amount before any rate
+  lookup (zero converts to zero at any rate), so an empty foreign account
+  (balance 0, no recorded rate) is a clean converted line, not an unconverted
+  one; a non-zero foreign balance with no rate raises `FxRateUnavailable`
+  internally, which `net_worth_currencies` catches to mark that one line
+  unconverted without disturbing the others.
 - The app holds no FX credentials; rate fetching is behind the same injectable
   seam as investment quotes (`fx.fetch_rates`, default yfinance source).
 - **Rates are entered and refreshed from a file-wide "Exchange Rates" manager**
