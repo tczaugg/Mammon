@@ -1410,10 +1410,12 @@ floats and no money math in the UI layer.
   grouping, but their activity lives in DIFFERENT tables (`crypto_transactions`
   vs `investment_transactions`), so widening the dispatch to the membership test
   would misroute a wallet into a register that reads the wrong table.
-- **The crypto register is a THIN, read-only projection, and ITS COLUMNS DEPEND ON
-  THE ACCOUNT KIND.** It renders through `crypto.register_rows`, which owns every
-  running-balance / cents / label computation (the UI holds no SQL and no money or
-  precision math). `CryptoRegisterModel` lists the columns each kind shows and maps
+- **The crypto register is a THIN projection whose writes all go through
+  `crypto.py`, and ITS COLUMNS DEPEND ON THE ACCOUNT KIND.** It renders through
+  `crypto.register_rows`, which owns every running-balance / cents / label
+  computation (the UI holds no SQL and no money or precision math), and every edit
+  it accepts funnels through `crypto.update_event` / `link_as_transfer` (the sole
+  writer of `crypto_*`). `CryptoRegisterModel` lists the columns each kind shows and maps
   position -> column KEY, so a position that means Price on an exchange is a coin
   quantity on a wallet; callers address columns through `column_index(key)`, and a
   key the kind does not show returns -1.
@@ -1484,12 +1486,36 @@ floats and no money math in the UI layer.
   differing only where the content requires it.** The gaps closed:
   - a per-row **context menu** (right-click) offering New / Edit / Delete. Edit
     opens `CryptoTransactionDialog` — the crypto twin of the cash
-    `TransactionDialog` — where the fields that are facts (date, coin, quantity,
-    price, fee) are corrected through `crypto.update_event`; Delete removes the
-    row (both legs of a transfer or all legs of a swap) through
-    `crypto.delete_event`. Both rebuild holdings afterward. The numbers stay OUT
-    of inline editing on purpose, so a stray click cannot rewrite chain history;
-    the dialog is the deliberate place to change them.
+    `TransactionDialog` — which shows every field of a posted event on one form;
+    Delete removes the row (both legs of a transfer or all legs of a swap) through
+    `crypto.delete_event`. Both rebuild holdings afterward.
+  - **Every field a posted crypto row legitimately has is editable — inline AND
+    in the Edit dialog.** An import is not an oracle: an address is mistyped, a
+    coin symbol comes through wrong, a source dates a row a day off, so a register
+    you cannot fix is one you cannot trust. The reported gap was that a posted row
+    was inline-editable in only a few cells (payee, memo, action, transfer, an
+    exchange's amount) and its direction was uncorrectable even in the dialog.
+    Now the ONLY read-only cells are the DERIVED running balances (Coin Bal, Cash
+    Bal) — computed, never stored, so nothing there to edit. Every write funnels
+    through `crypto.update_event` (or `link_as_transfer` for the Transfer link),
+    so `crypto.py` stays the sole writer and no second write path appears.
+  - **The DIRECTION is correctable: `SEND` ↔ `RECEIVE`, `BUY` ↔ `SELL`.** A
+    mis-recorded direction was the sharpest edge of the bug — the Action list on a
+    posted row was scoped to its own direction, so the flip was impossible. The
+    Action cell now offers the full same-KIND vocabulary (a coin row cannot become
+    a bare cash DEPOSIT and vice versa, since that swaps a quantity for a fiat
+    amount that is not there), and flipping the action **re-signs the magnitude to
+    match**: the stored quantity keeps its size but takes the new direction's sign,
+    and a trade's fiat amount flips with it (a buy is money out, a sell money in).
+    Coin In / Coin Out render off the quantity's sign and the cash column off the
+    amount's, so the flip moves the coin to the correct side and the payee's
+    meaning with it — the same counterparty is the recipient (`To`) on a send and
+    the sender (`From`) on a receive (`crypto.payee_role` names which, surfaced as
+    the Payee cell's tooltip). Entered as a positive magnitude in the dialog, the
+    sign follows the action, so the user never reasons about the stored sign. The
+    quantity/action consistency this keeps is exactly why the direction used to be
+    frozen; re-signing in one place (`_write_action`, and the dialog's `values()`)
+    is what makes the flip safe to allow.
   - a trailing **blank quick-entry row**, the cash register's manual-entry
     gesture, that records a brand-new event through `mammon.crypto` (a wallet's
     Coin In / Coin Out → `record_wallet_credit` / `record_wallet_debit`, an

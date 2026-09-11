@@ -4803,15 +4803,18 @@ class CryptoTransactionDialog(QDialog):
     """Edit a posted crypto event's fields -- the crypto twin of the cash
     register's TransactionDialog, reached from the context menu's Edit….
 
-    It exists because the register's inline editing deliberately leaves the
-    chain's NUMBERS (date, coin, quantity, price, fee) read-only, so a stray
-    click cannot rewrite recorded history; a deliberate correction still needs a
-    home, and this is it. Every field it exposes maps to a
-    :func:`crypto.update_event` key, and the register applies them through the
-    model (the sole crypto writer). The quantity is entered as a positive amount;
-    its sign follows the action (a removal is negative), so the user never has to
-    reason about the stored sign. Price/Amount are shown only for an EXCHANGE
-    account -- a wallet has no fiat leg to correct."""
+    Every field is also editable inline in the register; this is the single-form
+    alternative, showing them all at once so a multi-field correction (say, the
+    direction AND its quantity) is one dialog rather than several cell edits.
+    Every field it exposes maps to a :func:`crypto.update_event` key (plus the
+    Transfer LINK gesture, applied by the model exactly as the inline Transfer
+    cell is), and the register applies them through the model, the sole crypto
+    writer. The quantity is entered as a positive magnitude; its sign follows the
+    action (a removal is negative), so changing the Action alone flips the
+    direction correctly and the user never reasons about the stored sign.
+    Price/Amount are shown only for an EXCHANGE account -- a wallet has no fiat
+    leg to correct -- and Coin/Quantity/Fee for a wallet ride the coin, not
+    dollars."""
 
     def __init__(self, model, txn, actions, parent=None):
         super().__init__(parent)
@@ -4851,6 +4854,13 @@ class CryptoTransactionDialog(QDialog):
         form.addRow("Fee", self.fee_edit)
         self.payee_edit = QLineEdit(str(txn.get("payee") or ""))
         form.addRow("Payee", self.payee_edit)
+        # The Transfer LINK, so the dialog reaches every field the inline
+        # register does. Seeded `[Account]` when this row is one leg of a
+        # transfer; brackets are accepted but not required (the model strips
+        # them). Blanking it withdraws the link; naming an account performs it.
+        xname = str(txn.get("transfer_name") or "")
+        self.transfer_edit = QLineEdit(f"[{xname}]" if xname else "")
+        form.addRow("Transfer", self.transfer_edit)
         self.memo_edit = QLineEdit(str(txn.get("memo") or ""))
         form.addRow("Memo", self.memo_edit)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -4892,6 +4902,9 @@ class CryptoTransactionDialog(QDialog):
             self.fee_edit.text(), self.coin_edit.text().strip().upper())
         out["fee_symbol"] = fee_sym
         out["fee_quantity"] = fee_qty
+        # Not a stored column but the transfer-link gesture; the model pulls it
+        # out of the dict and applies it through crypto (see apply_edit).
+        out["transfer"] = self.transfer_edit.text().strip()
         return out
 
 

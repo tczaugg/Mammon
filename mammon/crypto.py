@@ -168,6 +168,27 @@ _INCOME_ACTIONS = {"RECEIVE", "REWARD", "INTEREST", "AIRDROP", "MINING"}
 ACTIONS = _ADD_ACTIONS | _REMOVE_ACTIONS | _CASH_ACTIONS
 
 
+def payee_role(action) -> str | None:
+    """Which END of the movement a row's ``payee`` names, from its ACTION alone.
+
+    Coin coming IN (an :data:`_ADD_ACTIONS` credit) names its SOURCE -- the
+    on-chain ``From``/sender -- so the payee is a ``"from"``. Coin going OUT (a
+    :data:`_REMOVE_ACTIONS` debit) names its DESTINATION -- the ``To``/recipient
+    -- so the payee is a ``"to"``. A cash row (DEPOSIT/WITHDRAW) has no on-chain
+    counterparty and returns ``None``.
+
+    This makes the convention ``crypto_transactions.payee`` already stores under
+    (schema v61) EXPLICIT and testable: flipping a row's direction (SEND ->
+    RECEIVE) keeps the same counterparty string but flips what it MEANS, from the
+    recipient to the sender, and this is the one function that says so."""
+    a = _norm(action)
+    if a in _ADD_ACTIONS:
+        return "from"
+    if a in _REMOVE_ACTIONS:
+        return "to"
+    return None
+
+
 def quantity_context() -> decimal.Context:
     """A high-precision :class:`decimal.Context` for wei-scale quantity math.
 
