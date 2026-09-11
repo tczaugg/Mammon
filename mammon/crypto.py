@@ -155,10 +155,20 @@ CROSS_ACTIONS = {"BUYX", "SELLX"}
 # NO coin: a bank deposit, a cash withdrawal, or dollars arriving from another
 # venue. Deliberately in NEITHER add nor remove set -- they open and relieve no
 # position, and `_apply_txn` already skips a symbol-less row, so the holdings
-# replay ignores them while `crypto_cash` (which sums every non-NULL `amount`)
-# picks them up. A WALLET never has one: it holds no fiat.
+# replay ignores them while `crypto_cash` (which sums the sleeve cash actions'
+# amounts) picks them up. A WALLET never has one: it holds no fiat.
 _CASH_ACTIONS = {"DEPOSIT", "WITHDRAW"}
 CASH_ACTIONS = _CASH_ACTIONS
+# The actions whose fiat `amount` settles in THIS account's own cash sleeve: a
+# trade that stayed here (BUY/SELL) or a bare fiat move (DEPOSIT/WITHDRAW). The
+# X-twins (CROSS_ACTIONS) are deliberately EXCLUDED -- a SELLX/BUYX keeps its
+# `amount` for realized-gain math but its cash went to a LINKED cash account, so
+# it leaves the sleeve untouched -- as is every coin-native / income action
+# (whose `amount` is NULL). `register_rows` and `crypto_cash` read this ONE set,
+# so the register's running Cash Bal and the account's valuation cash can never
+# drift apart (the bug where a SELLX -- or a stray ordinary `transactions` row --
+# inflated the holdings-view cash while the register correctly read 0).
+_SLEEVE_CASH_ACTIONS = {"BUY", "SELL"} | _CASH_ACTIONS
 # A disposal for value books realized gain; a TRANSFER_OUT (basis rides to the
 # other wallet) and a FEE (plain expense) remove coin WITHOUT booking a gain.
 _DISPOSAL_ACTIONS = {"SELL", "SELLX", "SWAP_OUT", "SEND"}
@@ -1333,10 +1343,12 @@ def _link_cash_leg(conn, row, cash_account_id: int):
     # path that writes `transfer_account_id` and the mirror invariant with it.
     # Routing around it (a bare INSERT setting that column) would make a second
     # writer of the transfer relationship, which is the main way to break this
-    # codebase. The crypto row's `amount` stays in the sleeve and this leg takes
-    # it straight back out, so the exchange nets to zero and the money lands in
-    # the bank -- the same arithmetic Quicken's SellX does, expressed as the two
-    # rows it really is.
+    # codebase. Renaming the action to SELLX/BUYX (below) drops the crypto row
+    # from `crypto_cash`'s sleeve set, so the exchange's sleeve is untouched and
+    # the money lands in the bank leg -- the same arithmetic Quicken's SellX does,
+    # expressed as the two rows it really is. (The ordinary leg this writes on the
+    # crypto account is NOT sleeve cash either: `account_valuation` reads the
+    # sleeve, not `ledger.account_balance`.)
     if amount > 0:                       # proceeds leaving the exchange
         from_id, to_id = int(row["account_id"]), cash_account_id
     else:                                # a purchase funded from the bank
@@ -1609,12 +1621,14 @@ def register_rows(conn, account_id: int) -> list[dict]:
                 fee_label = f"{_qty_text(fq)} {fsym}"
                 if fsym == sym:
                     coin_bal = _qty_text(bals[fsym])
-            # Fiat moves on a trade AND on a bare cash deposit/withdrawal; every
-            # other action leaves `amount` NULL. Kept in step with `crypto_cash`,
-            # which sums every non-NULL amount -- if these disagree the register's
-            # running Cash Bal stops matching the account's own cash figure.
+            # Fiat moves THIS account's sleeve on a trade that settled here
+            # (BUY/SELL) or a bare cash deposit/withdrawal -- `_SLEEVE_CASH_ACTIONS`.
+            # A SELLX/BUYX's proceeds went to a linked cash account, so it leaves
+            # the sleeve untouched; every coin-native / income action leaves
+            # `amount` NULL. `crypto_cash` reads the SAME set, so the running Cash
+            # Bal here and the account's valuation cash cannot drift.
             camt = (int(_row_value(t, "amount") or 0)
-                    if a in ("BUY", "SELL") or a in _CASH_ACTIONS else 0)
+                    if a in _SLEEVE_CASH_ACTIONS else 0)
             cash += camt
 
             # The linked account is its OWN field, not a label smuggled into the
@@ -1800,13 +1814,25 @@ def holding_values(conn, account_id: int, as_of: Optional[str] = None,
 
 
 def crypto_cash(conn, account_id: int, as_of: Optional[str] = None) -> int:
-    """Net fiat (cents) from the account's crypto transactions on/before ``as_of``
-    -- the internal cash sleeve. Only BUY (``amount<0``) and SELL (``amount>0``)
-    carry fiat; every other action's ``amount`` is NULL/0. Kept parallel to
-    ``investments.investment_cash`` so both domains tell one cash story."""
+    """Net fiat (cents) in the account's INTERNAL cash sleeve on/before ``as_of``.
+
+    Sums ``amount`` for exactly the actions whose fiat settles in THIS account --
+    :data:`_SLEEVE_CASH_ACTIONS` (BUY/SELL and bare DEPOSIT/WITHDRAW) -- the same
+    set :func:`register_rows` accumulates into its Cash Bal column.
+
+    Two kinds of row are pointedly NOT counted, and both once inflated this
+    figure. A SELLX/BUYX (:data:`CROSS_ACTIONS`) keeps its ``amount`` for
+    realized-gain math, but that cash went to a LINKED cash account, not the
+    sleeve -- so filtering on the action name (never merely ``amount IS NOT
+    NULL``) excludes it. And an ordinary ``transactions`` row on the crypto
+    account (an imported deposit, an X-twin's mirror leg) is not a crypto event at
+    all and has no place in the sleeve; this reads ``crypto_transactions`` only,
+    so it never sees one. Kept parallel to ``investments.investment_cash`` so both
+    domains tell one cash story."""
+    marks = ",".join("?" for _ in _SLEEVE_CASH_ACTIONS)
     sql = ("SELECT COALESCE(SUM(amount), 0) FROM crypto_transactions "
-           "WHERE account_id=? AND amount IS NOT NULL")
-    params: list = [account_id]
+           f"WHERE account_id=? AND action IN ({marks})")
+    params: list = [account_id, *sorted(_SLEEVE_CASH_ACTIONS)]
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
@@ -1815,14 +1841,29 @@ def crypto_cash(conn, account_id: int, as_of: Optional[str] = None) -> int:
 
 def account_valuation(conn, account_id: int, as_of: Optional[str] = None,
                       prices: Optional[dict] = None) -> AccountValuation:
-    """Total value of a crypto account: cash (the ordinary ledger balance -- an
-    opening balance / any linked cash rows -- plus the crypto cash sleeve) plus
-    the market value of its coin holdings. ``prices`` (bare symbol -> price)
-    overrides recorded prices for what-if / testing."""
+    """Total value of a crypto account: its internal cash sleeve plus the market
+    value of its coin holdings. ``prices`` (bare symbol -> price) overrides
+    recorded prices for what-if / testing.
+
+    Cash is the sleeve the REGISTER shows -- the account's ``opening_balance``
+    seed plus :func:`crypto_cash` -- and nothing else. It deliberately does NOT
+    read ``ledger.account_balance``: a crypto account's ordinary ``transactions``
+    rows (an X-twin's mirror leg, an imported deposit) are not part of the sleeve,
+    and folding them in reported cash a coin-only exchange does not hold -- e.g.
+    $78k of ``cash`` on an account whose register Cash Bal is correctly $0,
+    nearly doubling its net worth. ``register_rows`` computes cash from
+    ``opening_balance`` + the crypto sleeve events and never from the ordinary
+    ledger, so this matches it exactly."""
     hvs = holding_values(conn, account_id, as_of, prices)
     securities = sum(hv.market_value for hv in hvs)
-    cash = (ledger.account_balance(conn, account_id, as_of)
-            + crypto_cash(conn, account_id, as_of))
+    acct = ledger.get_account(conn, account_id)
+    opening = 0
+    if acct is not None:
+        try:
+            opening = int(acct["opening_balance"] or 0)
+        except (KeyError, IndexError):
+            opening = 0
+    cash = opening + crypto_cash(conn, account_id, as_of)
     unpriced = [hv.symbol for hv in hvs if hv.price is None]
     return AccountValuation(
         account_id=account_id, cash=cash, securities=securities,

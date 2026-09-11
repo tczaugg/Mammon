@@ -1202,7 +1202,16 @@ floats and no money math in the UI layer.
   contribution -- is its full market valuation (cash sleeve + coin value):
   `investments.display_balance` delegates a `'crypto'` account to
   `crypto.display_balance`, so the app's single valuation entry point values any
-  account correctly.
+  account correctly. **The "cash sleeve" is EXACTLY the register's Cash Bal --
+  `opening_balance` plus `crypto_cash` (the fiat that settles HERE: BUY/SELL and
+  bare DEPOSIT/WITHDRAW) -- and nothing else.** `account_valuation` does NOT read
+  `ledger.account_balance`: a crypto account's ordinary `transactions` rows (a
+  SELLX/BUYX's mirror leg -- its proceeds went to a LINKED cash account, so it
+  leaves this sleeve untouched -- or an imported cash row) are not part of the
+  sleeve, and folding them in reported cash a coin-only exchange does not hold
+  (e.g. $78k of "cash" on an account whose register Cash Bal is correctly $0,
+  nearly doubling its net worth). So a coin-only exchange reads $0 cash, matching
+  its register exactly.
 - **Coins get the SAME quote plumbing securities have -- current, historical, and
   register-sourced -- reusing the investments code rather than duplicating it.**
   `crypto.fetch_quotes` fetches the latest close per coin (the injectable
