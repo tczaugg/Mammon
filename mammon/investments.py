@@ -10,6 +10,16 @@ Money is signed integer cents; share quantities and prices are Decimal-precision
 TEXT so no float error creeps into share math. All arithmetic here goes through
 Decimal and rounds money HALF_UP at the cents boundary.
 
+A security's SYMBOL is its whole-history identity (``price_history`` and holdings
+key on it), so a ticker rename would otherwise split one security in two. The
+``security_aliases`` table maps an old ticker to its surviving canonical symbol;
+:func:`resolve_symbol` follows it, every price/holdings/valuation lookup routes
+through :func:`resolve_symbol` / :func:`_identity_symbols`, and the position
+replay folds aliased tickers onto the canonical symbol (:func:`_fold_aliases`).
+Continuity is entirely read-time -- no historical row is rewritten -- so both
+spellings value as one holding across the rename date. This module is the SOLE
+writer of ``security_aliases`` (:func:`add_alias` / :func:`remove_alias`).
+
 Auto-quotes: :func:`fetch_quotes` pulls the latest close for a set of symbols and
 writes ``price_history`` rows; :func:`fetch_quote_history` backfills a monthly
 series over a date range, which is what keeps a net-worth curve from stepping
@@ -1121,6 +1131,50 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
     # was already added to pos.dividends above).
 
 
+def _merge_position(dst, src) -> None:
+    """Fold ``src`` into ``dst`` (both :class:`_Position`) when two ticker
+    spellings resolve to one identity. Shares, cost basis and income are
+    additive; the open lots concatenate (re-sorted oldest-first) so average cost
+    over the pooled lots is the combined basis over the combined shares."""
+    dst.qty += src.qty
+    dst.cost += src.cost
+    dst.dividends += src.dividends
+    dst.realized += src.realized
+    dst.ever_held = dst.ever_held or src.ever_held
+    dst.lots.extend(src.lots)
+    dst.lots.sort(key=lambda l: (l.date or "", l.txn_id or 0))
+    dst.gains.extend(src.gains)
+
+
+def _fold_aliases(conn, positions: dict) -> dict:
+    """Re-key a per-symbol position map onto canonical identities, merging the two
+    spellings of a renamed security into ONE :class:`_Position`. This is where a
+    ticker rename becomes a single continuous holding: the old ticker's lots and
+    the new ticker's lots pool under the canonical symbol, so the Holdings window
+    and every valuation see one identity across the rename date. A no-op (the same
+    object) when no aliases exist -- the overwhelmingly common case -- so the hot
+    replay path pays nothing."""
+    alias_map = {a: c for a, c in list_aliases(conn)}
+    if not alias_map:
+        return positions
+
+    def canon(sym):
+        seen = {sym}
+        while sym in alias_map and alias_map[sym] not in seen:
+            sym = alias_map[sym]
+            seen.add(sym)
+        return sym
+
+    folded: dict = {}
+    for sym, pos in positions.items():
+        key = canon(sym)
+        if key in folded:
+            _merge_position(folded[key], pos)
+        else:
+            folded[key] = pos
+    return folded
+
+
 def _replay_positions(conn, account_id: int, as_of: Optional[str] = None,
                       use_snapshots: bool = True) -> dict:
     """Replay the account's investment transactions into per-symbol
@@ -1149,7 +1203,10 @@ def _replay_positions(conn, account_id: int, as_of: Optional[str] = None,
     method, assigned = _replay_context(conn, account_id)
     for t in _list_txns_in_range(conn, account_id, lower, as_of):
         _apply_txn(positions, t, method, assigned)
-    return positions
+    # Fold aliased tickers onto their canonical identity AFTER the raw replay, so
+    # the snapshot+delta path and the from-inception oracle fold an identical raw
+    # dict (checkpoints stay stored per raw ticker; continuity is read-time).
+    return _fold_aliases(conn, positions)
 
 
 def _replay_context(conn, account_id: int) -> tuple:
@@ -1448,9 +1505,112 @@ def list_holdings(conn, account_id: int) -> list:
 
 
 def get_holding(conn, account_id: int, symbol: str):
+    # Resolve first so a lookup by a renamed (aliased) ticker finds the holding,
+    # which rebuild_holdings now keys under the canonical symbol.
     return conn.execute(
-        "SELECT * FROM holdings WHERE account_id=? AND symbol=?", (account_id, symbol)
+        "SELECT * FROM holdings WHERE account_id=? AND symbol=?",
+        (account_id, resolve_symbol(conn, symbol)),
     ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Security aliases (ticker renames)
+# ---------------------------------------------------------------------------
+# A ticker rename must not split one security's history into two identities. The
+# alias table records that an old ticker IS a former spelling of a surviving
+# (canonical) symbol; every symbol lookup on the price/holdings/valuation paths
+# routes through resolve_symbol, and price reads union an alias's rows into the
+# canonical identity (_identity_symbols). Nothing rewrites a historical row -- the
+# continuity is entirely a read-time resolution, which is what lets both spellings
+# keep resolving to one holding across the rename date. This module is the SOLE
+# writer of security_aliases (add_alias / remove_alias).
+def list_aliases(conn) -> list:
+    """Every ``(alias_symbol, canonical_symbol)`` pair, in alias order."""
+    return [(r["alias_symbol"], r["canonical_symbol"])
+            for r in conn.execute(
+                "SELECT alias_symbol, canonical_symbol FROM security_aliases "
+                "ORDER BY alias_symbol")]
+
+
+def resolve_symbol(conn, symbol):
+    """The canonical symbol ``symbol`` belongs to: follow its alias if one is
+    recorded, else ``symbol`` itself (identity; also for a falsy/blank symbol).
+    add_alias forbids self-aliases and cycles, so a single hop is all that ever
+    exists, but this follows a short bounded chain defensively so a stray chain
+    can never spin."""
+    if not symbol:
+        return symbol
+    seen = {symbol}
+    cur = symbol
+    for _ in range(16):
+        row = conn.execute(
+            "SELECT canonical_symbol FROM security_aliases WHERE alias_symbol=?",
+            (cur,)).fetchone()
+        if row is None:
+            return cur
+        cur = row["canonical_symbol"]
+        if cur in seen:                       # defensive; add_alias prevents this
+            return cur
+        seen.add(cur)
+    return cur
+
+
+def _identity_symbols(conn, symbol) -> list:
+    """Every price_history spelling that shares ``symbol``'s canonical identity:
+    the canonical symbol itself PLUS every alias that resolves to it. A price read
+    over this SET is what keeps a renamed ticker's series continuous across the
+    rename date -- the old ticker's price rows attribute to the new identity with
+    nothing rewritten."""
+    canon = resolve_symbol(conn, symbol)
+    if not canon:
+        return [symbol]
+    aliases = [r["alias_symbol"] for r in conn.execute(
+        "SELECT alias_symbol FROM security_aliases WHERE canonical_symbol=?",
+        (canon,))]
+    return [canon, *aliases]
+
+
+def _price_identity_clause(conn, symbol):
+    """``(where_fragment, params)`` selecting every price_history row that shares
+    ``symbol``'s canonical identity -- ``symbol IN (?,...)``."""
+    syms = _identity_symbols(conn, symbol)
+    return "symbol IN (%s)" % ",".join("?" for _ in syms), list(syms)
+
+
+def add_alias(conn, alias_symbol, canonical_symbol) -> None:
+    """Record that ``alias_symbol`` is a former ticker for ``canonical_symbol``.
+    Thereafter every price/holdings/valuation lookup for the alias resolves to the
+    canonical security, so the two spellings value as one continuous identity.
+
+    Three guards, each guarding against a corrupt mapping rather than a typo:
+    a security cannot alias itself; the canonical MUST be an existing security
+    (the identity everything folds onto); and the new alias must not close a
+    cycle (the canonical must not already resolve back to the alias), which would
+    make resolution ambiguous."""
+    alias = (alias_symbol or "").strip()
+    canon = (canonical_symbol or "").strip()
+    if not alias or not canon:
+        raise ValueError("both alias and canonical symbols are required")
+    if alias == canon:
+        raise ValueError(f"a security cannot alias itself: {alias!r}")
+    if conn.execute("SELECT 1 FROM securities WHERE symbol=?", (canon,)).fetchone() is None:
+        raise ValueError(f"canonical symbol {canon!r} is not a known security")
+    if resolve_symbol(conn, canon) == alias:
+        raise ValueError(
+            f"alias {alias!r} -> {canon!r} would form a cycle")
+    conn.execute(
+        "INSERT INTO security_aliases(alias_symbol, canonical_symbol) VALUES (?,?) "
+        "ON CONFLICT(alias_symbol) DO UPDATE SET canonical_symbol=excluded.canonical_symbol",
+        (alias, canon))
+    conn.commit()
+
+
+def remove_alias(conn, alias_symbol) -> None:
+    """Drop an alias so its symbol resolves to itself again (the rename is
+    reversed for lookup purposes; no historical row was ever touched)."""
+    conn.execute("DELETE FROM security_aliases WHERE alias_symbol=?",
+                 ((alias_symbol or "").strip(),))
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1725,8 +1885,11 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
     for (sym, date, units, price) in positions:
         if not sym:
             continue
+        # compute_holdings keys by the canonical symbol, so resolve the broker's
+        # (possibly renamed) ticker before comparing share counts or prices.
+        canon = resolve_symbol(conn, sym)
         lots = compute_holdings(conn, account_id, as_of=date)
-        computed_qty = lots[sym].qty if sym in lots else Decimal(0)
+        computed_qty = lots[canon].qty if canon in lots else Decimal(0)
         reported_qty = _D(units) if units not in (None, "") else Decimal(0)
         if computed_qty != reported_qty:
             out.append({
@@ -1736,9 +1899,10 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
             })
         if price not in (None, ""):
             reported_price = _D(price)
+            clause, params = _price_identity_clause(conn, sym)
             row = conn.execute(
-                "SELECT close_price FROM price_history WHERE symbol=? AND date=?",
-                (sym, date),
+                "SELECT close_price FROM price_history WHERE " + clause + " AND date=?",
+                (*params, date),
             ).fetchone()
             if row is not None and _D(row["close_price"]) != reported_price:
                 out.append({
@@ -1750,9 +1914,11 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
 
 
 def latest_price(conn, symbol: str, as_of: Optional[str] = None) -> Optional[Decimal]:
-    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever)."""
-    sql = "SELECT close_price FROM price_history WHERE symbol=?"
-    params: list = [symbol]
+    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever).
+    Reads across the whole canonical identity, so a renamed ticker's pre-rename
+    closes still price its holding (:func:`_identity_symbols`)."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = "SELECT close_price FROM price_history WHERE " + clause
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
@@ -1766,9 +1932,11 @@ def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
     by date (then id for a stable order within a day), optionally capped at
     ``as_of``. ``close_price`` is a :class:`~decimal.Decimal` (dollars per share),
     so no float error creeps into the series the price-history chart plots. An
-    empty list means the symbol has no recorded prices."""
-    sql = "SELECT date, close_price FROM price_history WHERE symbol=?"
-    params: list = [symbol]
+    empty list means the symbol has no recorded prices. Rows across the whole
+    canonical identity are merged, so an aliased ticker's series is continuous
+    across its rename date (:func:`_identity_symbols`)."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = "SELECT date, close_price FROM price_history WHERE " + clause
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
@@ -1783,10 +1951,11 @@ def price_history_bounds(conn, symbol: str, as_of: Optional[str] = None) -> list
     known one (a quote, or a price the source stated). ``high`` alone can be
     None on a row whose share count was too coarse to bound it from above
     (:func:`price_bounds`). Kept separate from :func:`price_history` so the many
-    callers that only want the series are unaffected."""
+    callers that only want the series are unaffected. Unions the canonical
+    identity like :func:`price_history`."""
+    clause, params = _price_identity_clause(conn, symbol)
     sql = ("SELECT date, close_price, price_low, price_high FROM price_history "
-           "WHERE symbol=?")
-    params: list = [symbol]
+           "WHERE " + clause)
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
@@ -1805,9 +1974,13 @@ def _resolve_price(conn, symbol, as_of, prices, account_id=None) -> Optional[Dec
     """The price to value ``symbol`` at ``as_of``: an explicit caller-supplied
     ``prices`` override (symbol -> price) takes precedence, otherwise the latest
     recorded ``price_history`` close on/before ``as_of``. ``None`` when neither
-    is available -- the holding is reported unpriced rather than guessed at."""
-    if prices and symbol in prices:
-        return _D(prices[symbol])
+    is available -- the holding is reported unpriced rather than guessed at. The
+    caller-supplied override may be keyed by any spelling of the identity (the
+    old ticker or the new), so it is matched across the identity too."""
+    if prices:
+        for s in _identity_symbols(conn, symbol):
+            if s in prices:
+                return _D(prices[s])
     return latest_price(conn, symbol, as_of)
 
 

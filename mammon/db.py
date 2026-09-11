@@ -1871,6 +1871,22 @@ CREATE INDEX idx_reconciled_change_log_account ON reconciled_change_log(account_
 """
 
 
+# A security whose ticker was renamed keeps ONE continuous identity: the old
+# ticker becomes an alias of the surviving (canonical) symbol instead of having
+# its price_history and transactions rewritten. Reads union an alias's rows into
+# the canonical identity (mammon.investments.resolve_symbol), so history stays
+# continuous across the rename date without touching a single historical row.
+# The alias points AT an existing securities row (the canonical); the alias
+# spelling itself need not have a securities row (a ticker may retire).
+_V64 = """
+CREATE TABLE security_aliases (
+    alias_symbol     TEXT PRIMARY KEY,
+    canonical_symbol TEXT NOT NULL REFERENCES securities(symbol)
+);
+CREATE INDEX idx_security_aliases_canonical ON security_aliases(canonical_symbol);
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -1935,6 +1951,7 @@ MIGRATIONS: list[str] = [
     _V61,
     _V62,
     _V63,
+    _V64,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

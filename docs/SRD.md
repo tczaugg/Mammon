@@ -892,6 +892,46 @@ floats and no money math in the UI layer.
   proposal-vs-proposal collisions described a two-way merge as a simple rename,
   which is the one change here that re-running cannot undo.
 
+### 5.8e-2a Ticker renames without rewriting history (security aliases)
+- A **ticker rename** is a different problem from the merge above. When a listed
+  company changes its symbol (`FB`->`META`, `GOOG`->`GOOGL`), the security is ONE
+  identity that traded under two tickers on either side of a rename date, and both
+  spellings are legitimately present in the file -- pre-rename lots and prices
+  under the old ticker, post-rename ones under the new. The merge in 5.8e-2
+  REWRITES every old-ticker row to the new spelling; a rename does not need that,
+  and rewriting 27 years of `FB` rows to `META` loses the fact that they WERE
+  `FB`. The **`security_aliases`** table keeps both spellings and resolves them to
+  one identity at READ time instead.
+- **How the table is created.** `security_aliases(alias_symbol PRIMARY KEY,
+  canonical_symbol NOT NULL REFERENCES securities(symbol))` is created by
+  migration 64 (`init_db` applies it; nothing else creates it). The alias points
+  AT the canonical securities row (the surviving identity); the retired ticker
+  need not keep a `securities` row of its own.
+- **How aliases are added and removed.** `mammon/investments.py` is the SOLE
+  writer: `add_alias(conn, alias_symbol, canonical_symbol)`,
+  `remove_alias(conn, alias_symbol)`, `list_aliases(conn)`. `add_alias` guards
+  three corrupt mappings -- a security cannot alias ITSELF; the canonical MUST be
+  an existing security (it is the identity everything folds onto); and the alias
+  must not close a CYCLE (the canonical must not already resolve back to the
+  alias), which would make resolution ambiguous. `remove_alias` reverses the
+  rename for lookup purposes; because no historical row was ever touched, the old
+  ticker's lots and prices simply resolve to themselves again.
+- **How aliases are used.** `resolve_symbol(conn, symbol)` maps a symbol to its
+  canonical identity (identity when there is no alias). Every price / holdings /
+  valuation lookup routes through it: the position replay folds an aliased
+  ticker's lots onto the canonical symbol (`_fold_aliases`), and a price read
+  unions the whole canonical identity -- the canonical symbol PLUS every alias
+  that resolves to it (`_identity_symbols`) -- so a renamed ticker's pre-rename
+  price series still values its holding. The continuity is entirely read-time:
+  holdings and valuation are UNCHANGED by the mere act of adding the alias, and
+  the fast paths (`list_holdings`, `holdings_checkpoints`) keep working because
+  `rebuild_holdings` writes the folded position under the canonical symbol.
+- **Alias vs. merge, when to use which.** Use an alias for a genuine ticker
+  rename, where preserving that the security once traded under the old symbol is
+  correct and reversibility is cheap. Use the 5.8e-2 merge to collapse two
+  spellings that were never distinct (an import typo, a name-as-symbol vs. its
+  real ticker), where the old spelling is simply wrong and should disappear.
+
 ### 5.8e-3 Downloaded prices are AS TRADED
 - `YFinanceQuoteSource` passes **`auto_adjust=False`** on both `get_quotes` and
   `get_history`. yfinance defaults it to True (1.7.0), returning a total-return
