@@ -1,8 +1,35 @@
 # Mammon - Software Requirements Document (SRD)
 
-Status: DRAFT for user review. Maintained alongside the code; the plan of record
-tracks execution, this document tracks WHAT we are building and WHY.
-Last updated: 2026-08-06.
+The requirements document of record: WHAT we are building and WHY.
+Maintained alongside the code; The roadmap document tracks
+execution. Last restructured into compartments 2026-09-11.
+
+**How to read this.** The document is organised into COMPARTMENTS
+(A-M), each one a mostly self-contained subsystem with its own
+requirements and the modules that implement them. Read the
+compartment you are working in; you should not need the others.
+`CLAUDE.md` is the lean index that points here.
+
+**Section numbers are stable anchors.** Around fifty comments in
+live code and tests cite them (`SRD 5.8f`), so a section keeps its
+number wherever it sits. That is why the numbering inside a
+compartment is not sequential - do not renumber to tidy it.
+
+| Compartment | Covers |
+|---|---|
+| **A** Register, entry and editing | The account register itself: how a row is entered, edited, sorted, filtered and undone, and how categories and dates are typed. |
+| **B** Accounts, transfers and account types | What an account is, the account types the app supports, and the mirror model that makes a transfer two linked rows instead of one. |
+| **C** Multi-currency | Per-account currency, FX rates, and how a foreign-currency balance rolls up into a home-currency net worth. |
+| **D** Investments | Securities, holdings, lots and valuation: what a share is worth, what it cost, and how the two are kept apart. |
+| **E** Cryptocurrency | Crypto accounts, their two import shapes (on-chain CSV and custodial exchange history), and how they present in the register and holdings. |
+| **F** Import and the review queue | Getting outside data in: file parsers, the delimited-file column map, the dedup rules, and the review queue that stands between a downloaded row and the ledger. Nothing enters the ledger until a row is accepted. |
+| **G** Learned rules | The five cooperating engines that turn bank gobbledygook into a payee and a category. Payee is resolved FIRST, category BELOW it. Nothing is seeded from history; all five learn only from what the user accepts. |
+| **H** Scheduled pre-entries, reminders and the calendar | Recurring bills and loan payments pre-entered as placeholder rows before the bank transaction arrives, and the forward-looking views built on them. A pre-entry matches on TOLERANCE, not exact cents. |
+| **I** Reconciliation | Reconciling a register against a paper or downloaded statement, and the audit trail for anything that changes a row after it is reconciled. |
+| **J** Reports, charts and customization | Read-only aggregations and how they are presented: the shared customization bar, chart behaviour, saved filter sets, export and print, and budgets. |
+| **K** Database, backups and encryption | The canonical schema, how it migrates, how balances stay fast over 40 years, and how the file is snapshotted. The database is one SQLite file the user owns. Encryption is its own document: `docs/encryption.md`. |
+| **L** Downloads, webSlinger and the MCP server | How transactions arrive from institutions, and the read-only tool surface an LLM sees. The app holds NO credentials: login and secrets belong entirely to the webSlinger/keyCocoon side. |
+| **M** Platform, architecture and open items | Non-functional requirements, the resolved technology decisions, and what is still open. |
 
 ---
 
@@ -16,12 +43,14 @@ from the user's institutions.
 
 Non-goals (for now): bill pay, tax-form generation, mobile/web, multi-user.
 
+
 ## 2. Users and platform
 - Single user, single machine (Windows). Python 3.12 for EVERYTHING (backend
   and GUI), PyQt5 for the desktop UI. (Language decision RESOLVED: Python.)
 - Data lives in one SQLite file the user owns and can back up/copy freely.
 - The project will be OPEN-SOURCED, so it needs a new name (see Section 11) and
   it takes a runtime dependency on webSlinger for downloads (see Section 7).
+
 
 ## 3. Guiding principles
 - The ledger is sacred: balances must always be correct and reconcilable.
@@ -30,143 +59,16 @@ Non-goals (for now): bill pay, tax-form generation, mobile/web, multi-user.
   (e.g. better auto-categorization, learned payee renaming).
 - Import must be lossless enough to trust for a 40-year archive.
 
-## 4. Data model (canonical schema)
-One SQLite database. Core tables:
 
-- accounts(id, name, type[checking|savings|credit|cash|investment|asset|liability],
-  currency, opening_balance, opening_date, institution, note, closed_flag) -
-  `currency` is the account's native ISO 4217 code (TEXT NOT NULL DEFAULT 'USD',
-  the base), chosen at creation and treated as immutable thereafter (see 5.4a).
-- categories(id, name, parent_id, type[income|expense], hidden) - hierarchical,
-  Quicken-style "Parent:Child".
-- payees(id, name, normalized_name) - for matching/auto-fill.
-- transactions(id, account_id, date, num, payee, category_id, memo, tag,
-  amount, cleared, reconciled, transfer_account_id,
-  transfer_pair_id, import_id, fitid, created_at) - `tag` is a normalized,
-  comma-joined CACHE of the row's first-class tags (see `tags` below), not an
-  independent field.
-- splits(id, transaction_id, category_id, amount, memo, tag_id) - a transaction
-  split across multiple categories. `tag_id` is the LEG's own tag (v54): Quicken
-  tags a split leg to attribute part of one payment to a project, and folding
-  those onto the parent would credit the whole payment to every tag in the
-  split. A leg carries at most one tag, which is all QIF can express.
-- tags(id, name[UNIQUE, COLLATE NOCASE], color, description) /
-  transaction_tags(transaction_id,
-  tag_id, PRIMARY KEY(transaction_id, tag_id)) - first-class,
-  MANY-tags-per-transaction (schema v45). The junction is the AUTHORITATIVE store;
-  `transactions.tag` is kept as a normalized comma-joined cache of a row's tag
-  names so the register cell, the global Find and the report line loader keep
-  reading one plain column. `mammon/ledger` is the SOLE writer of both, in
-  lockstep (`set_tags` / `set_tags_text` rebuild the junction, then recompute the
-  cache from it). Tags are PER-LEG: a transfer's mirror is never tagged from its
-  other side, so net worth never double-counts. `ON DELETE CASCADE` retires a
-  deleted transaction's (and both transfer legs') tag links. `name` collates
-  NOCASE, so "Home" and "home" are one tag. The legacy single free-text `tag`
-  (schema v2) is migrated forward, one tag per row. App-entered/derived, never
-  imported.
-- balance_checkpoints(account_id, year, balance) - fast running balances.
-- import_mappings(id, payee_pattern, mapped_payee, mapped_category_id, source,
-  hit_count) - learned payee -> category for auto-categorization.
-- category_rules(id, keyword, category_id, match_count, account_id,
-  amount_min_cents, amount_max_cents, memo_contains, created_at, updated_at) /
-  transfer_rules(id, keyword, transfer_account_id, match_count, account_id,
-  amount_min_cents, amount_max_cents, memo_contains, ...) - learned
-  keyword -> category and keyword -> account rules, keyed on a distinguishing
-  UPPER-CASED token pulled from raw statement text. The last four columns are
-  OPTIONAL, NULLABLE conditions (roadmap item 10, schema v40) that narrow WHEN a
-  rule fires: an account scope, an inclusive SIGNED-cent amount range
-  (amount_min_cents .. amount_max_cents), and a case-insensitive memo substring.
-  App-learned from the user's corrections, never imported.
-- imports(id, provider, source_format, file_hash, filename, imported_at, status,
-  counts) - audit of each import run + dedup at file level.
-- transaction_matches(id, imported_txn_id, existing_txn_id, score, approved) -
-  fuzzy dedup review on import.
-- holdings(id, account_id, symbol, name, quantity, cost_basis) - investment
-  positions.
-- price_history(id, symbol, date, close_price, source) - per-holding quotes.
-- asset_values(id, account_id, date, value_cents, source, note,
-  UNIQUE(account_id, date)) - the dated MARKET-VALUE series for a non-investment
-  `asset` account (schema v42), shaped like `price_history` is for securities and
-  kept separate from the account's ledger balance (its cost basis). `value_cents`
-  is signed integer cents; `date` is ISO YYYY-MM-DD; `source` distinguishes a
-  hand-entered `manual` value from a fetched `zillow` one. Net worth reads the
-  LATEST value on or before the as-of date through `investments.display_balance`.
-  Written only by `mammon/asset_values.py`; the zEstimate wiring is 5.8e.
-- investment_transactions(id, account_id, date, action[Buy|Sell|Div|ReinvDiv|
-  IntInc|...], symbol, quantity, price, amount, commission, memo) - lot-level
-  investment activity (kept distinct from cash transactions).
-- crypto_transactions(id, account_id, date, action[BUY|SELL|SWAP_OUT|SWAP_IN|
-  TRANSFER_OUT|TRANSFER_IN|SEND|RECEIVE|REWARD|INTEREST|AIRDROP|MINING|FEE|FORK],
-  symbol, quantity, price, amount, basis, fee_symbol, fee_quantity, fee_amount,
-  transfer_account_id, transfer_pair_id, swap_group_id, tx_hash, memo, import_id,
-  fitid, created_at) - the event log for a cryptocurrency wallet-account (account
-  type 'crypto'), one row per single-asset delta (schema v51). Kept distinct from
-  both cash `transactions` and equity `investment_transactions`: quantities and
-  per-unit prices are text-encoded Decimal at wei scale (18 decimals), while the
-  fiat that moves is signed integer cents. A wallet-to-wallet move uses the same
-  transfer-mirror model as cash (two legs linked by `transfer_pair_id`), a
-  coin-for-coin swap links its two legs by `swap_group_id`, and `tx_hash` is the
-  on-chain exact-dedup key (fitid's role for chain activity). MAMMON domain layer
-  in mammon/crypto.py, which is the SOLE writer of the crypto_* tables (mirroring
-  investments.py's single-writer discipline); ledger.py stays the only writer of
-  the cash `transactions` table.
-- crypto_holdings(id, account_id, symbol, name, quantity, cost_basis,
-  UNIQUE(account_id, symbol)) - current coin position per (account, symbol), a
-  replay cache like `holdings` (schema v52).
-- crypto_holdings_checkpoints(account_id, year, symbol, quantity, cost_basis,
-  income, realized, ever_held, lots, PRIMARY KEY(account_id, year, symbol)) - the
-  per-(account, year, symbol) replay snapshot, the crypto twin of
-  `holdings_checkpoints` for fast open/scroll (schema v52). `income` is
-  staking/airdrop/mining income to date; `lots` is the JSON lot list.
-- The 'crypto' account type is a DISTINCT `accounts.type` value but is classified
-  INVESTMENT-LIKE for net-worth valuation, sidebar grouping and the allocation
-  pie via a single-source-of-truth `ledger.INVESTMENT_LIKE_TYPES` constant (which
-  every such classification tests membership in, rather than comparing to the
-  "investment" literal). The wallet address reuses the existing `account_number`
-  column (already blanked from the MCP surface); `asset_class = 'crypto'` carries
-  the allocation classification. Crypto quantity arithmetic runs under a raised
-  (>= 40 significant-digit) decimal context, because the Python default 28-digit
-  context can silently drop a wei when summing a large balance -- TEXT storage is
-  exact at any decimal count, so only summation is at risk.
-- reconciliations(id, account_id, statement_date, statement_balance, ...) - the
-  record of COMPLETED reconciliations only.
-- reconciled_change_log(id, account_id, transaction_id, changed_at, operation,
-  field, old_value, new_value) - a per-account audit trail of every change made
-  to an ALREADY-reconciled transaction (schema v63; see 5.11a). Append-only,
-  written only by `mammon/ledger.py` (the sole transaction writer) and otherwise
-  read-only. `transaction_id` carries no foreign key on purpose: after a delete
-  the row it names is gone, and the log entry must outlive it.
-- reconcile_drafts(account_id PK, statement_date, beginning/ending_cents,
-  charges/payments/credits/finance_cents, finance_category, finance_txn_id) -
-  the statement inputs of an UNFINISHED reconcile, one per account (schema v30).
-  A reconcile spans several sittings: the user closes the window to look
-  something up in the register and comes back, and the typed statement figures
-  must survive that. Deleted when finish_reconciliation locks the statement in.
-  finance_txn_id is load-bearing - it is how a reopened reconcile UPDATES the
-  posted finance charge instead of posting a duplicate.
-- loan_params / loan_rates / loan_extras - a liability account's amortization
-  definition (principal, term, rate history, escrow/PMI extras). Drives the loan
-  payment schedule and the principal/interest/escrow split.
-- scheduled_payments(id, account_id, payee, amount, frequency[weekly|biweekly|
-  monthly|quarterly|annual], next_date, category_id, memo, active) - generalized
-  recurring-payment DEFINITIONS for subscriptions, fixed-price utilities,
-  memberships, etc. (schema v16). MAMMON-GENERATED, never imported (see 5.10).
-- budgets(id, name, active) / budget_lines(id, budget_id, category_id, period
-  ['YYYY-MM'], amount_cents, rollover, UNIQUE(budget_id, category_id, period)) -
-  named per-category monthly spending targets (roadmap item 6, schema v39). App-
-  generated, never imported. Actuals are NOT stored: budgeted-vs-actual is
-  derived read-only from transactions via reports/spending.py, so the ledger
-  stays the sole writer. Domain layer in mammon/budgets.py; the Budgets panel
-  (Tools ▸ Budgets…, mammon/ui/budget_widget.py) is a thin projection over it -
-  choose/create a budget, edit per-category monthly targets, and view
-  budgeted/actual/remaining for a month, with no SQL or money logic of its own.
+---
 
-Monetary amounts: stored as signed integer CENTS (avoids float rounding).
-Share quantity and per-share price: stored as text-encoded Decimal to preserve
-precision for fractional shares / multi-decimal prices. (Q5 RESOLVED: confirmed.)
-Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
+## Compartment A. Register, entry and editing
 
-## 5. Functional requirements
+The account register itself: how a row is entered, edited, sorted,
+filtered and undone, and how categories and dates are typed.
+
+Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
+`mammon/ui/models.py`, `mammon/ui/widgets.py`, `mammon/ui/delegates.py`.
 
 ### 5.1 Account ledger (FIRST PRIORITY)
 - Register view per account, classic Quicken columns:
@@ -177,6 +79,7 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   and payee auto-complete, running balance recomputed on every change.
 - Cleared/reconciled flags; right-click edit/delete/copy/paste/insert.
 - Accounts overview with per-account balance and total net worth.
+
 
 ### 5.1a QuickFill (memorized payees)
 - The Payee cell completes from the payees the register has actually used,
@@ -223,7 +126,9 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   the sole writer), then opens the very same split dialog on the saved
   transaction -- Copy-from-previous-`<payee>` button and all -- whose lines are
   written by `ledger.set_splits`. An empty blank row (no date + amount) stays a
-  no-op, and a transfer entered on the blank row commits but is not splittable.
+  no-op. A transfer entered on the blank row commits and IS splittable: the
+  local leg is the row the dialog opens on, and the transfer becomes one LINE of
+  the resulting split (SRD 5.2a).
 - **The split dialog's live Remainder is exact integer cents.** A leg's amount is a
   spin box; backspacing it empty used to leave `value()` returning the LAST accepted
   number (Qt treats the empty string as an intermediate edit, not the value 0) and
@@ -239,6 +144,7 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   so it cannot drift from history and needs no maintenance. A per-payee
   lock/"do not memorize" list is the natural follow-up if a payee's amount
   varies enough that recalling it is noise.
+
 
 ### 5.1b Register sort, filter, columns, batch edits, void, replace
 - **Sorting.** A header click sorts by that column (indicator shown; a second
@@ -342,6 +248,7 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   `QMessageBox.question` seam, and it emits `changed` so open registers and the By
   Tag report refresh.
 
+
 ### 5.1c Register Undo/Redo
 - The register has multi-level Undo and Redo for edits the user makes there:
   adding a transaction, editing a transaction's fields, deleting a transaction,
@@ -371,17 +278,11 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   barrier in this version — single-row add / edit / delete / transfer / split are
   the undoable acts. A new edit always clears the redo stack.
 
-### 5.2 Transfers between accounts (FIRST PRIORITY)
-- Classic Quicken behavior (user confirmed Q1): a transfer is one transaction
-  whose Category is "[Other Account]". Entering it AUTO-CREATES a linked mirror
-  transaction in the other account with the opposite sign.
-- The two sides are linked (transfer_pair_id). Editing amount/date/clearing on
-  one side updates the other; deleting one deletes both. No double-counting in
-  net worth.
 
 ### 5.3 Categories and memos
 - Every transaction has a Category and a Memo.
 - Categories are hierarchical (Parent:Child), like Quicken.
+
 
 ### 5.3a Category Manager (Tools ▸ Category Manager…)
 - A dialog (`mammon/ui/categories_dialog.py`, `CategoriesDialog`) showing the
@@ -413,6 +314,236 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   `Parent:Child` name) and reassigns every posting to it first; only an unused
   category is removed after a plain confirmation.
 
+
+### 5.5a Category entry
+- A category is completed from any **unambiguous fragment**
+  (`ui/delegates.resolve_category_input`), in order: exact path, exact LEAF name
+  (`fuel` → `Auto:Fuel`), path prefix (`land` → `Landscaping`), leaf prefix. Each
+  step requires a unique winner; ambiguity resolves to nothing and falls through
+  to the existing typo guard, which is what keeps that guard useful for genuinely
+  new categories. Before this, typing `land` for the sole Landscaping category
+  prompted "Create new category 'land'?" — the guard firing on exactly the
+  gesture it should have completed.
+- **A split line's category widget is the register's**, built by the same
+  `make_category_combo`. It was a bare combo with no completer at all, so typing
+  habits learned in the register silently did not work one dialog away.
+- **The completer popup matches on the subcategory name too**
+  (`CategoryCompleter` / `category_completions`). Qt's default filter is "starts
+  with" against the whole `Parent:Child` path, so typing a leaf produced an EMPTY
+  popup — nothing begins with `fuel` — and the subcategory was unreachable by its
+  own name. The list is the ordered union across match tiers (exact path, exact
+  leaf, path prefix, leaf prefix, substring), so the highlighted entry is what
+  the fragment almost always means.
+- **Enter/Tab takes the first offering; focus-out does not.** A deliberate commit
+  with the popup on screen resolves an ambiguous fragment to the highlighted
+  entry (`accept_category_text(take_first=True)`). Focus-out chose nothing, so
+  only an unambiguous fragment is accepted — guessing there would categorize a
+  transaction because a click landed elsewhere, the same failure `MoneyDelegate`
+  prevents for amounts.
+- An **ambiguous** fragment reaching commit anyway offers the matches to choose
+  from (`category_matches`), never "create a new category". A real ledger has both
+  `Auto:Fuel` and `Moving:Fuel`, so `fuel` is a question — and offering to create
+  a third category called `fuel` is a wrong answer to a question the user did not
+  ask.
+- **Any dialog raised from a delegate's `setModelData` MUST be deferred** one
+  event-loop turn (`QTimer.singleShot(0, …)`) and parented to the VIEW, never the
+  editor. `setModelData` runs while Qt is destroying the editor; a modal there
+  opens a nested event loop that lets the teardown finish and frees the editor
+  the frame still holds. The observed result was a silent heap corruption
+  (`0xc0000374`) with no Python traceback — the same class of failure
+  `RegisterModel._write` defers its reload to avoid. The deferred write goes
+  through a `QPersistentModelIndex` and drops a row that vanished meanwhile.
+- **Tab selects the field, a click places the caret.** Opening a classification
+  editor (Category, Payee, Memo, Tag) by Tab or the keyboard SELECTS ALL its text,
+  so the first keystroke REPLACES the highlighted value — matching the
+  click-to-edit path, which select-alls too. The ONE case that appends is a mouse
+  click, which lands the caret where the user pressed. The choice is a pure function
+  of the Qt focus reason (`ui/delegates.select_all_on_focus`), applied on focus-in
+  by `_FocusSelectLineEdit` (and, through it, `CategoryLineEdit`), so it is testable
+  headless. Before this, Tabbing into a pending review row's field left the caret at
+  the end and the first key APPENDED — disagreeing with a click on the same field,
+  the same "typed into a pre-filled field without selecting first" hazard §5.11
+  removed for statement dates.
+
+
+### 5.10a Register chrome and entry feedback
+- Account actions (Details, Reconcile, Print Register, Import, Download,
+  Review, Loan Setup, Hide) live in a **gear menu** at the right of the
+  account-name line, not on a toolbar row — in the investment register too,
+  where the gear additionally carries **Get Quotes** (§5.5c) and **Reconcile
+  Shares** (§5.11b). Every one of them opens a dialog, and a row of buttons
+  that only lead elsewhere is a poor trade for register height.
+  `AccountToolbar` still owns the actions and their account-id wiring; it is
+  simply never shown. Edit Account Details, Reconcile to Statement, Reconcile
+  Shares and Print Register used to be duplicated on the Settings menu as
+  well; they were dropped from there because each acts on "the account
+  currently open in a register", which the gear menu already is — Settings
+  now holds only the three preference submenus (Display, Sound, Format)
+  described below.
+- The **one-line/two-line choice is per account** (`ui/prefs.account_view_mode`,
+  QSettings) and lives only in the gear menu — a View-menu copy of the same
+  toggle was redundant with it and was removed. The layout that suits a
+  register depends on the account: a card whose rows carry long statement
+  descriptions wants the second line, a hand-entered checking account does
+  not. Settings ▸ Display Preferences sets the DEFAULT; an account that chose
+  from its gear menu keeps its choice when the default changes.
+- **Sound and date-display format each get their own Settings submenu**
+  (Sound Preferences, Format Preferences) rather than a field on the Display
+  Preferences dialog, so each can grow: Sound Preferences is built to later
+  hold more than one sound and more sound-worthy events (import complete,
+  download complete, ...) beside "play a sound when a transaction is saved";
+  Format Preferences is built to later hold more than the date format. Both
+  are `QSettings`, wired straight from a checkable `QAction` with no
+  dialog/OK-Cancel step, since a single choice does not need one.
+- **Display Preferences (Settings) are QSettings, never DB, and theme-sensitive
+  colors are remembered PER THEME.** Font family/size, row-shading on/off and
+  the two-line default mean the same thing in light and dark, so they are
+  stored globally. But the **alternate-row shade** and the
+  **negative-amount color** are legible only against their own background, so
+  each theme keeps its own slot (`display/theme_colors/<theme>/<role>`) and
+  `ui/prefs.alt_row_color()` / `negative_color()` read the slot of the currently
+  active theme, falling back to that theme's palette value (`style.palette_for`)
+  when unset. A single shared key was the reported defect: a color picked in dark
+  mode overwrote light's (and vice-versa), so switching themes back and forth
+  lost the alternate-row color. A pre-namespacing single-key value is migrated
+  into the active theme's slot on first read, so an existing user loses nothing
+  and the pick lands in the theme it was chosen under rather than leaking into
+  the other. A color chosen in the same Display-Preferences change that also
+  switches the theme belongs to the newly chosen theme (the dialog has already
+  reseeded its swatches to that theme), and the dialog's theme combo reseeds each
+  swatch from that theme's remembered pick so toggling it can never clobber the
+  other theme's saved color.
+- The accounts list gives **credit cards their own heading**. Quicken separates
+  them only by ordering, leaving the boundary implicit; the order still matches
+  (cards directly below Banking).
+- A **transaction-accepted sound** plays on save, switchable in Settings. It is
+  driven by `RegisterModel.transactionSaved`, which fires only when a write
+  actually altered or created a row — NOT by `committed`, which also fires for a
+  no-op rewrite.
+- **One sound per TRANSACTION, not per field.** The register saves per field:
+  editing an existing row commits each cell as its editor closes, so tabbing
+  across four fields is four database writes to one transaction. The unit the
+  user works in is the transaction, so `transactionSaved` carries the txn id and
+  the register coalesces on it, sounding when the user is done with that row —
+  on Enter, or on moving to another row. A brand-new row commits as a whole and
+  needs no coalescing. **Enter on an existing row is the accept gesture**: it
+  commits any open cell editor and acknowledges the transaction once. (It does
+  not perform the write; the row is already saved.)
+- The sound also fires from the **review list** (`ImportReviewPanel
+  .transactionSaved`) for a MATCHING row accepted or a NEW row saved, and not for
+  a discard. Review is the high-volume accept gesture and where the confirmation
+  is worth most; `changed` is not a substitute, as it also fires for edits,
+  visibility switches and discards. Qt commits an editor on focus-out whether or not it was touched,
+  so a chime keyed off "an edit was committed" would fire for clicking a cell and
+  clicking away, and a confirmation that fires on nothing is one you stop
+  hearing. The waveform is synthesized into the data dir on first use rather than
+  shipped as a binary blob; playback degrades silently with no audio backend.
+- Reconcile panes **gray a row once it is cleared**. The Clr mark is at the far
+  left and the amount at the far right, so with two identical amounts it is easy
+  to re-click the row already cleared. Dimming answers "have I done this one?" at
+  the amount itself.
+
+
+### 5.10b Dates: one format, everywhere
+- A single **date-format preference** (`ui/prefs.date_format`, one of
+  `MM/DD/YYYY`, `DD/MM/YYYY`, `YYYY-MM-DD`) governs every date the user sees or
+  types — registers, dialogs, report filters, printed output and chart axes.
+- Two chokepoints, and no date may bypass them:
+  - `ui/models.fmt_date` — stored ISO → the chosen DISPLAY format.
+  - `ui/models.parse_date` — anything typed (or a QDate) → ISO `YYYY-MM-DD`, or
+    `""` when it is not a date. ISO is always accepted, since it is the storage
+    format and what download scripts return. A two-slash date is genuinely
+    ambiguous (`03/04` is March 4th or April 3rd depending on where you live), so
+    the PREFERENCE decides — that is what the preference is for. Separators may
+    be `/ - .`; two-digit years map into 1970-2069.
+- **Storage, the ledger validators and every download script speak ISO.** The
+  conversion happens once, at the parse chokepoint, never at the call site.
+- **Every date field offers both entry routes**: typing and a calendar picker.
+  They are all built by `ui/delegates.make_date_edit`, read back through
+  `date_edit_iso`. A `QDateEdit` cannot hold a non-date, so nothing downstream
+  has to defend against one.
+- **An unbound date field opens on TODAY and is typeable.** With no initial value
+  `make_date_edit` sets the widget to the current date, never the Qt sentinel
+  minimum (1752-09-14) — which rendered as blank AND refused keystrokes, so a
+  field defaulted to it looked broken. A `blank_ok` field also opens on today; the
+  sentinel is reached only when the user clears the field, which `date_edit_iso`
+  reports as `""`. The one deliberate exception is a field that must be blank ON
+  OPEN — a date FILTER, where today would hide all history — which opts in with
+  `setDate(edit.minimumDate())` after building; an ENTRY field never does.
+- Changing the preference **reaches windows already open**:
+  `ui/delegates.refresh_date_format` re-stamps every date editor under the main
+  window, and displayed dates re-render through `fmt_date`.
+- This was the inconsistency the preference was supposed to remove. Each site had
+  hardcoded its own answer — the register editor said `MM/dd/yyyy` while report
+  filters, scheduled payments, the reconcile setup and the download date range
+  all said `yyyy-MM-dd` — and the transaction dialog, the investment dialog and
+  the loan wizard took dates as FREE TEXT that only accepted ISO, with no picker
+  at all. Choosing `DD/MM/YYYY` changed the register and nothing else.
+- **Tabular date cells follow the preference too.** After the loan wizard's scalar
+  date fields adopted `make_date_edit`, its rate-history and extra-amount TABLES
+  still carried each effective date as raw ISO text in a bare `QTableWidgetItem`,
+  bypassing both chokepoints. Every effective-date cell is now a `make_date_edit`
+  editor (calendar-pickable, in the chosen format), read back through
+  `date_edit_iso`; storage and the amortization domain stay ISO.
+- **The new-account dialog's opening date is a date editor too.** Its optional
+  opening-date field was the last holdout — a bare `QLineEdit` with a hardcoded
+  `YYYY-MM-DD` placeholder read raw, so it ignored the preference and only accepted
+  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso`, like
+  the reconcile setup: the DISPLAY honors the setting while the stored/returned
+  value stays ISO `YYYY-MM-DD`. It **opens on today** and is immediately typeable;
+  the first `make_date_edit(blank_ok=True)` port pinned it to the sentinel minimum,
+  which rendered blank and refused input, so the field looked broken. `blank_ok` is
+  retained only so the user can clear the field back to `None`; the visible default
+  is today.
+
+
+## Compartment B. Accounts, transfers and account types
+
+What an account is, the account types the app supports, and the mirror
+model that makes a transfer two linked rows instead of one.
+
+Code: `mammon/ledger.py`, `mammon/loans.py`.
+
+### 5.2 Transfers between accounts (FIRST PRIORITY)
+- Classic Quicken behavior (user confirmed Q1): a transfer is one transaction
+  whose Category is "[Other Account]". Entering it AUTO-CREATES a linked mirror
+  transaction in the other account with the opposite sign.
+- The two sides are linked (transfer_pair_id). Editing amount/date/clearing on
+  one side updates the other; deleting one deletes both. No double-counting in
+  net worth.
+- **"Go to [account]", in EVERY register.** Right-clicking a transfer leg offers
+  a context-menu entry naming the counterpart ACCOUNT; choosing it opens (or
+  raises) that account's register with the mirror row selected. A transfer is
+  one movement seen twice, so whichever side is on screen has to lead to the
+  other. This is register-kind-blind in both directions: the cash/loan, the
+  investment (5.8) and the crypto (5.8j) registers all OFFER it, and all three
+  are valid destinations. A row that is not a transfer leg offers nothing -- the
+  entry is absent, not greyed. One entry per distinct counterpart account (a
+  split touching the same account twice does not repeat it), the account itself
+  is never offered, and a leg whose counterpart account no longer exists offers
+  nothing rather than an unnamed jump.
+
+### 5.2a A transfer can be split (user-reported, 2026-09-11)
+- A transfer is one transaction whose money may move more than one way. The user
+  sold crypto for 859.70 in a Coinbase account and 843.09 arrived in checking;
+  the missing 16.61 is a transaction fee and has to be categorized. The register
+  refused with "a transfer cannot be split", leaving no way to record it.
+- **The transfer is a property of one split LINE, not of the ROW.** Splitting a
+  transfer produces a row totalling 859.70 whose Category renders `--Split--`,
+  one line transferring -843.09 to `[Checking]` and one line of -16.61 against a
+  fee category.
+- **The mirror equals the transfer LINE, not the row total.** The counter-account
+  register shows a single 843.09 deposit -- the amount that actually moved.
+  Correcting the split moves the other side with it; there is never a second
+  deposit and never a stale one.
+- The split must keep a line pointing at the account the transfer went to.
+  Dropping it would orphan the other half of the user's transfer, so it is
+  refused (naming the account) before anything is written.
+- Undo of "split this transfer" restores the whole transfer with the SAME mirror
+  row re-linked; deleting the split transaction removes both legs. Either way no
+  orphan is left in the other account.
+
+
 ### 5.4 Intermediary payees - Venmo, PayPal (RESOLVED: no dedicated field)
 - Money moving through an intermediary needs the REAL counterparty recorded, not
   just "Venmo". A dedicated field on every transaction was specified for this and
@@ -421,6 +552,109 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   payee and memo live on the intermediary account's own register rows. This needs
   no extra field, scales past a handful of payments a month, and reuses the
   transfer machinery that is already tested. See migration 28 in `mammon/db.py`.
+
+
+### Implementation notes
+
+How this compartment is built, and what each shape
+prevents. Moved out of CLAUDE.md 2026-09-11: it is
+reference for whoever works here, not per-call context.
+
+#### Transfers (the mirror model)
+
+A transfer is **two** linked transactions, one per account, equal and opposite, cross-linked by
+`transfer_pair_id` with each row's `transfer_account_id` pointing at the other account. Editing
+amount/date on one side syncs the other; deleting one deletes both. The "category" of a transfer is
+virtual — it renders as `[Other Account]` and consumes no category row. Every layer that touches
+transactions must exclude or collapse transfers explicitly, or net worth double-counts.
+
+This model is also why the app needs no third-party-payee field: give an intermediary (Venmo,
+PayPal) its own **account**, and money moving to and from it is an ordinary transfer with the real
+payee and memo living on that account's own register rows. A vestigial `third_party` column was
+dropped in migration 28.
+
+#### Splitting a transfer: the mirror follows the LINE (5.2a)
+
+`ledger.set_splits` used to refuse a transfer outright. It now **adopts** the mirror onto a line: the
+parent row's own `transfer_account_id`/`transfer_pair_id` go NULL, the split line targeting that same
+account takes over the existing counter row — **same id**, so its date, payee, register position and
+reconcile status survive — and that row is re-amounted to the negated LINE. The line remembers it in
+`splits.transfer_pair_id`, exactly like any other split transfer leg, and like every split leg the
+mirror is **one-sided** (its own `transfer_pair_id` stays NULL). Adoption, not delete-and-recreate, is
+the point: recreating would silently unreconcile the other side and break anything referencing that id.
+
+Consequences that are load-bearing:
+
+- **The invariant is "mirror == transfer LINE", never the row total.** `update_transaction` mirrors the
+  row total to `transactions.transfer_pair_id`, which is why the parent must NOT keep a row-level
+  transfer link while carrying splits; that alternative shape was rejected for exactly this reason.
+- **A split that drops the leg to the counter-account is rejected** (`ValueError` naming the account),
+  checked BEFORE any mutation, because it would orphan the other half of the transfer.
+- **A one-sided parent yields a one-sided leg.** If the row being split had `transfer_pair_id` NULL
+  (an asymmetric import, or itself the mirror of someone else's split leg), no counter row is
+  fabricated — that would post money into the other account that never existed.
+- **A transfer that ALREADY carries splits is left alone**: an imported mortgage payment is
+  legitimately both a transfer to `[House]` and a principal+interest split, and re-splitting it keeps
+  the parent link as-is.
+- `clear_splits(conn, id, restore_transfer_to=<account>)` is the exact inverse — it hands the surviving
+  mirror BACK to the row and re-cross-links both sides. The keyword is opt-in and only `undo` passes it;
+  the default still deletes leg mirrors, because a loan payment's principal leg to `[Mortgage]` must not
+  be promoted into a whole-row transfer.
+- `undo._structural` exempts this move in both directions (a transfer field going set→NULL normally
+  means a non-undoable barrier), so "split this transfer" is an ordinary undo step.
+
+Covered by `mammon/tests/test_transfer_split.py` (ledger life cycle, undo/redo, delete, and the
+register path through `SplitDialog`).
+
+#### "Go to [account]" is one feature, not three
+
+`ui/widgets.TransferGotoMixin` holds the whole of it — naming, de-duplication by target account,
+building the menu entries, dispatching the chosen one, and the jump itself (`MainWindow.open_register`
+then the widget's `select_txn`, which all three register widgets expose). Each register supplies only
+`_transfer_pairs(row)`: "what `(account_id, txn_id)` does this row transfer to". It was originally
+written inline in the cash register; the crypto and investment registers went without until the user
+reported the gap, and the fix was to EXTRACT rather than to copy, because a second copy is how the
+three drift apart again.
+
+The counterpart id is not always stored, so `txn_id` may be `None` and the jump then lands on the
+target register without selecting a row — still the right answer, and better than hiding the entry.
+Three shapes exist, and the lookup for each lives in the DOMAIN layer (`ledger`, `crypto.transfer_targets`,
+`investments.transfer_targets`), never in the UI, which keeps no SQL:
+
+- **cash and crypto↔crypto** — both legs carry `transfer_pair_id`, so the mirror id is simply read back.
+  A loan payment's one-sided mirror leg is reachable only through the REVERSE link, and a split leg
+  carries its own pair id.
+- **crypto↔ordinary account** — the cash leg is written by `ledger` into `transactions` and the crypto
+  row keeps only `transfer_account_id`; there is no id to store, so the mirror is relocated by shape
+  (same account, date and **magnitude**, pointing back). Magnitude, not signed amount: a DEPOSIT's or
+  WITHDRAW's cash leg carries the OPPOSITE sign of the crypto row, so a signed match silently finds
+  nothing for exactly half the cash links.
+- **investment XIn/XOut** — `investment_transactions` has no pair-id column AT ALL, so the counterpart
+  is matched on `(date, counter-account, |amount|)` — the identical key `_unrepresented_transfer_legs`
+  and the valuation double-count guard already use. A backfilled cash leg shown in that register is an
+  ordinary `transactions` row and pairs the cash register's way.
+
+**The link is not symmetric, and the cash side has to translate.** `transfer_pair_id` only ever names a
+`transactions` row, so leaving the cash register it is the WRONG id whenever the target register reads a
+different table. For a crypto target it names the shadow `transactions` row `ledger.create_transfer`
+writes on the exchange purely to carry the mirror invariant — a row the crypto grid, built from
+`crypto_transactions`, never shows; for an investment target it names the mirror cash leg, which that
+register HIDES whenever an XIn/XOut already represents the same movement. Either way `select_txn` found
+nothing and the register opened unselected (the user landed at the bottom), while the reverse direction
+worked because it relocates by shape. So `RegisterWidget._transfer_pairs` passes every pair id — top-level
+leg and split leg alike — through `_pair_id_in_targets_space`, which asks the DOMAIN module
+(`crypto.crypto_txn_for_cash_leg` / `investments.investment_txn_for_cash_leg`) to re-locate the counterpart
+on the SAME shape key the other direction uses. Two rows matching that key are resolved toward a matching
+memo, then the lowest id: a deterministic jump beats none.
+
+Covered by `mammon/tests/test_register_goto_account.py`.
+
+## Compartment C. Multi-currency
+
+Per-account currency, FX rates, and how a foreign-currency balance rolls
+up into a home-currency net worth.
+
+Code: `mammon/fx.py`, `mammon/ui/fx_rates_dialog.py`.
 
 ### 5.4a Per-account currency (multi-currency)
 Every account has a native currency (`accounts.currency`, ISO 4217, `NOT NULL
@@ -438,6 +672,21 @@ floats and no money math in the UI layer.
   argument — there is no second write path. Changing an account's currency after
   it holds transactions would silently reinterpret every past amount, so the
   Account Details dialog shows the currency **read-only** and never writes it back.
+- **An OFX/QFX download states its own currency, and it is honoured on creation.**
+  `<CURDEF>` (ISO 4217, OFX 2.2 sec 5.2) is read by `importers/ofx.parse_ofx`,
+  carried on `NormalizedTxn.account_currency`, and passed to
+  `ledger.create_account` by `importers/core._resolve_account` and by
+  `importers.import_single_account` (the review path a single-account file takes)
+  ONLY when the account is being created. An existing account is never
+  re-stamped, for the immutability reason above, and a code that is not three
+  letters is ignored rather than stored -- it would otherwise be unfixable
+  without rebuilding the account. A per-transaction
+  `<CURRENCY>`/`<ORIGCURRENCY>` amount is not read: it needs an FX rate per row.
+  **QIF cannot carry a currency at all** -- Intuit's `!Account` block is
+  N/T/D/L//$ and no revision ever added one (the format was deprecated in favour
+  of OFX/QFX instead), so a QIF-imported account takes the USD default and a
+  foreign-currency ledger migrated from Quicken must have its currencies set by
+  hand at account creation.
 - **Per-account amounts render in the account's own currency.** A base-currency
   account renders bare (the dense classic look — no symbol clutter); a foreign
   account is tagged with its currency symbol/code (`ui/models.fmt_amount_ccy`,
@@ -473,6 +722,20 @@ floats and no money math in the UI layer.
   one; a non-zero foreign balance with no rate raises `FxRateUnavailable`
   internally, which `net_worth_currencies` catches to mark that one line
   unconverted without disturbing the others.
+- **An uncomputable total is shown as a WARNING MARK, never as a number.** The
+  account bar's Net Worth strip renders `warning_triangle_icon()` -- the same
+  amber triangle the register shows before `--Split--` for an unassigned split
+  remainder, drawn in one place so one mark means one thing -- in place of the
+  figure whenever `AccountsModel.unconverted_currencies()` is non-empty, with a
+  tooltip naming the missing currency AND both ways to supply a rate ("Add..."
+  for a dated rate by hand, "Refresh Rates" to fetch the latest close, both in
+  Tools > Exchange Rates). This is the presentation half of the rule above: the
+  per-currency subtotals are each complete, so the information the user needs is
+  already on screen, and the only thing missing is the roll-up. Printing a number
+  anyway would silently omit a real balance -- the total would read as though the
+  foreign account did not exist -- which is the same lie as folding it in at 1:1,
+  just in the other direction. Once any rate is recorded the strip reverts to a
+  number and the tooltip clears (`test_multicurrency_ui.py`).
 - The app holds no FX credentials; rate fetching is behind the same injectable
   seam as investment quotes (`fx.fetch_rates`, default yfinance source).
 - **Rates are entered and refreshed from a file-wide "Exchange Rates" manager**
@@ -494,74 +757,36 @@ floats and no money math in the UI layer.
   accounts (the dialog's `changed` signal drives a refresh, and net worth folds
   through the newest stored rate on/before the date).
 
-### 5.5 Auto-categorization from history
-- When a payee recurs, Mammon learns its category and auto-fills/suggests the
-  category on new and imported transactions once a pattern is established
-  (e.g. a given grocery store -> Groceries).
-- User can always override; overrides update what is learned.
-- **The category is resolved BELOW the payee.** Payee renaming settles first
-  (`rename_tree`), then `category_tree` walks a discrimination trie rooted at
-  that payee over the row's source text, ranked by category entropy. So one
-  payee can hold several categories and still be answered exactly:
-  `COSTCO GAS ...` -> Auto:Fuel, `COSTCO WHSE ...` -> Groceries, on the single
-  token that separates them.
-- **A candidate category is never one the payee has not already carried.** This
-  is the locked requirement, and it is structural rather than a threshold: the
-  vote counts `suggest` reads are themselves keyed by payee. A first-ever payee
-  therefore proposes nothing at all -- during the learning period a blank
-  category is the correct answer, and an unrelated guess is worse than silence.
-- **When not confident, blank the category and RANK the picker.** The register's
-  category dropdown promotes the categories this payee has carried (the ones
-  matching this description first, then the rest by frequency), with the full
-  alphabetical list underneath so any category stays reachable. Measured on the
-  real ledger's first year, the promoted first entry was the right answer 67% of
-  the time on rows too uncertain to fill in.
-- Two gates decide "confident": node purity (does this description
-  discriminate?) and payee coherence (is this merchant categorizable at all?).
-  Coherence applies only at the trie root, where nothing distinguished the row
-  and the answer is the payee's bare prior -- that is the case where a catalogue
-  payee like Amazon would otherwise stamp its most common category onto every
-  unrelated purchase. Below the root a matched token has earned its answer and
-  is not overruled by the payee's overall mix.
-- Investment rows are excluded end to end: `investment_transactions` has no
-  category column, so there is nothing to predict and nothing the user could
-  correct to train on.
-- **Keyword category rules are hand-written only.** The old `keyword ->
-  category` learner minted a global rule from a single correction and is
-  removed; migration 57 deleted every row it had produced. What remains in
-  `category_rules` is what the user typed into the Rules manager, so it is
-  honoured directly when the payee tree declines -- an explicit instruction,
-  not the system guessing.
-- **Two votes fill; QuickFill covers one.** `category_tree.MIN_COUNT` is 2,
-  the same floor as a rename (the 4 it inherited was compensating for the old
-  trie's resetting counts). Below that, once the payee is SETTLED -- filled by
-  the rename tree or supplied by the source -- `predict_fields` asks the
-  register's own QuickFill (`categorize.quickfill`, this account's row
-  preferred) what it would pre-enter for that payee typed by hand, so a payee
-  the ledger has categorized for years fills on its first download. Typing the
-  payee already did this; an auto-filled payee must not do worse. Withheld only
-  when review history has shown the payee to be a catalogue (coherence below
-  `PAYEE_COHERENCE` on at least `MIN_COUNT` votes). The accepted category is
-  recorded as a vote whichever source supplied it. Measured over the older
-  ledger's 599 categorized accepts, replayed cold: 294 fills, 249 right; the
-  floor at 2 versus 4 adds 10 right fills and no wrong ones, and the errors
-  that remain sit on well-corroborated nodes where the user's own
-  categorization changed over the years.
 
-### 5.6 Import (see Section 6 for the strategy)
-- One-time migration of the full ~40-year Quicken 2017 history into Mammon's DB.
-- Ongoing import of downloaded/scraped data (QFX/OFX, JSON, CSV).
-- Every importer maps to a common normalized record, then dedups (fitid +
-  fuzzy match) before insert; transfers are recognized so both sides are not
-  double-imported.
+## Compartment D. Investments
 
-### 5.7 Download from institutions (see Section 7)
-- Pull transactions from the user's banks, cards, and investment institutions,
-  preferring a direct download format (QFX/OFX/CSV) where the site offers one,
-  and webSlinger scraping -> JSON only where it does not.
+Securities, holdings, lots and valuation: what a share is worth, what it
+cost, and how the two are kept apart.
+
+Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
+`mammon/ui/rebalance_dialog.py`.
 
 ### 5.8 Investment accounts
 - Maintain holdings and a per-holding price history.
+- A price-history plot is labeled with the account's currency -- the currency of
+  the ACCOUNT the holding sits in, so a TSX-listed holding kept in a CAD account
+  plots as CAD.
+  A security carries no currency of its own -- the account does (§5.4a,
+  `fx.get_account_currency`) -- so a fund held in a CAD brokerage has CAD prices,
+  and the chart must not imply otherwise. Every entry point into it (the
+  investment register's Security-cell double-click and its "Price history"
+  context entry, and the Holdings window) is a window scoped to ONE account and
+  hands that account down to the shared chart helper, which labels the y axis
+  `Price (CCY)`, names the currency in the plot title and the dialog title, and
+  prints the `$` on the ticks ONLY for USD -- a CAD price wearing a bare dollar
+  sign reads as USD and invites the reader to add it straight into a USD total.
+  The currency crosses that boundary as an explicit argument
+  (`ui/charts.PriceHistoryCanvas(symbol, points, currency=)`), and a missing or
+  blank one normalizes to USD -- an account with no currency recorded is USD,
+  the base, so the two-argument construction the older callers and the tests use
+  keeps its old meaning instead of drawing an unlabelled axis. The same rule
+  binds any coin chart a crypto window later grows, since it shares the one
+  canvas.
 - An investment account's displayed balance is its full market valuation, cash
   PLUS securities (`investments.display_balance`). The Holdings window therefore
   ends Currently Held with a **Cash** line and footers Securities / Cash /
@@ -574,6 +799,46 @@ floats and no money math in the UI layer.
   -- sort, filter, column chooser, multi-row batch edit, find-and-replace and
   Void -- over the investment columns; see §5.1b for the shared behaviour and the
   investment-specific Void.
+- Its row context menu carries **"Go to [account]" on a transfer leg**, the same
+  entry the cash register has (5.2): it names the counterpart account and jumps to
+  the mirror row. Both shapes this register shows are covered -- an XIn/XOut
+  carrying a `transfer_account_id`, and a backfilled cash leg -- and the entry is
+  absent, not greyed, on a row that is not a transfer. `investment_transactions`
+  has no pair-id column at all, so `investments.transfer_targets` locates the
+  counterpart by (date, counter-account, |amount|); the register keeps no SQL of
+  its own.
+
+
+### 5.8a Security names (rename / merge)
+- One security ends up under two names: a broker abbreviates
+  (`ALTY GLOBAL X SUPERDIVIDEND ALTER` -> `ALTY`), or a fund company renames
+  outright (`Fidelity 500 Index Fund` -> `FXAIX`). The register then shows two
+  positions where the user holds one.
+- The investment gear's **Rename Security** does a **search/replace over the
+  security names of one account** (`investments.plan_security_rename` /
+  `apply_security_renames`). Matching is by SUBSTRING, case-insensitively:
+  dropping a descriptive tail and replacing a name outright are both required,
+  and neither whole-name nor prefix matching covers both.
+- Scoped to ONE account. A name means what that account's broker meant by it,
+  and fusing two positions is a judgement about one account's history.
+- Renaming onto a name the account already holds **merges** the positions: their
+  lots, cost basis and dividends replay as one holding. That is usually the
+  point, but it is not undone by renaming back, so the dialog previews every
+  change as `old -> new (n transactions)`, flags the merges, and lets the user
+  untick any of them before anything is written.
+- There is deliberately **no "shorten every name to its ticker" bulk action.**
+  In the real trading account this was built against, 310 of 313 distinct names
+  have a ticker-shaped first token, because that is how option contracts are
+  named; blanket shortening would fuse a stock with its expired options into one
+  position.
+- `price_history` is keyed by symbol ALONE, with no account column, so a rename
+  COPIES prices to the new name (filling only dates it lacks, since a fetched
+  quote beats a price derived from an old transaction) and drops the old name's
+  rows only once nothing anywhere refers to it. Another account holding the same
+  security under the old name keeps everything it needs.
+- `holdings` and `holdings_checkpoints` are derived, so they are REBUILT, not
+  patched: a merge changes the lot replay itself.
+
 
 ### 5.8b Stock splits
 - A split's ratio is stored EXACTLY, as an integer `split_num`/`split_den` pair
@@ -605,6 +870,7 @@ floats and no money math in the UI layer.
     running total, disagreeing with `holdings` (which was always right, since it
     replays through `_apply_txn`). Share Bal ties to holdings by documented
     invariant; the split case has to be in both.
+
 
 ### 5.8d Lots, capital gains, performance and allocation (roadmap item 7)
 - **Shares are kept as tax lots**, one per acquiring transaction, inside the
@@ -734,6 +1000,7 @@ floats and no money math in the UI layer.
   market value, gain, % return and income, as decimal dollar strings) and
   `allocation`, read-only like the rest.
 
+
 ### 5.8e What an asset is worth (market value vs. cost basis)
 - An asset account's **ledger balance is its cost basis** -- purchase price plus
   the improvements posted to it. That is the number a capital gain needs and the
@@ -850,6 +1117,23 @@ floats and no money math in the UI layer.
   meaningless rather than merely large. `AssetValueCanvas` charts the value
   series with the cost basis as a flat reference line, so the gap between them
   reads directly as unrealized appreciation.
+- **A tickerless fund's price comes from the holdings snapshot import.** A
+  retirement-plan fund with no ticker can never be quoted, so the only price it
+  will ever have is the per-share price printed on a statement. The holdings
+  snapshot import (SRD 5.6; its dialog and the reconcile it feeds, SRD 5.11b)
+  records that price in `price_history` under its own source `snapshot`
+  (`investments.SNAPSHOT_PRICE_SOURCE`) through the ordinary `record_price`
+  path, deriving it as `market value / shares` in Decimal when the file prints
+  a value but no price. It creates no transactions, so the share count itself
+  still comes only from the account's own history -- one import answers two
+  different questions: what the account is worth (here) and whether the book
+  share count agrees with the statement (SRD 5.11b, which reads the stated
+  ending quantity the same import left in that security's reconcile draft).
+- A snapshot price is **as traded on its statement date**, like a hand-typed or
+  transaction-derived one, so it is split-adjusted on the way out with them
+  (SRD 5.8e-4): `snapshot` is deliberately NOT in `SPLIT_ADJUSTED_SOURCES`,
+  which names only the provider feeds that already arrive restated.
+
 
 ### 5.8e-2 A security's identity vs. its description
 - A security has **two facts and, until now, one column**. `investment_transactions
@@ -892,6 +1176,7 @@ floats and no money math in the UI layer.
   proposal-vs-proposal collisions described a two-way merge as a simple rename,
   which is the one change here that re-running cannot undo.
 
+
 ### 5.8e-2a Ticker renames without rewriting history (security aliases)
 - A **ticker rename** is a different problem from the merge above. When a listed
   company changes its symbol (`FB`->`META`, `GOOG`->`GOOGL`), the security is ONE
@@ -910,12 +1195,34 @@ floats and no money math in the UI layer.
 - **How aliases are added and removed.** `mammon/investments.py` is the SOLE
   writer: `add_alias(conn, alias_symbol, canonical_symbol)`,
   `remove_alias(conn, alias_symbol)`, `list_aliases(conn)`. `add_alias` guards
-  three corrupt mappings -- a security cannot alias ITSELF; the canonical MUST be
-  an existing security (it is the identity everything folds onto); and the alias
+  four corrupt mappings -- a security cannot alias ITSELF; the canonical MUST be
+  an existing security (it is the identity everything folds onto); the alias
   must not close a CYCLE (the canonical must not already resolve back to the
-  alias), which would make resolution ambiguous. `remove_alias` reverses the
-  rename for lookup purposes; because no historical row was ever touched, the old
-  ticker's lots and prices simply resolve to themselves again.
+  alias), which would make resolution ambiguous; and NEITHER SIDE may be an
+  option contract (below). `remove_alias` reverses the rename for lookup
+  purposes; because no historical row was ever touched, the old ticker's lots
+  and prices simply resolve to themselves again.
+- **The rename-only invariant.** security_aliases means rename and only rename;
+  an option contract is a distinct instrument, never an alias of its underlying.
+  A contract has its own terms, its own price series and its own expiry, and it
+  ends while the stock goes on, so folding the two onto one identity would value
+  the contract at the stock's price and merge two unrelated holdings with no way
+  to tell them apart again. The pull towards that mistake is structural, not
+  hypothetical: `investments.ticker_of` reads the first token of
+  `XYZ 260117C00150000 XYZ 17JAN26 150 C` as `XYZ`, and a QIF `!Type:Security`
+  block for an option states the ROOT ticker in its `S` field, so every
+  ticker-derivation path in the codebase is one step from proposing the
+  collapse. Three refusals hold the line, all keyed on
+  `investments.looks_like_option` -- a deliberately conservative OSI-shape test
+  (it matches only the unambiguous `YYMMDD` + `C`/`P` + 8-digit strike body, and
+  is documented as an interim stand-in for a real instrument classifier):
+  `securities.suggest` never proposes an identity change for a contract and
+  never returns `confident=True` for one even when a source stated the root;
+  `securities.apply_splits` raises before touching anything if a split's target
+  identity already belongs to a differently-classified security, because
+  `_rekey` merges by DELETING the losing rows and that is not undoable; and
+  `securities.fetch_ticker` returns None for a contract, so no stock price is
+  ever filed against one until option quoting exists.
 - **How aliases are used.** `resolve_symbol(conn, symbol)` maps a symbol to its
   canonical identity (identity when there is no alias). Every price / holdings /
   valuation lookup routes through it: the position replay folds an aliased
@@ -932,17 +1239,25 @@ floats and no money math in the UI layer.
   spellings that were never distinct (an import typo, a name-as-symbol vs. its
   real ticker), where the old spelling is simply wrong and should disappear.
 
-### 5.8e-3 Downloaded prices are AS TRADED
+
+### 5.8e-3 Downloaded prices: as traded for DIVIDENDS, restated for SPLITS
 - `YFinanceQuoteSource` passes **`auto_adjust=False`** on both `get_quotes` and
   `get_history`. yfinance defaults it to True (1.7.0), returning a total-return
-  series back-adjusted for dividends AND splits, while every other price in the
-  file -- the QIF price, the transaction-carried price, the latest close -- is as
-  traded. Mixing the scales is not cosmetic: a high-yield holding came back at
-  half its real 2021 price (QYLD 11.67 against an as-traded 22.62) and an 8:1
-  split put VGT's whole pre-split history at an eighth of what it traded for, so
-  the chart read as a flat line with the real prices spiking out of it. Splits are
-  already modelled (`split_ratio`) and a dividend is a transaction, not a price
-  revision, so the provider must adjust for neither.
+  series back-adjusted for dividends, while every other price in the file -- the
+  QIF price, the transaction-carried price, the latest close -- is as traded.
+  Mixing the scales is not cosmetic: a high-yield holding came back at half its
+  real 2021 price (QYLD 11.67 against an as-traded 22.62). A dividend is a
+  transaction, not a price revision, so the flag stays False.
+- **The flag buys less than it was once thought to: it does NOT suppress the
+  SPLIT adjustment.** Yahoo's chart endpoint serves OHLC already restated into
+  the unit trading at fetch time, whatever `auto_adjust` says. So after VGT's 8:1
+  split every downloaded pre-split close arrives at an eighth of what it traded
+  for, while the prices this app derives itself stay as traded -- and the chart
+  drew the difference as pre-split spikes poking out of the downloaded curve.
+  That is not fixable at the provider, so it is absorbed on the READ side
+  (SRD 5.8e-4). The earlier claim here that `auto_adjust=False` kept downloaded
+  history on the as-traded scale was wrong; it is corrected rather than deleted
+  because the same reasoning is still exactly right for dividends.
 - **`fetch_quotes` writes under the HOLDING's name, never the ticker it was
   handed** -- callers pass a `names` mapping exactly as `fetch_quote_history`
   does. Writing under the bare ticker looked like it worked and valued nothing,
@@ -953,6 +1268,49 @@ floats and no money math in the UI layer.
   wrong-scale download permanently uncorrectable -- re-running changed nothing
   and said it had changed hundreds of rows, because the function returned the
   count OFFERED rather than the count written. It now returns what landed.
+
+
+### 5.8e-4 A price series reads on ONE scale (split adjustment at read time)
+- **Stored prices stay RAW -- as traded on their own date.** `price_history`
+  holds two kinds of row: quotes from a provider, and prices this app derived
+  itself (`learn_prices_from_transactions`, source `txn`/`qif-txn`, plus broker
+  positions and hand-typed prices). Nothing rewrites a stored close, ever.
+- **The READ applies the split: a series is split-adjusted on the way out,
+  never in storage.** `investments.price_history` and
+  `investments.price_history_bounds` divide each as-traded price by the exact
+  cumulative factor of every `StkSplit` on that security dated **strictly after**
+  the price's own date, so the series comes back in today's units end to end. A
+  price on or after the last split is returned unchanged. Multiple splits
+  compound exactly -- a 2:1 then a 3:1 divides an earlier price by 6.
+- **Provider rows are passed through untouched** (`SPLIT_ADJUSTED_SOURCES`, the
+  same set as `REFETCHABLE_SOURCES`): they already arrive restated (SRD 5.8e-3),
+  and scaling them again would replace the user's spike with an equal and
+  opposite trough. Source is what distinguishes the two scales, so it is read
+  alongside the close.
+- **Exact arithmetic only.** The factor comes from `split_factor` as a
+  `Fraction` (from the exact `split_num`/`split_den` pair, SRD 5.8b), the divide
+  is done in `Fraction`, and the result is rounded HALF_UP at the precision a
+  price is stored with. A float divide by 3 puts drift into a number the chart
+  then draws as a step.
+- **Split rows are deduplicated by date, not summed.** The same corporate action
+  is recorded once per account holding the security, so multiplying every row
+  would tell a two-account holder that an 8:1 split was 64:1. Voided split rows
+  are excluded, and alias resolution is shared with the share math, so a renamed
+  ticker still finds its splits.
+- **Why read time rather than restating the stored prices.** Rewriting history
+  when a split lands is a one-way door: a mistyped ratio could not be undone,
+  deleting a split entered by accident could not put the old numbers back, and a
+  second pass over the same history would divide twice. Recomputing from the
+  split rows means editing or deleting one self-corrects the whole series.
+- **`latest_price` is deliberately NOT adjusted.** It prices a holding at a given
+  date against a share count replayed as of that same date, which has not had a
+  later split applied to it either; pre-split shares x pre-split price is the
+  consistent pairing, and a current valuation reads a post-split row on both
+  sides. Only the series that is DRAWN needs one common scale.
+- Covered by `mammon/tests/test_price_history_split_adjust.py` (the reported 8:1
+  life cycle, the boundary date, compounding splits, a 3:2 ratio, a security with
+  no splits, the bounds read, and the plotted chart series).
+
 
 ### 5.8f Target asset mix and drift (SRD 5.8f)
 - `mammon/rebalance.py` holds a **target mix** and measures the real one against
@@ -992,7 +1350,37 @@ floats and no money math in the UI layer.
   (`target_is_complete`): normalizing a forgotten line would produce a plausible,
   wrong target reporting drift nobody can clear. `target_from_current` seeds a
   target from the mix held today (the usual starting point) and lands the
-  rounding remainder on the largest class so the lines total exactly 100.
+  rounding remainder on the largest class so the lines total exactly 100. That
+  report is for a target written straight through the domain API, or by a build
+  predating the locks below; the EDITOR can no longer produce such a total.
+- **Locked weights and the always-100 edit.** A mix that does not add up to 100
+  is not a mix, and the old editor let the user build one a keystroke at a time.
+  The fix is not validation after the fact but an edit that cannot leave the
+  total: raising one class LOWERS the others. `rebalance.apply_target_edit(lines,
+  locked, asset_class, pct)` is that rule, pure Decimal over a plain dict -- no
+  database, no float. The LOCKED classes keep their exact stored values; what is
+  left of 100 after them is split between the edited class and the other
+  UNLOCKED classes in proportion to what those already held (evenly if they are
+  all at zero -- a proportional share of nothing is nothing, and the total would
+  break). Recipients clamp at zero, so no weight can go negative, and the
+  rounding remainder lands on the largest unlocked recipient -- the same
+  convention `target_from_current` uses -- so **the column totals exactly 100
+  after every edit**. An edit larger than the unlocked classes can absorb is
+  CLAMPED to `100 - locked` rather than honoured at the cost of the total: a
+  silently wrong mix is worse than a number that stops where it must.
+- **The lock is what makes that rule livable: a locked allocation target line
+  holds its weight while the UNLOCKED lines absorb every later edit, so the mix
+  stays at exactly 100%.** Without it the class settled
+  three edits ago drifts back out from under the user; with it the workflow is
+  set a class, lock it, move on, until everything is where it should be. It is
+  persisted per line (migration 66's `locked` column on
+  `allocation_target_lines`) because that decision outlives the dialog:
+  `set_locked`, `is_locked`, `locked_classes`. Locking a class with no line yet
+  writes a zero line, and a LOCKED line driven to zero keeps its row where an
+  unlocked one is deleted -- "hold nothing here" is a decision, not an empty
+  field, and dropping it would let the next redistribution hand the class the
+  weight the user just refused. `set_line_balanced` is the editor's single write
+  path, so the UI never computes a weight itself.
 - **Nothing here writes a transaction.** `move_cents` is arithmetic -- what would
   close the gap -- and executing it stays the user's job in the register. Tax is
   not modelled: a sale in a taxable account realizes a gain, and the cheapest
@@ -1017,10 +1405,15 @@ floats and no money math in the UI layer.
   be DIAGNOSTIC (conditional correlation in down markets, historical drawdown of
   the current mix), never prescriptive.
 - UI: **Reports ▸ Target & Drift…** (`ui/rebalance_dialog.py`, its own module).
-  Target percent editable in place, current percent, signed drift in points and
-  relative, and a Buy/Sell figure per class (cash reads Invest/Raise, never Sell);
+  A Lock checkbox sits LEFT of each target weight -- reading across the row,
+  "this one is settled" comes before the number it settles -- and a locked row's
+  spin box is disabled, since editing a weight whose own lock forbids the answer
+  is an invitation to confusion. Target percent editable in place (through
+  `set_line_balanced`, which redraws every row, not just the edited one),
+  current percent, signed drift in points and relative, and a Buy/Sell figure per class (cash reads Invest/Raise, never Sell);
   out-of-band rows coloured (red overweight, blue underweight -- they must not
   both be red, since they mean opposite actions). MCP: `allocation_drift`.
+
 
 ### 5.8g Asset-class mixture per security (SRD 5.8g)
 - **One security is not always one class.** A target-date fund is roughly 58%
@@ -1070,35 +1463,14 @@ floats and no money math in the UI layer.
   tab and a **Get fund mixtures…** button; the class combo keeps its meaning as
   "which equity bucket", said in its tooltip. MCP: `security_mixtures`.
 
-### 5.8a Security names (rename / merge)
-- One security ends up under two names: a broker abbreviates
-  (`ALTY GLOBAL X SUPERDIVIDEND ALTER` -> `ALTY`), or a fund company renames
-  outright (`Fidelity 500 Index Fund` -> `FXAIX`). The register then shows two
-  positions where the user holds one.
-- The investment gear's **Rename Security** does a **search/replace over the
-  security names of one account** (`investments.plan_security_rename` /
-  `apply_security_renames`). Matching is by SUBSTRING, case-insensitively:
-  dropping a descriptive tail and replacing a name outright are both required,
-  and neither whole-name nor prefix matching covers both.
-- Scoped to ONE account. A name means what that account's broker meant by it,
-  and fusing two positions is a judgement about one account's history.
-- Renaming onto a name the account already holds **merges** the positions: their
-  lots, cost basis and dividends replay as one holding. That is usually the
-  point, but it is not undone by renaming back, so the dialog previews every
-  change as `old -> new (n transactions)`, flags the merges, and lets the user
-  untick any of them before anything is written.
-- There is deliberately **no "shorten every name to its ticker" bulk action.**
-  In the real trading account this was built against, 310 of 313 distinct names
-  have a ticker-shaped first token, because that is how option contracts are
-  named; blanket shortening would fuse a stock with its expired options into one
-  position.
-- `price_history` is keyed by symbol ALONE, with no account column, so a rename
-  COPIES prices to the new name (filling only dates it lacks, since a fetched
-  quote beats a price derived from an old transaction) and drops the old name's
-  rows only once nothing anywhere refers to it. Another account holding the same
-  security under the old name keeps everything it needs.
-- `holdings` and `holdings_checkpoints` are derived, so they are REBUILT, not
-  patched: a merge changes the lot replay itself.
+
+## Compartment E. Cryptocurrency
+
+Crypto accounts, their two import shapes (on-chain CSV and custodial
+exchange history), and how they present in the register and holdings.
+
+Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
+`coinbase_csv.py`.
 
 ### 5.8h Cryptocurrency accounts
 - A cryptocurrency wallet is a DISTINCT account type (`accounts.type = 'crypto'`)
@@ -1242,6 +1614,7 @@ floats and no money math in the UI layer.
   per asset, a NATIVE-quantity row, a USD-converted row, and a Total column -- a
   thin projection holding no coin/cents math of its own.
 
+
 ### 5.8i Cryptocurrency import (Etherscan-style native-coin CSV)
 - **ETHERSCAN RENAMES ITS COLUMNS, so the header must be matched broadly.**
   Exports through ~2023 head the hash column `Txhash` and the timestamp
@@ -1281,6 +1654,24 @@ floats and no money math in the UI layer.
   basis, no realized gain, and no cash sleeve to move. The rules below (gas
   attribution, sign, own-wallet transfer, `tx_hash` dedup, failed-row skip) hold
   for both kinds.
+- **WHICH reader runs is decided by the FILE's column signature, not by the
+  account** (`crypto_core.parse_export_file`, SRD 5.8i-2): a Coinbase-shaped
+  document gets the exchange reader and a by-address export the on-chain one
+  wherever they are imported, and a document matching neither falls back to the
+  generic delimited reader (`crypto_tabular.read_records`), which infers the same
+  roles from whatever the headers are called. The account kind then decides only
+  whether USD rides along.
+- **The asset is read out of the COLUMN HEADER when no cell carries it.** A
+  block-explorer by-address export never names the coin in a row -- it heads the
+  quantity columns `Value_IN(ETH)` / `Value_OUT(ETH)` and the gas column
+  `TxnFee(ETH)` -- so the ticker is taken from the parenthesized symbol in the
+  header itself (`crypto_tabular._asset_from_header`, checked in the order
+  quantity-in, quantity-out, quantity, fee). A reader that insisted on a per-row
+  `Asset` column would read the whole export as assetless and import nothing.
+  Exactly one of the in/out pair is non-zero on a row, which is what gives the
+  event its direction: `Value_IN` is an increase, `Value_OUT` a decrease, and the
+  counterparty follows the coin -- the `From` address is the payee on an increase,
+  the `To` address on a decrease.
 - **Gas is the user's only when the user is the sender.** The export prints a
   `TxnFee` on EVERY row, including inbound ones, but on-chain only the sender pays
   gas. Gas is booked as a same-coin `fee_*` leg on the parent event ONLY when the
@@ -1390,6 +1781,7 @@ floats and no money math in the UI layer.
   belongs beside `mapped_from_crypto_record`, keyed off the account kind, and must
   not be guessed at in advance: the field names come from the generated script.
 
+
 ### 5.8i-2 Cryptocurrency import (custodial exchange history)
 
 - A custodial exchange's transaction history (Coinbase's per-year "Transactions"
@@ -1438,12 +1830,32 @@ floats and no money math in the UI layer.
   `quantity` and `price` NULL -- which is what keeps the row out of the holdings
   replay (`_apply_txn` skips a symbol-less row) while `crypto_cash` and the
   register's running Cash Bal still count it. A WALLET never carries one.
+- **Linking a cash move to a bank account reads its sign the OPPOSITE way from a
+  trade.** Both shapes reach `crypto._link_cash_leg`, which writes the bank side
+  through `ledger.create_transfer` (the sole writer of `transactions` and of the
+  mirror invariant), but `crypto_transactions.amount` means two different things.
+  A TRADE's cash is CREATED by the trade: `amount` is what the disposal realized
+  (+) or the purchase cost (-), so a +ve SELL means the exchange holds proceeds
+  and the link says they were wired OUT to the bank (SellX), a -ve BUY that the
+  bank funded it (BuyX). A `DEPOSIT`/`WITHDRAW`'s cash is MOVED, not created:
+  `amount` is already THIS side's sleeve delta -- a WITHDRAW is -ve because money
+  left the exchange -- and the linked account is just the other end of that same
+  move, so the direction is the MIRROR of the trade rule. A withdrawal out of an
+  exchange is therefore negative there and **POSITIVE in the bank register (the
+  Deposit column)**; reading it the trade way made it a Payment on both sides, a
+  sign error the register's columns faithfully reported and must never be
+  "corrected" in the display layer. `_link_cash_mirror` (crypto to crypto, no
+  ordinary account involved) already expressed this as a plain `-amount`; the two
+  paths now agree. Only `SELL`/`BUY` are renamed to the X form -- a linked
+  `DEPOSIT`/`WITHDRAW` keeps its action and stays in the sleeve, because the
+  money genuinely did leave (or enter) it.
 - **An exchange import goes through the review queue like every other source.**
   It used to write straight through; its rows need MORE judgement than a
   wallet's, not less, precisely because the source's product names only
   approximate what happened. `import_review.build_exchange_review` shares one
   body (`_build_crypto_entries`) with the wallet builder so the two can never
   dedupe by different rules.
+
 
 ### 5.8j Cryptocurrency accounts in the UI (register, holdings, grouping)
 - **Grouping is already investment-like, by the shared constant.** A `type='crypto'`
@@ -1469,13 +1881,14 @@ floats and no money math in the UI layer.
   quantity on a wallet; callers address columns through `column_index(key)`, and a
   key the kind does not show returns -1.
   - **EXCHANGE** (custodial: a fiat cash sleeve, coin traded for dollars) —
-    Date, Action, Coin / Wallet, Payee, Quantity (stored SIGNED — an OUT leg is
-    negative), Price, Coin Bal (running per-coin balance, folding in the same-coin
-    gas so it ties to `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a
-    Buy/Sell), Cash Bal, Fee.
-  - **WALLET** (a single address) — Date, Action, Coin / Wallet, Payee, Memo,
-    Coin Out, Coin In, Coin Bal, Fee. **Price, Amount and Cash Bal are ABSENT, not
-    blank.** For a paper-wallet address there is no per-row USD, no fiat leg and no
+    Date, Action, Coin / Wallet, Payee, Transfer, Quantity (stored SIGNED — an OUT
+    leg is negative), Price, Coin Bal (running per-coin balance, folding in the
+    same-coin gas so it ties to `rebuild_holdings`), Amount (the fiat cash-sleeve
+    effect of a Buy/Sell), Cash Bal, Fee, Memo.
+  - **WALLET** (a single address) — Date, Action, Coin / Wallet, Payee, Transfer,
+    Memo, Coin Out, Coin In, Coin Bal, Fee.
+    **The wallet register omits Price, Amount and Cash Bal** -- they are ABSENT, not
+    blank. For a paper-wallet address there is no per-row USD, no fiat leg and no
     cash sleeve, so those columns are not merely empty — they invite a reading of
     the register that is false. Increases and decreases get their own columns (the
     source's `Value_IN` / `Value_OUT`) because on-chain they are different events
@@ -1538,6 +1951,12 @@ floats and no money math in the UI layer.
     `TransactionDialog` — which shows every field of a posted event on one form;
     Delete removes the row (both legs of a transfer or all legs of a swap) through
     `crypto.delete_event`. Both rebuild holdings afterward.
+  - **"Go to [account]" on a transfer leg**, the same entry the cash register has
+    (5.2): it names the counterpart account and jumps to the mirror row. It covers
+    both shapes a crypto link takes — a crypto↔crypto pair, and a cash leg living
+    in an ordinary account — and it is absent, not greyed, on a row that is not a
+    transfer. `crypto.transfer_targets` locates the counterpart, so the register
+    keeps no SQL of its own.
   - **Every field a posted crypto row legitimately has is editable — inline AND
     in the Edit dialog.** An import is not an oracle: an address is mistyped, a
     coin symbol comes through wrong, a source dates a row a day off, so a register
@@ -1630,354 +2049,724 @@ floats and no money math in the UI layer.
   halves `display_balance` already sums, so a crypto holding is counted EXACTLY
   once and the Total equals the sidebar's Net Worth strip.
 
-### 5.8c Backup scoping (one folder per database)
-- Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
-  the Restore picker opens in the CURRENT database's folder.
-- **Restore refuses a snapshot belonging to a different database.** A snapshot
-  names the ledger it was taken from (`backup.snapshot_db_name`), and
-  `backup.restore_backup` compares that against the file being replaced,
-  raising `ForeignSnapshotError` on a mismatch. The check applies when the
-  target already exists — writing a snapshot out to a NEW file destroys nothing
-  and stays allowed.
-- Why both: a scratch `mammon2.db` was opened for a test, and hours later — from
-  the old shared flat folder — its snapshot was picked to roll back a mistake
-  and overwrote the real ledger. The restore succeeded and produced a valid,
-  completely wrong ledger; the loss was not noticed until accounts looked
-  unfamiliar, and weeks of investment work had to be redone. Folder separation
-  keeps a foreign snapshot out of sight; the name check makes navigating to one
-  insufficient to destroy a ledger. Opening another database is what
-  File ▸ Open Database is for.
-- Nothing already on disk was stranded: `list_backups` reads the per-database
-  folder AND legacy flat snapshots, a delta looks for its baseline in both, and
-  `python -m mammon.backup organize [--dry-run]` moves the old files into place.
-- **Each snapshot carries a "what changed" summary**, so a user choosing among a
-  hundred near-identical one-minute auto-backups can tell them apart — the file
-  name records only the moment and the manual/auto tag. At snapshot time
-  `backup.build_manifest` takes a lightweight, READ-ONLY census of the just-taken
-  copy (total transaction count, and per account: id, name, transaction count,
-  balance in cents, latest date/payee), and `backup.summarize` diffs it against
-  the previous snapshot **of the same tag** to produce one line, e.g.
-  `+3 txns: Checking +3 txns (bal 1,234.56->1,250.00); deleted Visa`. The first
-  snapshot of a tag has no predecessor and reads `baseline / initial`. The
-  manifest is read-only — it never writes the ledger (single-writer rule) — and
-  money stays integer cents, rendered without floats.
-- **The summary is stored WITHOUT changing the restorable bytes.** A delta keeps
-  the manifest+summary as extra keys in its existing JSON header (which is not
-  part of the checksummed image: the recorded `sha256` covers the reconstructed
-  database bytes, never the header, so a rebuilt delta still verifies); a full
-  `.bak` — a plain SQLite file anything can open — gets a `<name>.bak.meta.json`
-  sidecar next to it. Retention (`prune_backups`, `purge_auto_backups`) deletes a
-  sidecar in lockstep with its `.bak`, and `organize_backups` moves it along, so
-  a sidecar never outlives or is orphaned from its snapshot.
-- **Where it surfaces:** `python -m mammon.backup list` appends the summary to
-  each snapshot's line, and the Restore confirm dialog shows the chosen
-  snapshot's summary. The UI reads it through `backup.snapshot_summary` only — no
-  SQL and no money logic live in `ui/`.
 
-### 5.8d The universal report customization bar
-- ONE control set for every report (`ui/report_filters.ReportFilterBar`, opened
-  by the gear as `CustomizeDialog`): **time range, accounts, categories, and
-  Include hidden accounts**. Every reporting dialog — Spending by Category,
-  Spending Pie / Spending Chart, Income Pie / Income Chart, Itemize, Net Worth
-  Over Time — shows the same bar AND the same Period dropdown; the three chart
-  windows (Net Worth over time, Income by category, Spending by category) were
-  once the odd ones out with no Period dropdown at all, and now host the shared
-  one like the rest.
-- **One look-and-feel across every report.** The affordance is the same
-  everywhere: a shared **Period dropdown** on top beside one enlarged gear
-  tool-button. Its option set (`report_filters.PERIOD_PRESETS`) is the **UNION**
-  of the two families this dropdown has ever offered — the original calendar
-  ranges **This Month, Last Month, This Year, Last Year, Year-to-Date** and the
-  rolling ranges **Last 7 days, Last 30 days, Last 12 months, Last 3 years, Last
-  5 years, Last 10 years, This quarter, Last quarter, Earliest to date** — ending
-  with **Custom**. Ordered shortest span
-  first, widening to the whole ledger. An earlier unification wrongly REPLACED the
-  calendar ranges with only the rolling ones; both families must remain reachable
-  so neither set of habits is broken. A preset re-ranges and refreshes at once;
-  **Custom** opens the gear's `CustomizeDialog` to type an explicit From/To. The
-  rolling and calendar presets delegate to the pure
-  `reports.spending.preset_range`; "Earliest to date" spans the ledger's own
-  bounds. Every report and chart window opens on **Year-to-Date**
-  (`report_filters.PERIOD_DEFAULT`), so a freshly opened report answers "how am I
-  doing this year" without a first trip to the dropdown. **Net Worth Over Time is
-  the one deliberate exception** — it opens on "Earliest to date"
-  (`report_filters.NET_WORTH_PERIOD_DEFAULT`), because a cumulative curve is
-  meaningless over a partial-year slice and a YTD default would lop off decades of
-  history. `report_filters.resolve_period(key, conn, today)` is the one
-  place a key becomes a range (returning `None` for Custom), keeping the date
-  math in the report layer, not the UI. The **saved filter sets** (Save / Recall /
-  Delete) live INSIDE that gear popup too, not on an inline row — range,
-  accounts, categories AND saved sets share the single gear.
-- **Hiding an account EXCLUDES it**, from `ledger.net_worth`, the account bar,
-  and every report by default. That is not merely a display convention: hiding
-  is the only tool Mammon offers for "the records for this account are
-  incomplete, leave it out of my totals" — an employer plan whose internals were
-  never entered carries a balance the ledger cannot justify. Do not make hidden
-  accounts count by default; it was tried, and it silently added a phantom
-  balance to a real net worth.
-- **Include hidden accounts is an opt-in checkbox**, off by default. Ticking it
-  adds hidden accounts to the picker AND to the report. It earns its place on a
-  growth curve: an account zeroed before it was hidden contributes nothing today
-  but held money for years, and leaving it out makes decades of saving look like
-  a recent windfall.
-- Each check-list carries **Mark all** and **Clear all**. Narrowing to one
-  account out of ninety is clear-then-tick-one, so widening back has to be one
-  click rather than ninety. Both are built by `_list_button`, which denies
-  auto-default — see the next point for why that matters.
-- **Enter in the bar means Apply.** A `QPushButton` in a dialog is `autoDefault`,
-  so Return fired the first one in the focus chain — the accounts "Clear all" —
-  and pressing Enter after typing a date wiped every account checkbox. The
-  Clear-all buttons are explicitly not auto-default; Apply is the default button.
-- With hidden accounts excluded, an all-checked picker is a REAL filter, so
-  `selected_account_ids()` returns the explicit visible list rather than `None`.
-  `None` means "no filter", and a report that receives it queries every account —
-  which would have quietly re-included the accounts just excluded.
-- **Net worth accepts account and category filters.** Accounts subset it (a
-  balance belongs to an account). Categories do NOT — a balance carries no
-  category — so unticking one draws a **counterfactual**: net worth as if that
-  spending had never happened, with the cumulative flow added back at each
-  sample so the effect compounds forward. A top-level name reaches its whole
-  subtree (money posts to leaves), split lines count (a split's parent row
-  carries a NULL category), scheduled placeholders do not, and transfers never
-  register as spending since they carry no category. The window titles itself
-  "as if no <categories>" so a what-if curve cannot be mistaken for the real one.
+## Compartment F. Import and the review queue
 
-### 5.9 Reporting
-- Priority: a spending report itemized by category over a selectable time
-  period (month/quarter/year/custom).
-- Then other Quicken-equivalent reports (income vs expense, net worth over
-  time, cash flow, account balances).
+Getting outside data in: file parsers, the delimited-file column map, the
+dedup rules, and the review queue that stands between a downloaded row
+and the ledger. Nothing enters the ledger until a row is accepted.
 
-### 5.9a Report computations as a tool surface (roadmap item 4)
-The aggregations Quicken ships as windows exist first as pure functions in
-`mammon/reports/`, returning plain dataclasses, so the MCP server (item 3)
-and a future report window compose the same deterministic numbers. Shared
-extraction lives in `reports/_lines.py` and fixes three rules no report may
-drift from: a split is represented by its lines (each inheriting the
-parent's payee/tag), a transfer is excluded unless a report asks for the
-legs whose other side is OUTSIDE its account set, and a scheduled placeholder
-(`scheduled = 1`) is excluded unless asked for. Hidden accounts are left out
-of every report unless asked for (§5.8d). Amounts are SIGNED cents throughout
-(negative = out), so a refund shrinks its expense category rather than
-counting as income.
+Code: `mammon/importers/` (`core.py` owns everything database-facing),
+`mammon/import_review.py` (the sole writer for that flow),
+`mammon/ui/import_review_widget.py`, `mammon/ui/import_mapping.py`.
 
-- `flows.income_expense(start, end, bucket)` -- every category's signed net
-  per month / quarter / year / total, income rows then expense rows, with
-  per-bucket and grand totals. Categories are classified income/expense the
-  way the pies are (`category_types`, by the sign of the whole-ledger net);
-  uncategorized money is one pseudo-row classified by its net in the window.
-  A range yields every bucket it spans, quiet ones included.
-- `flows.cash_flow(start, end)` -- the same over one window, plus a
-  TRANSFERS section when the report covers a subset of accounts: money that
-  went to or came from accounts outside the subset really did move. Over every
-  account that section is empty by construction.
-- `flows.compare_periods(a, b)` -- category nets in period A against period
-  B with the change in cents and percent (percent is None when A is zero).
-- `flows.category_averages(start, end, bucket)` -- per-bucket averages whose
-  divisor is the number of buckets the range spans, quiet ones included, which
-  is the number a budget wants. ROUND_HALF_UP.
-- `balances.account_balances(as_of)` and `balances.balances_over_time(start,
-  end, bucket)` -- valued the way the account bar values accounts
-  (`investments.display_balance`: investments at market), so a report and the
-  bar never disagree by default.
-- `payees.by_payee` / `payees.by_tag` with `direction` out (magnitudes of
-  money out; the default), in, or net; `count` is transactions, not lines.
-  (`payees.by_tag` groups by a row's whole tag string, the single-tag view.)
-  **A payee is billed the WHOLE transaction.** `by_payee` reads collapsed lines
-  (`_lines.signed_lines(split_lines=False)`): a split contributes its parent's
-  own amount, never its legs. Split legs carry no payee of their own, so
-  re-grouping them by payee changes nothing -- except that the shared extraction
-  drops transfer legs, which unbalances the split. That is how a real ledger's
-  paychecks (salary in, tax legs out, a 401(k) deferral transferring away)
-  totalled an employer at $12,000 of withholding for a year in which they had
-  deposited $60,000. The parent's amount is safe to use because
-  `ledger.set_splits` guarantees the legs sum to it. `by_tag` and
-  `tags.spending_by_tag` keep the legs: a tag says what money was FOR, a
-  category-shaped question, and payroll tax is a real expense however the
-  paycheck nets out.
-  **The By Payee window and the `by_payee` MCP tool both default to `net`**, and
-  that amount is SIGNED the way the register is -- negative = money out. A payee
-  on both sides nets: pay someone $200 and take $50 back and they read
-  `-150.00`. The report total is signed too, not a magnitude. Rows still rank by
-  MAGNITUDE, so the biggest mover leads whichever way it points.
-- `tags.spending_by_tag` -- money by FIRST-CLASS tag, same `direction`s, but each
-  line is attributed to EVERY tag it carries (many-per-transaction), so a
-  two-tagged charge counts under both and overlapping tag totals can exceed the
-  grand total. Untagged money groups under `(no tag)`. Surfaced as Reports ▸ By
-  Tag (Window).
-- `listing.transactions(...)` -- the structured cousin of Find: date range,
-  accounts, categories (subtree; a split matches on any line), payee/memo
-  text, tag, absolute amount range, cleared state, transfers on/off, with a
-  `limit` and a `truncated` flag so a tool answer stays bounded.
+### 5.6 Import (see Section 6 for the strategy)
+- One-time migration of the full ~40-year Quicken 2017 history into Mammon's DB.
+- Ongoing import of downloaded/scraped data (QFX/OFX, JSON, CSV).
+- Every importer maps to a common normalized record, then dedups (fitid +
+  fuzzy match) before insert; transfers are recognized so both sides are not
+  double-imported.
+- **One import shape is deliberately NOT a transaction import**: the holdings
+  balance SNAPSHOT (`importers/holdings_csv.py` pure parser +
+  `importers/holdings_core.py` glue over `investments.apply_holdings_snapshot`).
+  It carries positions, not activity — share counts and prices as of a
+  statement date — so it bypasses `core.py`'s normalized-record insert/dedup
+  path entirely and creates no transactions at all. It exists because a manual
+  brokerage/401(k) download cannot put balances and transactions in the same
+  file, and share reconciliation needs the balances. Per matched line it leaves
+  the stated ending share count in that security's reconcile draft and records
+  the stated per-share price in `price_history`, which for a tickerless plan
+  fund is the only price anyone will ever have (SRD 5.8e, compartment D). Lines
+  match by symbol when the file prints one and by name otherwise, and a line
+  matching no security is reported rather than guessed at. Full shape and the
+  tabbed, one-tab-per-security dialog it feeds: SRD 5.11b (compartment I).
 
-### 5.9b Report windows: export, print, saved filter sets (roadmap item 9)
-The pure computations of §5.9a become on-screen windows through a reusable
-framework (`ui/report_window.ReportWindow`, a modeless `QDialog`) that gives
-every hosted report ONE look-and-feel: the shared **Period dropdown** on top
-(beside the enlarged gear that opens the `ReportFilterBar` as `CustomizeDialog`,
-§5.8d), a plain table below, and Export CSV, Export HTML and Print (PDF) actions.
-The Period dropdown re-ranges the report from a preset (or "Custom", which opens
-the gear); its **Year-to-Date** default (§5.8d) makes the first paint answer "how
-am I doing this year", while Net Worth Over Time alone keeps the whole-ledger
-"Earliest to date" default. Its options are the UNION of the calendar and rolling
-preset families (§5.8d) — no previously offered range was dropped when the rolling
-ones were added. The same dropdown was retrofitted onto the three inline chart windows
-that lacked it (Net Worth over time, Income by category, Spending by category),
-so every window that shows money over a range now offers the identical control.
-It is built by one shared factory (`report_filters.make_period_combo`), used by
-both the generalized window and the inline chart dialogs, so its width is pinned
-wide enough for the longest preset — `Earliest to date` — which the surrounding
-stretch layout otherwise clipped to `Earliest to d...`. **Named saved filter sets moved off the old inline row into
-that same gear popup** (`CustomizeDialog.add_saved_filter_row`), so range,
-accounts, categories and saved sets share one affordance. The
-window is a **thin projection**: it holds no SQL and does no money math. It
-calls a report function (e.g. `reports.cash_flow`) with the bar's getters
-(`start_iso`, `end_iso`, `selected_account_ids`, `include_hidden`), projects the
-returned dataclass into display rows, and repaints. Adding a report to the
-framework is writing one pure `*_rows(report) -> list[ReportRow]` projector
-(like `cash_flow_rows`) and one `ReportSpec` (title + a `run` that calls the
-pure function + that projector) — no new window class, no new write path, no
-new money logic. The framework hosts seven reports, each opened from its own
-Reports-menu entry and driven by one shared `ReportWindow`: **Cash Flow**
-(`reports.cash_flow`, whose spec renames the shared first column `Section` ->
-`Direction` — its values are Income / Expense / Transfers / Net, the directions
-money flowed — because Cash Flow alone adds a TRANSFERS section and folds it into
-its Net), **Income vs Expense** (`reports.income_expense`; kept DISTINCT from Cash
-Flow deliberately, not a duplicate — it excludes transfers entirely and its Net is
-income + expense only, so the two answer different questions),
-**Account Balances** (`reports.account_balances`, whose spec hides the account
-checklist and reads the "To" date as its as-of; it is a print/export table, so its
-rows are re-ordered to match the LEFT SIDEBAR's account grouping — Banking, Credit
-Card, Investing, Property & Debt (`_SIDEBAR_TYPE_ORDER`, which mirrors
-`widgets._BAR_GROUPS` and a drift-guard test keeps in step), stable within each
-group — and its first column is renamed `Section` -> `Account Type`), **By Payee**
-(`reports.by_payee`, whose spec overrides the shared header with a two-column
-`["Payee", "Net Amount"]` set — **Payee first** — so the payee name has its own
-column instead of riding in the generic Category / Account slot, and the
-always-"Payee" Section column is dropped; the shared `payee_rows` projector is
-unchanged, so By Tag still shows its Section column. The window runs it at
-`direction="net"`, NOT the pure function's `"out"` default: half a household's
-payees pay IN — an employer, a pension, a tenant, a marketplace that both bills
-and remits — and summing one side reported an employer at their withholding
-while summing the other would hide every store. Net signs each payee the way the
-register does, negative = money out, so both read correctly in one column, and
-the header names it; the spec also sets `fit_first_column`, so the Payee column
-opens sized to its widest name rather than truncating long payees), the **Transactions**
-listing (`reports.transactions`, whose spec overrides the shared three-column
-header with an explicit six-column set — Date, Payee, Category / Account, Tag,
-Memo, Amount — via `ReportSpec.columns`, **Date first** so the Date header sits
-over the date value and not over the payee, and the payee is its own column
-instead of being jammed onto the category. Each `ReportRow` from the
-`listing_rows` projector carries a `cells` list, one string per column — the Tag
-and Memo the register already holds surfaced beside the resolved
-Category / Account (`[Other Account]` for a transfer) — that `_row_cells` renders
-verbatim, so the one chokepoint keeps the table, CSV, HTML and PDF in agreement),
-**Itemize by Category** (`reports.itemize_tree`, an expandable drill-down — the
-one hosted report that is a `QTreeWidget` rather than the flat table, flagged by
-`ReportSpec.is_tree`; each INCOME / EXPENSES / TRANSFERS section expands to its
-categories, a category to its sub-categories, and a leaf to the individual dated
-transactions. Its four columns — Category, Date, Payee / Memo, Amount — override
-the shared three-column set via `ReportSpec.columns`, **Category first** so the
-Date header sits over the dates and not over the category names; its spec hides
-the include-hidden toggle because the pure function takes no such flag. The
-`ReportWindow` projects the tree through one pure `itemize_tree_rows(tree)` into a
-depth-tagged `TreeRow` list feeding both the widget — re-nested by a depth stack —
-and the CSV / HTML / PDF export, which flattens it by indenting the Category
-column by depth so the hierarchy survives. Clicking a column header sorts the
-transactions within each open group — Date (2nd key payee), Payee (2nd key date)
-or Amount (2nd key date), a second click on the same column toggling descending
-while the secondary key stays ascending; `itemize_tree_rows` takes the sort as a
-pure argument (`sort_key`/`sort_desc`) and the window re-projects the cached tree
-and re-opens the same groups. TRANSFERS counterparty rows stay in alphabetical
-order UNLESS Amount is the sort key, where they order by their net), and **Investment Performance**
-(`reports.investment_performance`, a consolidated
-per-holding snapshot — cost basis, market value, unrealized/realized gain, %
-return, dividend/interest income and return of capital — valued at prices as of
-the "To" date, with portfolio totals. Its five columns — Account, Ticker, Amount
-(market value), Gain/Loss $, Gain/Loss % — override the shared three via
-`ReportSpec.columns`: the ticker and both gain figures each get their own header
-instead of the account landing under a generic "Section" and the gain being
-buried inside the label. Because it carries three distinct numeric columns and the
-shared layout offers only one trailing money column, each `ReportRow` fills every
-column explicitly through `cells`; `_row_cells` renders a full-length `cells`
-verbatim, so the projector renders the money through the same `fmt_cents`
-chokepoint and the percent — not money — as signed text). The last is a pure read-only assembly
-over `mammon.investments`: it reuses the same `security_positions` replay the
-Holdings window and a security-filtered register read, so the three never
-disagree; `as_of` caps only the valuation price, never the share/cost replay.
-**The Gain/Loss columns are bounded to the resolved period.** Given a `start`
-(the report window always passes the filter bar's From date), each open, priced
-holding's Gain/Loss $ and % are measured over the window as `value_at(To) −
-value_at(From) − net contributions in (From, To]` — buys add capital, sells
-return it, income and reinvestments are not contributions — so `Last 3 years`,
-`Last 5 years` and `Last 10 years` report DIFFERENT gains rather than the same
-inception-to-date figure they all used to show (the start date was previously
-decorative for this report). This period path rewinds the share count to BOTH
-dates (via `investments.holding_values_at` / `net_contributions_by_symbol`),
-unlike the inception path where `as_of` caps only the price. Called with no
-`start` (the `investment_performance` MCP tool, Holdings reconciliation) it stays
-inception-to-date, byte-for-byte as before. The Portfolio **Market Value**
-headline gain is the sum of the per-holding period gains, so it reconciles with
-the line items; the separate lifetime Unrealized / Realized / Dividend / Return
-of Capital total lines are unchanged. Clicking a column header sorts the holdings
-— by period Gain/Loss, ticker, account then ticker (ticker secondary), or
-Gain/Loss % — reusing the exact `sort_key`/`sort_desc` seam the Itemize tree uses
-(`ReportSpec.sortable` names which flat columns sort); a second click toggles
-direction and the Portfolio totals never move.
 
-- **One money chokepoint feeds table, CSV, HTML and PDF.** A `ReportRow`
-  carries `section`, `label`, and `amount` as **signed integer cents** (negative
-  = out) and does no arithmetic; every surface renders that amount through the
-  single `ui/models.fmt_cents` chokepoint, so what is on screen, in the exported
-  file, and on the printed page agree by construction rather than by three
-  parallel formatters drifting apart. Share/price figures, when a report
-  surfaces them, stay Decimal-encoded text per the money conventions.
-- **CSV export is a pure, importable function.** `report_rows_to_csv(rows,
-  columns=COLUMNS) -> str` writes the header (a report's own set — the shared
-  three, By Payee's `Payee,Net Amount`, or Itemize's `Category,Amount`) then one line
-  per row, the amount via
-  `fmt_cents`, using `\n` endings and the `csv` module's quoting so a
-  thousands-separated amount or a comma-bearing category name survives. A single
-  `_row_cells(row, columns)` helper maps a `ReportRow` onto whichever set is in
-  force, so table, CSV, HTML and PDF never drift. `ReportWindow.export_csv_to(
-  path)` is the testable seam — an explicit path, no dialog — that
-  `_export_csv_dialog` calls after the file picker; e.g. a Cash Flow window
-  writes `Direction,Category / Account,Amount` then rows like
-  `Income,Salary,"4,200.00"`, a By Payee window writes `Payee,Net Amount` then rows
-  like `Acme Grocers,150.00`, and an Itemize window writes `Category,Amount`.
-- **HTML/PDF print reuses one renderer.** `report_rows_to_html(rows, title,
-  columns=COLUMNS) -> str` mirrors the CSV writer — same columns, same order, amount via `fmt_cents`,
-  every field HTML-escaped (the analogue of CSV quoting) so a category name with
-  `&` or `<` renders as text — and emits a standalone document whose `title` is
-  both `<title>` and heading. `export_html_to(path)` writes that string;
-  `print_to_pdf(path)` renders it to a PDF. Both are dialog-free seams so the
-  output is verified headless. There is exactly one HTML→document
-  implementation: `ui/printing.py`'s QTextDocument/QPrinter helper
-  (`render_html_to_pdf` for a file, `render_html_to_printer` for a live
-  `QPrintDialog`), which works under the offscreen platform (an offscreen
-  `QApplication` is enough to emit a PDF), so printing needs no physical printer.
-- **Named saved filter sets are a UI display preference, never DB.** Following
-  the `ui/prefs.py` convention, a filter configuration recalled by name lives in
-  QSettings (an INI file in the user's scope) — there is no schema change and
-  nothing is written into `mammon.db`. This spares re-ticking a ninety-account
-  check-list to reproduce a monthly report.
-- **The serializers are pure and QSettings-free.** `report_saved_filters.
-  filter_state_to_dict(bar)` captures the bar's state as a JSON-able dict —
-  `{start, end, include_hidden, account_ids, categories}`, where `account_ids`
-  and `categories` are `None` for "no filter" (everything checked) and category
-  names are sorted for a stable blob — and `apply_filter_state(bar, state)`
-  re-applies it. The round-trip is unit-testable on a bare bar without QSettings.
-  Order matters on re-apply: the include-hidden toggle is set BEFORE the account
-  ticks, because flipping it rebuilds the account list (preserving surviving
-  ticks by id), and setting the accounts first would lose them (§5.8d).
-- **Storage is one JSON blob under one key.** The whole `name -> state` mapping
-  is kept as a single value under `reports/saved_filters` rather than one key per
-  name — QSettings treats `/` in a key as a group separator, so a single blob
-  lets a saved-set name contain any character. `save_filter_set`,
-  `load_filter_set`, `delete_filter_set` and `saved_filter_names` take an
-  injectable QSettings store (the test seam), matching how `ui/prefs.py` is
-  exercised. The name prompt (`ReportWindow._prompt_filter_name`) is an
-  overridable seam so headless tests never block on a modal.
+### 6. Import strategy (Quicken 2017 -> Mammon)
+
+#### 6.1 Can we read Quicken's native file directly? (answering Q3)
+User direction: TRY BOTH a direct-from-Quicken read and the QIF export path,
+and let whichever reconciles win.
+- Direct read (spike): MoneyDance can "import from Quicken", which is evidence a
+  usable path exists, so we will spike it. Caveat to verify: MoneyDance's Quicken
+  import is (as far as is publicly documented) driven by Quicken EXPORT formats
+  (QIF/QMTF), not a raw read of the binary .QDF. The .QDF (plus auxiliary
+  .QEL/.QSD/.QPH) is a proprietary, undocumented compound-document container with
+  no public spec or maintained parser, so a raw-QDF read is high-risk for a
+  40-year archive. The spike's job is to confirm what actually works on the
+  user's real file before committing.
+- QIF export (workhorse): high probability of covering the full 40-year file;
+  Quicken now exports all account types to QIF. This is the reliable path and the
+  default the parser is built against.
+- Decision rule: build the QIF importer first, run the direct-read spike in
+  parallel, and keep whichever reconciles per account (Section 6.2 acceptance).
+
+#### 6.2 Recommended path: export from Quicken, import into Mammon
+Quicken can export its own data; we import that. Options and their limits:
+- QIF (Quicken Interchange Format): Quicken can now export ALL account types to
+  QIF. Best coverage for a full-history dump, BUT: transfers appear on both
+  accounts (must dedup the mirror), investment transactions can be lossy, and it
+  is single-currency per file. We will handle transfer-dedup and investment
+  quirks explicitly.
+- QXF (Quicken Transfer Format): Quicken's own migration format, cleaner for
+  cash/categories/scheduled txns, BUT does NOT reliably carry investment or
+  business accounts - so it cannot be the whole story for a 40-year file with
+  investments.
+- Plan: use QIF for the bulk one-time migration (all cash + investment
+  accounts), treat investment accounts with extra care, and reconcile the
+  resulting Mammon balances against Quicken's reported balances per account as
+  the acceptance test. If specific accounts import poorly via QIF, fall back to
+  a per-account QXF or CSV export for those.
+- User to provide a representative sample export (a few accounts incl. one
+  investment) so the parser is built and validated against real data.
+
+#### 6.3 Ongoing import formats
+- QFX/OFX: the standard bank/CC/investment download format (SGML/XML). Direct
+  parser -> normalized records. Preferred for institutions that offer it.
+- CSV: per-institution CSV (e.g. Fidelity) where QFX is unavailable.
+- Crypto CSV: a block-explorer by-address native-coin export (Etherscan shape)
+  imported onto a `type='crypto'` wallet-account via its own parser + core
+  (`importers/crypto_csv` + `importers/crypto_core`), with the on-chain `tx_hash`
+  as the exact-dedup key. See Section 5.8i for the import rules (gas attribution,
+  historical FMV, own-wallet transfer detection).
+- JSON: canonical schema for webSlinger-scraped sites (Section 7.2).
+
+#### 6.4 Normalized import record (all parsers converge here)
+Cash transaction:
+```
+{ "external_account": "<institution account id or name>",
+  "date": "YYYY-MM-DD",
+  "amount_cents": -12345,           # signed; negative = money out
+  "payee": "SAFEWAY #123",
+  "memo": "",
+  "category": "Groceries",          # optional; auto-categorize fills if absent
+  "check_number": "",
+  "fitid": "<unique id from source, for dedup>",
+  "type": "" }
+```
+Investment transaction adds: action, symbol, quantity, price, commission.
+
+
+### 5.5 Auto-categorization from history
+- When a payee recurs, Mammon learns its category and auto-fills/suggests the
+  category on new and imported transactions once a pattern is established
+  (e.g. a given grocery store -> Groceries).
+- User can always override; overrides update what is learned.
+- **The category is resolved BELOW the payee.** Payee renaming settles first
+  (`rename_tree`), then `category_tree` walks a discrimination trie rooted at
+  that payee over the row's source text, ranked by category entropy. So one
+  payee can hold several categories and still be answered exactly:
+  `COSTCO GAS ...` -> Auto:Fuel, `COSTCO WHSE ...` -> Groceries, on the single
+  token that separates them.
+- **A candidate category is never one the payee has not already carried.** This
+  is the locked requirement, and it is structural rather than a threshold: the
+  vote counts `suggest` reads are themselves keyed by payee. A first-ever payee
+  therefore proposes nothing at all -- during the learning period a blank
+  category is the correct answer, and an unrelated guess is worse than silence.
+- **When not confident, blank the category and RANK the picker.** The register's
+  category dropdown promotes the categories this payee has carried (the ones
+  matching this description first, then the rest by frequency), with the full
+  alphabetical list underneath so any category stays reachable. Measured on the
+  real ledger's first year, the promoted first entry was the right answer 67% of
+  the time on rows too uncertain to fill in.
+- Two gates decide "confident": node purity (does this description
+  discriminate?) and payee coherence (is this merchant categorizable at all?).
+  Coherence applies only at the trie root, where nothing distinguished the row
+  and the answer is the payee's bare prior -- that is the case where a catalogue
+  payee like Amazon would otherwise stamp its most common category onto every
+  unrelated purchase. Below the root a matched token has earned its answer and
+  is not overruled by the payee's overall mix.
+- Investment rows are excluded end to end: `investment_transactions` has no
+  category column, so there is nothing to predict and nothing the user could
+  correct to train on.
+- **Keyword category rules are hand-written only.** The old `keyword ->
+  category` learner minted a global rule from a single correction and is
+  removed; migration 57 deleted every row it had produced. What remains in
+  `category_rules` is what the user typed into the Rules manager, so it is
+  honoured directly when the payee tree declines -- an explicit instruction,
+  not the system guessing.
+- **Two votes fill; QuickFill covers one.** `category_tree.MIN_COUNT` is 2,
+  the same floor as a rename (the 4 it inherited was compensating for the old
+  trie's resetting counts). Below that, once the payee is SETTLED -- filled by
+  the rename tree or supplied by the source -- `predict_fields` asks the
+  register's own QuickFill (`categorize.quickfill`, this account's row
+  preferred) what it would pre-enter for that payee typed by hand, so a payee
+  the ledger has categorized for years fills on its first download. Typing the
+  payee already did this; an auto-filled payee must not do worse. Withheld only
+  when review history has shown the payee to be a catalogue (coherence below
+  `PAYEE_COHERENCE` on at least `MIN_COUNT` votes). The accepted category is
+  recorded as a vote whichever source supplied it. Measured over the older
+  ledger's 599 categorized accepts, replayed cold: 294 fills, 249 right; the
+  floor at 2 versus 4 adds 10 right fills and no wrong ones, and the errors
+  that remain sit on well-corroborated nodes where the user's own
+  categorization changed over the years.
+
+
+### 5.5c Quotes
+- The investment register's gear menu offers **Get Quotes**: fetch the latest
+  close for the account's holdings and record it in `price_history`. The network
+  stays behind `investments.fetch_quotes`' injectable `QuoteSource`, so a missing
+  backend (yfinance is deliberately not installed) is reported as a setup step,
+  never raised into the register.
+- A ticker is DERIVED from the security name (`investments.ticker_of` — the
+  leading token, when it is ticker-shaped) and **shown for confirmation before
+  any fetch**. That confirmation is not politeness: a plan fund named
+  `INTL EQUITY INDEX` yields `INTL`, which is a real listed company, so an
+  unasked fetch would file a stranger's price against the user's holding and
+  value the account wrongly. Names yielding no ticker at all (`DOMESTIC BOND
+  INDEX`, `Fidelity 500 Index Fund`) are reported as skipped, never guessed.
+- A returned quote is recorded against the **holding's own name**, not the
+  ticker: `price_history` is keyed by the name a holding is stored under (see
+  `investments.latest_price`), so recording `ALTY` when the holding is
+  `ALTY GLOBAL X SUPERDIVIDEND ALTER` would look like it worked and value
+  nothing.
+- A fetched quote must COUNT toward the displayed valuation. The default as-of
+  for a display valuation is `investments.valuation_as_of` — the latest date the
+  ledger knows anything about, **transaction or recorded price**. It was the
+  last transaction alone, which capped `latest_price`'s `date <= as_of` filter
+  below every quote just fetched: the user was told nine quotes were downloaded
+  and no total moved. The original reason for the cap survives where it bites —
+  a security with no price after 1997 is still valued at its 1997 price, because
+  the newest quote is taken per SYMBOL on or before that date.
+
+
+### 5.5j One line, one match
+- **An EXACT match outranks a tolerant one across the whole batch, not just
+  within a row.** The tolerant scheduled tier already runs last inside
+  `_find_match`, but claiming is global: a tolerant row earlier in the file took
+  the register line, and the row matching it to the cent -- later in the file --
+  found the line claimed and classified NEW. `build_review` therefore runs TWO
+  passes: pass 1 offers every row only the exact tiers, pass 2 lets what is
+  still NEW try the tolerant tier.
+- **A register line is one event, so at most one review row may hold it.**
+  `set_manual_match` releases any other row already matched to the chosen line
+  (`release_txn_matches`) before taking it. Hand-matching onto a taken line used
+  to leave both rows pointing at it, and the second then reconciled a
+  transaction already spoken for.
+- **A single match can be undone.** `unmatch_one` returns one row to pending NEW
+  and, when it had been accepted, restores that register line's prior
+  `fitid`/`cleared`/`reconciled` from the values `accept_match` recorded.
+  Previously the only undo was `undo_all_matches`, so correcting one wrong match
+  tore down every correct one with it. Reached from the review row's context
+  menu (**Unmatch**), which is now offered on an already-accepted MATCHING row
+  too. Investment rows are restored in `investment_transactions`, their own
+  table.
+
+
+### 5.5k Learning starts empty
+- **The rename and category trees are never seeded from register history.** They
+  learn only from rows the user accepts in review. Bootstrapping replayed every
+  posted transaction's `memo -> payee` pair as an accepted rename, which is only
+  true for downloaded rows; for hand-entered and QIF-imported history the memo is
+  a note the USER typed. One 1998 memo of "deposit" on a Foothill Place row put
+  that payee on the trie, and `MOBILE DEPOSIT` -- pure bank boilerplate -- then
+  renamed to Foothill Place in a ledger started deliberately fresh.
+  `ensure_bootstrapped` remains callable on both modules for an explicit
+  seed-from-history action, but nothing invokes it on open.
+- **Offering a name and applying it are separate gates.**
+  `import_review.RENAME_MIN_SIGHTINGS` (2) decides whether a payee appears in the
+  dropdown; `rename_tree.MIN_FILL` (2) decides whether it is written into the
+  cell, and applies to the matched leaf -- the same text renamed twice -- not to
+  the payee overall. A payee renamed twice on other text is offered for a new
+  variant but not applied to it. A payee chosen once is neither filled nor
+  offered.
+- **Prior register rows never fill the payee.** Rows that never went through
+  review carry memos the user typed, and matching a download against them is
+  how a 1998 note of "deposit" once renamed `MOBILE DEPOSIT`. Those rows still
+  back-fill the CATEGORY when they agree (`PRIOR_TXN_MIN_ROWS`,
+  `PRIOR_TXN_PURITY`) and the resolved payee is theirs.
+
+
+### 5.5i Discarding a review row removes it
+- **Discard means "not now", not "never again".** Discarding used to TOMBSTONE:
+  the row stayed with `state='discarded'` so a re-download's `INSERT OR IGNORE`
+  would collide with it and not re-add it. That inverted the gesture. The user
+  discarded a list expecting to download the range again and take another run at
+  matching it; instead 106 tombstones ate the re-download and only the 5
+  genuinely new transaction ids came back -- and with no un-discard action
+  anywhere, discard was a one-way door only a hand-written UPDATE could reopen.
+- `discard_all` and `discard_one` therefore DELETE the row. Downloading the same
+  date range offers it again. A row the user genuinely never wants is excluded by
+  choosing a different date range, which they control directly; it needs no
+  permanent per-row veto.
+- **ACCEPTED rows still persist**, and must: they became register transactions,
+  so re-offering them would duplicate work already done. The dedupe that matters
+  is `(account_id, transaction_id)` against accepted rows plus the register
+  itself.
+
+
+### 5.5h Matching a scheduled pre-entry (tolerant amounts)
+- **A pre-entry's amount is a forecast, so the matcher must not demand it be
+  right.** The finance calendar enters a recurring payment as the MEDIAN of the
+  last six months, and a loan pre-entry uses the amortization schedule's figure.
+  Both are wrong by construction the moment escrow or a rate moves: the real
+  debit arrives for a different amount, misses its placeholder, and lands as a
+  NEW row beside a pre-entry that then stands forever.
+- The signal is the visible `num` of `Sched`, not the internal `scheduled` flag
+  — the marker is what survives a QIF round trip (on a reloaded ledger 523 rows
+  carry the num and none carries the flag).
+- `import_review._find_match` therefore adds a LAST tier: a `num='Sched'` row in
+  the date window, SAME SIGN, whose amount is within
+  `SCHED_AMOUNT_TOLERANCE` (half the placeholder's own amount — the same
+  latitude the file-import path already allows for this case in
+  `importers/core._funding_pending_by_payee`). Running last means an exact match
+  always wins and this only ever rescues a row that would have been NEW.
+- **Unambiguous-only.** `core.py` can afford that tolerance because it also
+  demands the payee match; a downloaded review row has no payee at
+  classification time (`map_row` leaves it empty by design). So the safety
+  property here is different: the tolerant tier fires only when exactly ONE
+  scheduled candidate is in the window. Two are a guess, and a guess that
+  silently reconciles the wrong row is worse than leaving it NEW.
+- **Manual match opens both tolerances, and is capped at a fortnight.** The user
+  reaching for manual match has already been failed by the automatic one, so
+  candidates are offered within ±`MANUAL_WINDOW_DAYS` (15 — never more, by
+  request) at any amount within the same tolerance, ordered nearest-amount then
+  nearest-date so an exact match still heads the list. The SIGN never varies: a
+  payment is not answered by a deposit. `set_manual_match` enforces the same two
+  rules on a hand-picked id. The dialog shows a **Difference** column, because
+  once amounts may differ the value alone no longer tells the user whether they
+  are looking at the right row.
+
+
+### 5.5d Accepting a review in bulk
+- **A MATCH merges into the existing line. The bank owns the AMOUNT; the
+  register owns everything else.** Accepting a MATCHING review row — one at a
+  time or via Accept All — reconciles the register (or scheduled/loan
+  placeholder) line it matched: it marks that line cleared, stamps the source's
+  transaction id *only* when the line had none, and **adopts the downloaded
+  amount**. It leaves the date, payee, memo, category and SPLIT the user entered
+  untouched, so a download can never overwrite a manually-entered date with the
+  bank's posting date — the failure users report of other tools.
+- The amount is the exception because a matched line's own figure is often a
+  FORECAST: a scheduled pre-entry carries the finance calendar's six-month
+  median, a loan pre-entry an amortization figure whose escrow may have moved
+  since. That staleness is exactly why such a row needed a tolerant or hand-made
+  match, and leaving it meant the register kept a number that never happened.
+  The file-import path already merged this way (`merge_import_into_placeholder`:
+  "adopt the actual date and amount… the pre-entry keeps its own payee and
+  category").
+- A split whose lines no longer sum to the adopted amount is allowed and stays
+  visible — that sum invariant was deliberately removed so a row carrying a
+  discrepancy can still be edited, and the discrepancy is the signal that the
+  loan or the schedule needs updating.
+- Undo restores it: `review_items.prior_amount` (migration 59) records the line's
+  own figure, and both `unmatch_one` and `undo_all_matches` put it back through
+  one shared helper, alongside fitid/cleared/reconciled.
+  `import_review.accept_match` is the sole writer of this path, and the review
+  panel makes the policy inspectable: a matched row's Status cell states, on
+  hover, what merges versus what is preserved. Regression:
+  `test_merge_policy_visibility.py`.
+- **Accept All is "accept every row without editing it"**, and must agree with
+  doing exactly that by hand. `import_review.accept_all` therefore applies the
+  same predictions the register's pending row shows — the learned rename, the
+  learned category, the learned transfer account, and (for investment rows) the
+  learned action — recomputed per row inside the loop, so a rename learned from
+  an earlier row of the same batch reaches the later ones.
+- It previously saved NEW rows with the RAW mapped values, so a rename tree the
+  user had spent weeks training produced bank gobbledygook the moment they used
+  the bulk button instead of the single one.
+- **A bulk accept LEARNS nothing** (`save_new(learn=False)`). A prediction nobody
+  looked at is not evidence: reinforcing a dropdown candidate the user never
+  chose — or, where nothing is learned yet, teaching the tree that a statement
+  text maps to a tidied copy of *itself* — would make the tree more confident
+  precisely where it got no confirmation. Accepting a row individually is the act
+  that teaches.
+- The investment-action prediction lives in `import_review.predict_action`, not
+  in the register model, so the bulk and single paths cannot drift apart again.
+
+
+### 5.5l Accepting a NEW row creates the category you typed
+- **A category typed into the pending row and confirmed is CREATED on accept.**
+  When the user types a brand-new category into the register's editable pending
+  row, confirms the "Create new category?" prompt, and Accepts the NEW review
+  row, the accept path (`import_review_widget.PendingRowController.accept_new`)
+  resolves the buffered text through `import_review.resolve_or_create_category`,
+  a thin get-or-create wrapper over `ledger.resolve_category` — the single writer
+  of category rows. Previously accept used the LOOKUP-ONLY
+  `category_id_for_name`, which returns `None` for unknown text, so a freshly
+  typed category was silently dropped and the transaction posted with no
+  category; the user had to re-add it by hand afterward.
+- **Only an ACCEPTED row invents a category, never a previewed one.**
+  `category_id_for_name` stays lookup-only and is still what `predict_fields`
+  uses while a row is merely being previewed — a category is only ever minted at
+  the commit point, from text the user typed and confirmed.
+- **Transfer detection still wins, and blank invents nothing.** A `[Account]`
+  category names a transfer target and is resolved first
+  (`transfer_account_id_for_name`); only when the text is neither a transfer
+  target nor blank is a category get-or-created. `ledger.resolve_category`
+  reuses an existing category case-insensitively and creates each missing
+  `Parent:Child` level, so accept never forks a near-duplicate. Regression:
+  `test_review_new_category.py`.
+
+
+### 5.5e Historical quote backfill
+- Get Quotes carries **"Also fetch monthly history back to each holding's first
+  transaction"**. Ticked, it calls `investments.fetch_quote_history`, which asks
+  the `QuoteSource` for a monthly series (`get_history`, optional — a source that
+  only reports the latest close says so rather than failing obscurely).
+- Why: net worth values a holding at the newest price recorded ON OR BEFORE the
+  sampled date, so a security priced in 2015 and not again until 2023 holds its
+  2015 value flat and then jumps. Across a portfolio those steps land on
+  different dates and the growth curve comes out jagged — not because the money
+  moved that way, but because that is when prices happened to get recorded.
+- **Existing prices are never overwritten** (`record_prices_if_absent`): a price
+  carried by a real transaction is what the user actually paid that day, and a
+  monthly close must not displace it. Re-running is therefore cheap and
+  idempotent.
+- Recorded under the **holding's name**, not the ticker — same reason as
+  §5.5c — and bounded by each security's first transaction IN THIS ACCOUNT
+  (`first_transaction_dates`), grouped so it is one request per distinct start
+  date rather than one per holding.
+- The backfill is a separate, failable step from the latest-close fetch: a
+  provider with no history for one security must not cost the user the closes it
+  already returned.
+
+
+### 5.5f A share move's price is data, not decoration
+- `ShrsIn`/`ShrsOut` carry **price and gross amount** in the edit dialog's field
+  map. `ShrsOut` listed neither, so opening a plan's fee removal in the editor
+  and pressing OK silently blanked what the broker sent. Cash effect is zero
+  either way (`_CASH_ZERO_ACTIONS`), so the amount is a gross annotation, never a
+  cash movement.
+- `learn_prices_from_transactions` **derives** the per-share price as
+  `(|amount| - |commission|) / quantity` when the row states value and shares but
+  no price. Commission comes out first, matching the basis convention
+  (`basis = price*qty + commission`), so a commissioned trade never reports a
+  price no share traded at.
+- Why it matters: a quarterly fee removal from a fund quoted nowhere public is
+  often the ONLY quote that fund will ever have, and net worth values a holding
+  at the newest price on or before each sampled date. Measured on the real
+  ledger, 552 of 599 `ShrsOut` rows carry no price at all.
+- A share move stating only a share count yields nothing, and nothing is
+  invented for it.
+
+
+### Implementation notes
+
+How this compartment is built, and what each shape
+prevents. Moved out of CLAUDE.md 2026-09-11: it is
+reference for whoever works here, not per-call context.
+
+#### Two ingestion paths
+
+1. **Files** — `importers.import_file(conn, path, ...)` infers the format and dispatches to a parser
+   (`qif`, `ofx`/`qfx`, `csv`, `json`). Every parser is a pure function
+   `parse(text, default_account=None) -> list[NormalizedTxn]` with no database access.
+   `importers/core.py` owns everything database-facing: account/category resolution, dedup (exact by
+   `fitid`, else a fuzzy amount/date/payee score recorded in `transaction_matches`), collapsing
+   transfer mirrors into one `ledger.create_transfer`, and writing the run to `imports`.
+   **A QIF migration is a SET of files, and File > Import Quicken File(s) takes them all at
+   once** (`MainWindow._choose_qif_files` multi-selects; the caption says so). Quicken could not
+   write this ledger as one QIF -- the export had to be taken a year at a time -- so the set is
+   imported in `MainWindow._qif_import_order`: alphanumeric by file NAME, case-insensitively.
+   Order is load-bearing, and the files must therefore be NAMED so that alphanumeric order is
+   chronological order (a four-digit year does it); the completion report echoes the order used so a
+   set that did not sort as intended is visible rather than silent. Each file is still routed by its
+   own content -- multi-account (or a securities/price master) in bulk, single-account through the
+   review queue, with several files of one account forming ONE review batch. **The cutover watermark
+   is deferred across the set** (`import_records(set_cutover=False)`, applied once after the last
+   file): it marks the migration's END, and applied per file it would make `_before_cutover` skip
+   every row of every later-imported file dated on or before the first file's newest row -- silently
+   discarding most of a set imported in any order but oldest-first. `ledger.set_account_cutover_date`
+   is monotonic, so applying the set's watermarks at the end is order-independent.
+2. **Downloads** — `mammon/downloads.py` runs a recorded webSlinger script through an *injected*
+   runner, producing a downloaded file (EXPORT mode) or scraped rows (SCRAPE mode). Rows do **not**
+   go straight into the register: `import_review.build_review` classifies each as `NEW` or
+   `MATCHING`, stores them in `review_items`, and `ui/import_review_widget.py` renders a review panel
+   below the register. Nothing enters the ledger until the user accepts or saves a row, and
+   `mammon/import_review.py` is the sole writer for that flow.
+
+A **scheduled pre-entry matches on tolerance, not on exact cents.** Its amount is a
+forecast (the calendar's six-month median, or the amortization figure), so escrow or a rate
+change makes it miss by construction. `_find_match` adds a last tier for `num='Sched'` rows —
+same sign, within `SCHED_AMOUNT_TOLERANCE` (half the placeholder's amount, matching
+`importers/core._funding_pending_by_payee`) — and fires it only when exactly ONE such candidate
+is in the window, because a review row has no payee yet to disambiguate with. Manual match
+opens the same amount tolerance over `MANUAL_WINDOW_DAYS` (15, a hard cap); the sign never
+varies.
+
+`NormalizedTxn` (`importers/record.py`, SRD §6.4) is the waist of the hourglass: parsers stay
+ignorant of the database, and `core.py` stays ignorant of file formats. A parser may also state a
+property of the ACCOUNT rather than of the row -- `account_type`, and `account_currency` from an OFX
+`<CURDEF>` (SRD 5.4a) -- which `core.py` applies only when it auto-creates that account.
+
+#### Delimited (CSV-ish) imports and the column map
+
+`importers/tabular.py` detects a delimited file's real header (skipping preamble/footer), sniffs the
+delimiter (`, ; tab |` — so `.csv`, `.tsv`, `.tab`, `.txt` all work), and infers which column feeds
+each role. `ui/import_mapping.py` is the wizard that lets the user overrule it, reachable from the
+new-format prompt (Save / Adjust / Cancel). An accepted map is saved as a profile fingerprinted by
+header signature, so that format never prompts again.
+
+Two things here are load-bearing and easy to undo by accident:
+
+- **A user-confirmed map must win.** `parse_csv` routes on header vocabulary, and a recognized date
+  column sends it down the legacy path. Passing `roles_authoritative=True` overrides that for cash
+  sources. Without it, a saved profile was silently discarded whenever the header merely *looked*
+  conventional — exactly when an override is needed, since in `Date,Description,Amount,Balance` both
+  money columns are recognizable and equally money-shaped.
+- **Previews must name the source column.** A wrong column still produces plausible output (a
+  balance column parses as money just like an amount column), so values alone cannot tell a user
+  whether the mapping is right. Both the prompt and the wizard render `Role <- source column`.
+
+#### Tags, and the two places a tag can live
+
+A tag is first-class (`tags` + the `transaction_tags` junction, migration 45), and
+a transaction can carry several. A **split leg** carries its own single `tag_id`
+(migration 54) — that is not redundancy. Quicken tags a leg to attribute part of
+one payment to a project, and folding those up onto the parent credits the WHOLE
+payment to every tag in the split: measured on a real ledger, that reported 2.6x
+the money actually spent, an overstatement of the same shape as a double-counted
+transfer. `reports/_lines.py` gives a split line
+the union of the parent's tags and the leg's, so both apply and neither inflates.
+
+QIF carries tags in three places and all three are read and written: the
+`!Type:Tag` master (`N` name, `D` description — `!Type:Class` in files older than
+2010), a `/Tag` suffix on the `L` category line, and the same suffix on each `S`
+split leg. **`record.clean_category` discards the tag half**; use
+`split_category_tag` anywhere the tag matters. A split's `L` line echoes the
+first leg's category tag and all, so reading it at row level double-tags the
+transaction with one leg's project — `_build_cash` clears it deliberately.
+
+## Compartment G. Learned rules
+
+The five cooperating engines that turn bank gobbledygook into a payee and
+a category. Payee is resolved FIRST, category BELOW it. Nothing is
+seeded from history; all five learn only from what the user accepts.
+
+Code: `mammon/rename_tree.py`, `category_tree.py`, `category_rules.py`,
+`transfer_rules.py`, `categorize.py`, `keywords.py`.
+
+### 5.5b Learned description mapping (payees and investment actions)
+- One engine, two domains (`rename_tree._DOMAINS`): statement description
+  and/or the source's own payee field → payee, and a source's raw activity text
+  → Quicken investment action. Both are importer vocabulary guesses that only
+  the user's own corrections can make right.
+- **The engine is a decision tree rebuilt from the user's accepted corrections
+  at every prediction** (modelled on webSlinger's `selector_tree`, features
+  replaced by tokens, branching one). Nothing is learned online. The corpus is
+  `rename_examples` (schema v60): one row per accepted review row — source
+  text, supplied payee field, the label chosen, and the id of the transaction
+  the accept created. The label is read **live** through that id, so a payee
+  edited in the register or an undone accept changes the next answer without
+  re-teaching. Review retention never touches the table, so a rename taught
+  from a review row purged a year later is not forgotten.
+- **Only corrections train the payee domain.** A row accepted with the text it
+  was shown with (the description, its title-cased default, or the supplied
+  payee) is not a rename and is not counted. A bulk Accept All logs only a row
+  whose payee was actually renamed by an applied fill. The action domain counts
+  every accept: a kept importer guess is a confirmation.
+- **The user's display rule.** The register shows the source's payee field if
+  the record carried one, else the bank's description (title-cased when the
+  feed shouts), until the same text has been renamed **at least twice**
+  (`rename_tree.MIN_FILL`) and the matched leaf names ONE payee — then that
+  payee fills the cell. A leaf with several payees is a dropdown, never a fill.
+- Answering a row: (1) candidates are the examples sharing a *distinctive*
+  token — a non-boilerplate token carried by at most
+  `MAX_LABELS_PER_TOKEN` (5) payees — plus exact token-set matches (how an
+  all-boilerplate `MOBILE DEPOSIT` finds its own history); (2) a binary
+  decision tree on token presence is grown over them by information gain;
+  (3) the leaf's leading label is **generalized the way webSlinger
+  generalizes an array selector over its fields** (the user's rule): each
+  example is a feature set — every token, the token before it, the token
+  after it, the same over the payee field, and "no payee field" as a value —
+  and the pattern keeps a feature only when every example has it, with its
+  value when they agree, as a bare "something here" slot when they differ,
+  dropped when any example lacks it. `June rent` and `July rent` renamed
+  Tenant generalize to "a token, then RENT": `August rent` fits, a bare
+  `rent` does not until it is named too, after which anything with RENT
+  fits. A pattern from identical rows stays exact, so a youth theater in
+  Anytown does not inherit Walmart's exact rows on the town's tokens. A
+  label spanning unrelated formats (Amazon) is split by shape first so its
+  pattern pins a merchant token. (4) the leading label fills when the row
+  fits, ≥ `MIN_FILL` (2) of its examples back it, and it holds ≥
+  `FILL_PURITY` (0.9) of the leaf; else the leaf's labels and the other
+  candidates (each with ≥ `RENAME_MIN_SIGHTINGS` sightings) go in the
+  dropdown and the raw text stays.
+- Measured, predicting each accepted row before learning it: on the fresh
+  ledger (42 corrections) 20 fills, 0 wrong, first fill on the third sighting
+  of every recurring payee (the online trie: 15 fills, 1 wrong, on the fourth);
+  on the older ledger (679 rows) 369 fills at 98.6% precision with the right
+  answer in the dropdown for 71 of the 138 unfilled rows (the trie: 255 fills
+  at 96.9%, 58 of 71). The five misses: two payees the user spelled two ways,
+  one ambiguous deposit, two first sightings. Suggest costs under a
+  millisecond.
+- **A supplied payee field is evidence, not a gate.** Its tokens join the
+  description's in the query and its features join the pattern, so the
+  truncated-field case (`Dividend Earned For Period O`) is renamed once
+  corrected twice, while the Venmo counterparty case is not: a pattern learned
+  from description-only rows requires the absence of a payee field, and a
+  pattern learned under one counterparty's name requires that name.
+- Importer `action_map` tables are being retired in favour of this learning —
+  Interactive Brokers ships with none.
+
+
+### 5.5g Rule conditions and the Rules Manager (roadmap item 10)
+The keyword engines above learn a bare `keyword -> category` / `keyword ->
+account` that fires on any transaction whose bank text carries the token. That
+is right most of the time and wrong exactly when one merchant means two things —
+an "AMAZON" that is Shopping on the credit card but a Prime-Video charge on
+checking, a round "TRANSFER" that is savings below a threshold and brokerage
+above it. Roadmap item 10 lets a rule ALSO carry optional conditions — roughly
+*which account, how much, what memo* — and gathers all three learned-rule
+engines behind one editor. The schema lives in Section 4 (four NULLABLE columns
+on both `category_rules` and `transfer_rules`, schema v40); the matcher is
+`mammon/keywords.py`, the domain layer `category_rules.py` / `transfer_rules.py`
+/ `categorize.py`, and the editor `mammon/ui/rules_manager_widget.py`, reached
+from **Tools ▸ Rules Manager…**. Rules are app-learned and never imported, and
+`mammon.ledger` stays the sole writer of transaction rows — these tables hold no
+money movement.
+
+- **A condition narrows WHEN a keyword rule fires; all-NULL is the old
+  behaviour.** A rule may carry any subset of `account_id` (scope to one
+  account), `amount_min_cents` / `amount_max_cents` (an inclusive SIGNED
+  integer-cent range, negative = money out), and `memo_contains` (a
+  case-insensitive substring). `keywords.match_rule(desc, rules, *,
+  context=None)` still matches the keyword whole-token, longest-first (so "CAT"
+  never matches "CATERPILLAR" and "AMAZON WEB" out-ranks "AMAZON"); when the
+  caller supplies transaction `context` (a mapping/object exposing `account_id`,
+  `amount_cents` and/or `memo`), a candidate must ALSO satisfy every non-NULL
+  condition (`_conditions_hold`, ANDed together), and a rule that fails one is
+  skipped so a narrowly-conditioned keyword falls through to a broader rule.
+  **`context=None` — the default, and what every shipped import caller passes —
+  consults no conditions and is byte-identical to the prior keyword-only
+  match**, so nothing changes on the import path until a caller opts in by
+  passing context.
+
+- **A set condition the context cannot confirm fails closed.** If a rule is
+  scoped but `context` has no `account_id` (or it is `None`), the rule does not
+  fire — a scoped rule never classifies a row it cannot positively place.
+  Amounts compare as signed cents against the inclusive bounds, so a "-$120.00
+  or more out" rule is `amount_max_cents = -12000`. `normalize_conditions` casts
+  the integer columns (a stray Decimal/str cannot poison the row) and collapses
+  a blank `memo_contains` to NULL, so an empty substring can never degrade into
+  an always-false condition.
+
+- **The domain layer forwards conditions but never invents them.**
+  `load_rules` / `list_rules` / `get_rule` select the four columns;
+  `apply_rules` / `match_rule` take and forward the optional `context`;
+  `upsert_rule` accepts the four conditions, each defaulting to `None`. On a
+  fresh row all four are written (`None` → NULL); when re-teaching an existing
+  keyword only the conditions explicitly supplied (non-`None`) are changed, so
+  learning a keyword again never silently wipes a condition the manager set.
+  Clearing a condition back to NULL is the editor's job, not upsert's — delete
+  and re-add the rule for that. `transfer_rules` gained `list_rules` /
+  `get_rule` / `delete_rule` for parity with `category_rules`, and `categorize`
+  gained `list_mappings` / `forget_mapping` so the learned payee → category
+  table is inspectable and prunable too.
+
+- **The Rules Manager is a thin projection** (`ui/rules_manager_widget.py`, a
+  `QDialog` opened from **Tools ▸ Rules Manager…**, mirroring `budget_widget`).
+  It holds no SQL and no money logic; every read and write goes through the
+  domain layer, and amounts are rendered/parsed only through the shared
+  `ui.models.fmt_cents` / `parse_amount` chokepoints and stored as signed
+  integer cents like everywhere else. A `QTabWidget` carries three tabs:
+  - **Category Rules** and **Transfer Rules** — one row per keyword rule.
+    Keyword and target are display-only (fixed when the rule is first learned);
+    the four conditions are inline-editable: the **account scope** through a
+    combo delegate where a blank choice means *all accounts* (NULL `account_id`),
+    **min** and **max** through `MoneyDelegate` as signed integer cents, and
+    **memo** as free text. Each edit saves through `upsert_rule` with
+    **`compound=True`** — the non-compound path would re-run `extract_keyword`
+    and collapse a multi-word keyword into a *different* rule, so an in-place
+    condition edit must keep the existing keyword verbatim.
+  - **Learned Payees** — a read-only list of the `import_mappings` (normalized
+    payee → category, §5.5) with a **forget** action (`categorize
+    .forget_mapping`); it is inspect-and-prune only, since the mapping itself is
+    (re)learned from the next correction.
+  - Deletes on every tab route through the `QMessageBox.question` seam the tests
+    patch, never a bare `exec_()` modal, so the dialog terminates under the
+    offscreen platform.
+
+- Regression: `mammon/tests/test_rule_conditions.py` (matcher plus the domain
+  forwarding and re-teach preservation) and `mammon/tests/test_rules_manager_ui
+  .py` (the dialog as a thin projection, including the delete seam).
+
+
+### Implementation notes
+
+How this compartment is built, and what each shape
+prevents. Moved out of CLAUDE.md 2026-09-11: it is
+reference for whoever works here, not per-call context.
+
+#### Learned rules (five cooperating engines)
+
+Raw bank `statementDescription` text is gobbledygook, so the app learns from corrections.
+**Payee is resolved first, then category is resolved BELOW it** — that ordering is what keeps a
+suggestion scoped to the merchant it came from:
+
+- `rename_tree.py` — payee renaming AND investment-action mapping as a **decision tree rebuilt
+  from the accepted corrections at every prediction** (webSlinger's `selector_tree` with tokens
+  for features, branching one). Nothing is learned online: the corpus is the `rename_examples`
+  log (one row per accepted review row, label read LIVE through the transaction it created, so
+  a register edit or an undo changes the next answer), and review retention never touches it.
+  Per query: candidates = examples sharing a *distinctive* token (carried by ≤ 5 payees) or the
+  exact token set; a binary presence tree by information gain over them; then the leaf's
+  leading label is GENERALIZED like webSlinger's array selector (features = each token, the
+  token before, the token after, the same over the payee field, plus "no field": agreed value
+  kept, varying slot binarized, feature missing from any example dropped) and the row must FIT
+  that pattern — `June rent` + `July rent` fit `August rent` but not a bare `rent`; identical
+  rows stay exact. The label fills at ≥ `MIN_FILL` (2) fitting examples and ≥ `FILL_PURITY`
+  (0.9) of the leaf, anything else is a dropdown. Only CORRECTIONS train the payee domain — a
+  row kept as its shown text (description, title-cased default, supplied payee) is skipped — so
+  the title-cased bank text can never become a "payee".
+  The old trie reset its counts on every split, split on tokens both sides shared, and hid a
+  parent's labels behind a weak child; the module docstring records the measurements.
+**Neither tree is seeded from history.** Both learn ONLY from what the user accepts in
+review. `rename_tree` used to bootstrap at startup, replaying every posted row's
+`memo -> payee` pair as an accepted rename — true for downloaded rows, where the memo IS the
+bank's text, and false for hand-entered and QIF-imported history, where it is a note the user
+typed. A 1998 memo of "deposit" on a Foothill Place row taught the tree that `MOBILE DEPOSIT`
+means Foothill Place, in a ledger deliberately started fresh. `ensure_bootstrapped` survives on
+both modules as callable API for an explicit seed-from-history action; nothing calls it on open.
+For the same reason `_prior_txn_for` no longer fills the PAYEE from register rows sharing the
+statement text (category only).
+
+Two thresholds, and they are different questions. `import_review.RENAME_MIN_SIGHTINGS` (2) is
+whether a payee is OFFERED in the dropdown at all; `rename_tree.MIN_FILL` (2) is whether it is
+APPLIED to the cell, and it counts the matched leaf — the same text renamed twice — not the
+payee overall. Between them the user sees the bank's own text and a one-click list. A payee
+chosen ONCE is neither filled nor offered.
+
+- `category_tree.py` — the auto-categorizer: one discrimination trie **per payee**, over the source
+  text, ranked by category entropy. Two gates, and both are load-bearing: **node purity** asks *does
+  this description discriminate?*, **payee coherence** (`PAYEE_COHERENCE`) asks *is this merchant
+  categorizable at all?* — the second applies only at DEPTH 0, where the answer is the payee's bare
+  prior and nothing distinguished the row. A node below the root matched a token that has meant one
+  category every time, and must not be refused because the payee is bimodal overall: gating every
+  depth on the payee's mix would refuse Costco's `GAS` branch, the one answer the tree is surest of.
+  **A candidate can only ever be a category that payee has already carried**; a first-ever payee
+  proposes nothing at all. Replayed cold over the real ledger's first year (625 accepted rows) it
+  auto-fills 29% at 97% precision with zero never-seen proposals, against the old keyword table's
+  67% fire rate at 74% precision, half of whose errors were a category from an unrelated merchant.
+  Text-less evidence (a register edit, 30 years of imported Quicken rows) updates the payee TALLY
+  only and never the trie — with no tokens to walk it would all land on the root, where mismatched
+  categories accumulate and kill the confident cases. `MIN_COUNT` is 2 (by request, same as a
+  rename); below it, for a SETTLED payee, `predict_fields` asks the register's QuickFill what it
+  would pre-enter for that payee typed by hand — an auto-filled payee must not do worse than a
+  typed one — unless review history already shows the payee to be a catalogue.
+- `category_rules.py`, `transfer_rules.py` — `keyword -> category_id` / `keyword -> account_id`,
+  sharing their tokenizer with each other via `keywords.py` so they stay in lock-step.
+  **`category_rules` no longer learns.** One correction minted a GLOBAL keyword rule, which is how
+  the town name `ANYTOWN` became a Utilities rule that fired on Subway, O'Reilly and the youth
+  theater. `learn_from_edit` is deleted and migration 57 purged every row it had written (all 228 on
+  the reference ledger — 67 carried multi-token keywords, which only `refine_keyword` produces and
+  the Rules manager's Add dialog cannot). Nothing writes the table automatically now, so a row in it
+  is a deliberate Rules-manager entry and `predict_fields` honours it directly, *after* the tree
+  declines. That is the one place a category outside the payee's own history can be filled in, and
+  it is there because the user typed it. `transfer_rules` still learns — it maps statement text to
+  an ACCOUNT, a far smaller and less ambiguous target.
+- `categorize.py` — payee-level `import_mappings` keyed on the *normalized* payee, with a `source`
+  ranking where an explicit user choice outranks an inferred one.
+
+## Compartment H. Scheduled pre-entries, reminders and the calendar
+
+Recurring bills and loan payments pre-entered as placeholder rows before
+the bank transaction arrives, and the forward-looking views built on
+them. A pre-entry matches on TOLERANCE, not exact cents.
+
+Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
+`mammon/loans.py`.
 
 ### 5.10 Scheduled / recurring payments (generalized beyond loans)
 - Mammon can PRE-ENTER an upcoming recurring payment as a pending placeholder row
@@ -2041,6 +2830,7 @@ direction and the Portfolio totals never move.
   rows), so they survive re-import too. Regression coverage:
   `mammon/tests/test_scheduled.py::test_scheduled_definitions_survive_qif_reimport`.
   The manager UI and the module docstrings state this distinction to the user.
+
 
 ### 5.10c Reminders, projected balances and the calendar (roadmap item 5)
 - A scheduled definition is now a REMINDER with a status computed against
@@ -2212,11 +3002,32 @@ direction and the Portfolio totals never move.
   predicted payee's history is split, that split is learned onto the new
   definition and carried forward on every pre-entry (see the learned split
   template under 5.10). Both dialogs have "Include predictions from history".
+- **A prediction is never shown beside the reminder for the same bill.** The
+  "a scheduled payee is not predicted" guard above compares the definition's
+  stored payee text with the ledger rows' payee text, so any drift between
+  them — a rename applied after the definition was written, different bank
+  text — lets the same bill through as both a reminder and a prediction; and
+  the entered-row guard only suppresses a prediction in a month that already
+  has the payment posted, so the duplicate was invisible in the current month
+  and appeared in the next one. Therefore the projection reconciles its two
+  sources where they merge (`mammon/projection.py`): a PREDICTED event is
+  dropped when a SCHEDULED event on the same account falls within three days
+  of it (the same window as the entered-row guard) and agrees on **either**
+  the normalized payee key **or** the signed amount. Either, not both,
+  because the case this exists for is payee text that drifted; requiring both
+  would leave it duplicated, requiring neither would collapse two genuinely
+  different bills that share a day. The suppression is one-directional: what
+  the user defined always wins, an entered row and a reminder are never
+  dropped, and two definitions never suppress each other.
 - **The calendar colours what it shows**, in both themes: scheduled payment
   red, scheduled deposit green, predicted payment yellow (amber on white),
   predicted deposit blue, pending pre-entry muted, entered row plain; a legend
   sits under the grid. Today's highlight comes from the theme: a fixed light
   green under dark-mode text had made today the one unreadable day.
+- **The calendar's month title is a fixed width**, measured over all twelve
+  month names in the title's own font, so the ◀ and ▶ month-step arrows keep
+  exactly the same position whatever month is shown and can be clicked
+  repeatedly without looking.
 - **"All spending accounts" means checking, savings, credit and cash.** It
   was every visible account but investments, so the house and the loans were
   summed into a cash projection and it read over a million dollars against a
@@ -2230,654 +3041,28 @@ direction and the Portfolio totals never move.
   the calendar opens on the same accounts next time; an explicit account
   passed to the dialog shows for that window without changing the memory.
 
-### 5.10d Full-ledger export (roadmap item 8)
-- Owning the file is not owning the data unless another program can read it.
-  File ▸ Export Ledger… (`ui/export_dialog.py`, `mammon/export.py`, and
-  `python -m mammon.export` for a terminal) writes the ledger in three open
-  shapes, each for a different need:
-  - **QIF** -- accounts (the account list and a section per account),
-    categories with income/expense, every posted cash transaction with its
-    splits, transfer legs on both sides, cleared/reconciled flags and check
-    numbers, every investment transaction, the security list and the price
-    history. Quicken's conventions: `MM/DD/YYYY` dates, a Buy/Sell/Div amount
-    as a positive magnitude, a stock split as new shares per ten old, `U`
-    beside `T` on every cash record. **The dialect is verified against ground
-    truth, never reasoned about**: `D:\QLite\data` holds Intuit's
-    `QIF_Specification.txt` and 27 years of Quicken's own exports of this very
-    ledger, and every shape here was checked against both. Two things that
-    look wrong are right, and were briefly "fixed" on a guess before the files
-    said otherwise: a split's `L` line echoes the first leg including a
-    bracketed `[Account]` (the spec's own mortgage example is `L[linda]`
-    followed by `S[linda]`), and both sides of a transfer are written. What
-    was genuinely wrong: a cash row on an INVESTMENT account must be an
-    investment record -- an `XIn`/`XOut` for a transfer leg with the
-    counter-account bracketed and a `$` amount line, a `Cash` line with its
-    category otherwise -- never a bank-style record, which carries no action
-    code and is malformed inside `!Type:Invst`. Quicken read the 401(k) side
-    of a paycheck written that way as a bare transfer and, on matching the
-    pair, kept the transfer and dropped the paycheck's whole split. (The spec
-    also documents `!Option:AllXfr`, placed right after the top header, which
-    forces Quicken to import all transfers regardless of its Ignore Transfers
-    setting; not written today.) **The migration is one-way, by decision
-    (2026-09-02).** The file is right and Quicken still cannot read it back:
-    its QIF import applies transfer detection but NOT inside a split, so it
-    lifts the transfer line out of a split and files it separately -- a
-    paycheck arrives as nothing but its 401(k) deferral, a mortgage payment as
-    nothing but its principal. This is a longstanding Quicken limitation,
-    reported across versions and confirmed in its own community; 2017 is
-    affected, and later versions dropped nearly all QIF import processing
-    EXCEPT the transfer detection that causes it. Mammon will not contort the
-    format to suit it -- writing transfer legs as ordinary categories would
-    survive the import but silently sever every transfer. Bring a ledger to
-    Mammon; do not plan on taking it back to Quicken. The
-    measure of completeness is the **round trip**: importing the file into an
-    empty Mammon database reproduces every balance, split leg, holding and
-    price (`test_export.py`). What QIF cannot carry stays behind, and the
-    dialog says so: tags, loan setups, scheduled payments, learned rules, and
-    the exact ratio of an odd split (4:3 is rounded).
-  - **JSON** -- every table, every row, exactly as stored, under the schema
-    version: the complete ledger, nothing interpreted so nothing lost. The
-    identifying columns (account numbers, bank URLs, download settings) are
-    blanked unless asked for, since sharing the ledger is the common case and
-    moving it to another machine the rare one; the file records which it was.
-  - **CSV** -- one register per account into a folder, with the running
-    balance (the balance on that date even when a date range narrows the
-    rows) and each split's legs in the last column.
-- Pending pre-entries (`scheduled=1`) are placeholders, not history, and are
-  left out of QIF and CSV; JSON has them like everything else.
-- **One file, or one per year.** The default is one QIF for the whole ledger;
-  Mammon has no trouble writing or reading it. Quicken could not WRITE its
-  whole ledger as one QIF (the migration had to be exported a year at a
-  time); whether it reads one large file is untested, so the dialog and
-  `--by-year` offer `<name>-YYYY.qif` per year of activity as a fallback. Each
-  yearly file stands alone (account list, categories, securities, that year's
-  prices and transactions), only the first carries the opening balances, and
-  an account with nothing that year has no section in it. Importing the set
-  in date order into an empty database reproduces the ledger exactly as the
-  single file does (`test_export.py`).
-- Two things the round trip taught the importer, which apply to any Quicken
-  file too. An account's opening balance travels as a transfer to the account
-  itself payee'd "Opening Balance"; into an account holding nothing from
-  before that import it now becomes the account's opening balance
-  (`ledger.set_opening_balance`) rather than a row -- but a ledger built under
-  the older reading, with the opening balance as a +row, re-imports exactly as
-  before, since the row dedups against itself. And the `!Type:Cat` list is
-  read (`QifExtras.categories`): a category is created if missing and given
-  its income/expense kind when it has none, never overriding a kind already
-  set. The exported security list names each security by the text its
-  transactions use, because that is how the importer keys `!Type:Prices`
-  quotes; the descriptive name lives in the JSON export.
-- **Downloads merge into placeholders** (`importers/core.py`). A funding-side
-  loan pre-entry merges with the funder's debit on amount within the loan
-  match window, re-deriving the split for the actual amount and clearing the
-  pending flag on both legs; a plain pre-entry from a definition (a bill, a
-  paycheck, a transfer leg) merges on exact amount within 7 days
-  (`scheduled.find_matching_placeholder`), keeping the definition's own payee
-  and category. Before this only loan-register placeholders merged, so every
-  other pre-entry became a duplicate the moment the real row downloaded.
-- The projection follows the money the same way: with a funder known, the
-  whole payment leaves the funder and only the principal reaches the loan.
-- **Financial Calendar** (the register area's own page, shown at startup and
-  again from Tools ▸ Financial Calendar): the same projection laid out as a
-  month grid, Sunday first, each day listing its events (a dot marks one not
-  yet entered) and its end-of-day balance; past days show what was entered,
-  days from today on the projection; Prev/Next step months. It is a PAGE of the
-  register stack rather than a modal -- it is what the window opens on, it
-  survives account switches, and a register can be opened over it and the
-  calendar returned to without losing the month. A write elsewhere marks it
-  stale and it redraws when next shown, so edits never pay for a projection
-  nobody is looking at.
-- **Spending trend chart** (below the calendar on the same page): a bar chart of
-  total money-out per month over the trailing twelve months ending with the
-  month on screen, so stepping the calendar walks the chart with it. The data is
-  a pure read-only aggregation, `reports.charts.spending_by_period` — money-OUT
-  magnitude in integer cents per calendar bucket, transfers excluded (moving
-  your own money is not spending), splits honored, scheduled placeholders left
-  out, quiet months zero-filled — with no SQL or money logic in the Qt layer
-  (`ui/charts.SpendingBarCanvas` only renders it). **Its value axis does not
-  start at zero**: it auto-scales to the data's own min–max with a little
-  padding, holding the lower bound strictly above zero while every value is
-  positive. On a real ledger each month's spending sits in the thousands and the
-  month-to-month change worth seeing is only hundreds; a zero-based axis would
-  flatten every bar to the same height and hide exactly that swing. matplotlib
-  is imported lazily and a draw failure degrades to no chart, never a crash of
-  the home page.
 
-### 5.5c Quotes
-- The investment register's gear menu offers **Get Quotes**: fetch the latest
-  close for the account's holdings and record it in `price_history`. The network
-  stays behind `investments.fetch_quotes`' injectable `QuoteSource`, so a missing
-  backend (yfinance is deliberately not installed) is reported as a setup step,
-  never raised into the register.
-- A ticker is DERIVED from the security name (`investments.ticker_of` — the
-  leading token, when it is ticker-shaped) and **shown for confirmation before
-  any fetch**. That confirmation is not politeness: a plan fund named
-  `INTL EQUITY INDEX` yields `INTL`, which is a real listed company, so an
-  unasked fetch would file a stranger's price against the user's holding and
-  value the account wrongly. Names yielding no ticker at all (`DOMESTIC BOND
-  INDEX`, `Fidelity 500 Index Fund`) are reported as skipped, never guessed.
-- A returned quote is recorded against the **holding's own name**, not the
-  ticker: `price_history` is keyed by the name a holding is stored under (see
-  `investments.latest_price`), so recording `ALTY` when the holding is
-  `ALTY GLOBAL X SUPERDIVIDEND ALTER` would look like it worked and value
-  nothing.
-- A fetched quote must COUNT toward the displayed valuation. The default as-of
-  for a display valuation is `investments.valuation_as_of` — the latest date the
-  ledger knows anything about, **transaction or recorded price**. It was the
-  last transaction alone, which capped `latest_price`'s `date <= as_of` filter
-  below every quote just fetched: the user was told nine quotes were downloaded
-  and no total moved. The original reason for the cap survives where it bites —
-  a security with no price after 1997 is still valued at its 1997 price, because
-  the newest quote is taken per SYMBOL on or before that date.
+### Implementation notes
 
-### 5.5j One line, one match
-- **An EXACT match outranks a tolerant one across the whole batch, not just
-  within a row.** The tolerant scheduled tier already runs last inside
-  `_find_match`, but claiming is global: a tolerant row earlier in the file took
-  the register line, and the row matching it to the cent -- later in the file --
-  found the line claimed and classified NEW. `build_review` therefore runs TWO
-  passes: pass 1 offers every row only the exact tiers, pass 2 lets what is
-  still NEW try the tolerant tier.
-- **A register line is one event, so at most one review row may hold it.**
-  `set_manual_match` releases any other row already matched to the chosen line
-  (`release_txn_matches`) before taking it. Hand-matching onto a taken line used
-  to leave both rows pointing at it, and the second then reconciled a
-  transaction already spoken for.
-- **A single match can be undone.** `unmatch_one` returns one row to pending NEW
-  and, when it had been accepted, restores that register line's prior
-  `fitid`/`cleared`/`reconciled` from the values `accept_match` recorded.
-  Previously the only undo was `undo_all_matches`, so correcting one wrong match
-  tore down every correct one with it. Reached from the review row's context
-  menu (**Unmatch**), which is now offered on an already-accepted MATCHING row
-  too. Investment rows are restored in `investment_transactions`, their own
-  table.
+How this compartment is built, and what each shape
+prevents. Moved out of CLAUDE.md 2026-09-11: it is
+reference for whoever works here, not per-call context.
 
-### 5.5k Learning starts empty
-- **The rename and category trees are never seeded from register history.** They
-  learn only from rows the user accepts in review. Bootstrapping replayed every
-  posted transaction's `memo -> payee` pair as an accepted rename, which is only
-  true for downloaded rows; for hand-entered and QIF-imported history the memo is
-  a note the USER typed. One 1998 memo of "deposit" on a Foothill Place row put
-  that payee on the trie, and `MOBILE DEPOSIT` -- pure bank boilerplate -- then
-  renamed to Foothill Place in a ledger started deliberately fresh.
-  `ensure_bootstrapped` remains callable on both modules for an explicit
-  seed-from-history action, but nothing invokes it on open.
-- **Offering a name and applying it are separate gates.**
-  `import_review.RENAME_MIN_SIGHTINGS` (2) decides whether a payee appears in the
-  dropdown; `rename_tree.MIN_FILL` (2) decides whether it is written into the
-  cell, and applies to the matched leaf -- the same text renamed twice -- not to
-  the payee overall. A payee renamed twice on other text is offered for a new
-  variant but not applied to it. A payee chosen once is neither filled nor
-  offered.
-- **Prior register rows never fill the payee.** Rows that never went through
-  review carry memos the user typed, and matching a download against them is
-  how a 1998 note of "deposit" once renamed `MOBILE DEPOSIT`. Those rows still
-  back-fill the CATEGORY when they agree (`PRIOR_TXN_MIN_ROWS`,
-  `PRIOR_TXN_PURITY`) and the resolved payee is theirs.
+#### Scheduled pre-entries vs. imports
 
-### 5.5i Discarding a review row removes it
-- **Discard means "not now", not "never again".** Discarding used to TOMBSTONE:
-  the row stayed with `state='discarded'` so a re-download's `INSERT OR IGNORE`
-  would collide with it and not re-add it. That inverted the gesture. The user
-  discarded a list expecting to download the range again and take another run at
-  matching it; instead 106 tombstones ate the re-download and only the 5
-  genuinely new transaction ids came back -- and with no un-discard action
-  anywhere, discard was a one-way door only a hand-written UPDATE could reopen.
-- `discard_all` and `discard_one` therefore DELETE the row. Downloading the same
-  date range offers it again. A row the user genuinely never wants is excluded by
-  choosing a different date range, which they control directly; it needs no
-  permanent per-row veto.
-- **ACCEPTED rows still persist**, and must: they became register transactions,
-  so re-offering them would duplicate work already done. The dedupe that matters
-  is `(account_id, transaction_id)` against accepted rows plus the register
-  itself.
+Loan payments (`loans_schedule.py`) and generic recurring bills (`scheduled.py`) are pre-entered as
+`scheduled=1` placeholder rows before the bank transaction arrives; the real import then *merges
+into* the placeholder. These definitions are app-generated and never present in any QIF/OFX/CSV —
+importers neither read nor write them, and `core._find_dup_cash` only matches `scheduled=0` rows, so
+definitions and placeholders both survive a re-import. Regression:
+`test_scheduled.py::test_scheduled_definitions_survive_qif_reimport`.
 
-### 5.5h Matching a scheduled pre-entry (tolerant amounts)
-- **A pre-entry's amount is a forecast, so the matcher must not demand it be
-  right.** The finance calendar enters a recurring payment as the MEDIAN of the
-  last six months, and a loan pre-entry uses the amortization schedule's figure.
-  Both are wrong by construction the moment escrow or a rate moves: the real
-  debit arrives for a different amount, misses its placeholder, and lands as a
-  NEW row beside a pre-entry that then stands forever.
-- The signal is the visible `num` of `Sched`, not the internal `scheduled` flag
-  — the marker is what survives a QIF round trip (on a reloaded ledger 523 rows
-  carry the num and none carries the flag).
-- `import_review._find_match` therefore adds a LAST tier: a `num='Sched'` row in
-  the date window, SAME SIGN, whose amount is within
-  `SCHED_AMOUNT_TOLERANCE` (half the placeholder's own amount — the same
-  latitude the file-import path already allows for this case in
-  `importers/core._funding_pending_by_payee`). Running last means an exact match
-  always wins and this only ever rescues a row that would have been NEW.
-- **Unambiguous-only.** `core.py` can afford that tolerance because it also
-  demands the payee match; a downloaded review row has no payee at
-  classification time (`map_row` leaves it empty by design). So the safety
-  property here is different: the tolerant tier fires only when exactly ONE
-  scheduled candidate is in the window. Two are a guess, and a guess that
-  silently reconciles the wrong row is worse than leaving it NEW.
-- **Manual match opens both tolerances, and is capped at a fortnight.** The user
-  reaching for manual match has already been failed by the automatic one, so
-  candidates are offered within ±`MANUAL_WINDOW_DAYS` (15 — never more, by
-  request) at any amount within the same tolerance, ordered nearest-amount then
-  nearest-date so an exact match still heads the list. The SIGN never varies: a
-  payment is not answered by a deposit. `set_manual_match` enforces the same two
-  rules on a hand-picked id. The dialog shows a **Difference** column, because
-  once amounts may differ the value alone no longer tells the user whether they
-  are looking at the right row.
+## Compartment I. Reconciliation
 
-### 5.5d Accepting a review in bulk
-- **A MATCH merges into the existing line. The bank owns the AMOUNT; the
-  register owns everything else.** Accepting a MATCHING review row — one at a
-  time or via Accept All — reconciles the register (or scheduled/loan
-  placeholder) line it matched: it marks that line cleared, stamps the source's
-  transaction id *only* when the line had none, and **adopts the downloaded
-  amount**. It leaves the date, payee, memo, category and SPLIT the user entered
-  untouched, so a download can never overwrite a manually-entered date with the
-  bank's posting date — the failure users report of other tools.
-- The amount is the exception because a matched line's own figure is often a
-  FORECAST: a scheduled pre-entry carries the finance calendar's six-month
-  median, a loan pre-entry an amortization figure whose escrow may have moved
-  since. That staleness is exactly why such a row needed a tolerant or hand-made
-  match, and leaving it meant the register kept a number that never happened.
-  The file-import path already merged this way (`merge_import_into_placeholder`:
-  "adopt the actual date and amount… the pre-entry keeps its own payee and
-  category").
-- A split whose lines no longer sum to the adopted amount is allowed and stays
-  visible — that sum invariant was deliberately removed so a row carrying a
-  discrepancy can still be edited, and the discrepancy is the signal that the
-  loan or the schedule needs updating.
-- Undo restores it: `review_items.prior_amount` (migration 59) records the line's
-  own figure, and both `unmatch_one` and `undo_all_matches` put it back through
-  one shared helper, alongside fitid/cleared/reconciled.
-  `import_review.accept_match` is the sole writer of this path, and the review
-  panel makes the policy inspectable: a matched row's Status cell states, on
-  hover, what merges versus what is preserved. Regression:
-  `test_merge_policy_visibility.py`.
-- **Accept All is "accept every row without editing it"**, and must agree with
-  doing exactly that by hand. `import_review.accept_all` therefore applies the
-  same predictions the register's pending row shows — the learned rename, the
-  learned category, the learned transfer account, and (for investment rows) the
-  learned action — recomputed per row inside the loop, so a rename learned from
-  an earlier row of the same batch reaches the later ones.
-- It previously saved NEW rows with the RAW mapped values, so a rename tree the
-  user had spent weeks training produced bank gobbledygook the moment they used
-  the bulk button instead of the single one.
-- **A bulk accept LEARNS nothing** (`save_new(learn=False)`). A prediction nobody
-  looked at is not evidence: reinforcing a dropdown candidate the user never
-  chose — or, where nothing is learned yet, teaching the tree that a statement
-  text maps to a tidied copy of *itself* — would make the tree more confident
-  precisely where it got no confirmation. Accepting a row individually is the act
-  that teaches.
-- The investment-action prediction lives in `import_review.predict_action`, not
-  in the register model, so the bulk and single paths cannot drift apart again.
+Reconciling a register against a paper or downloaded statement, and the
+audit trail for anything that changes a row after it is reconciled.
 
-### 5.5l Accepting a NEW row creates the category you typed
-- **A category typed into the pending row and confirmed is CREATED on accept.**
-  When the user types a brand-new category into the register's editable pending
-  row, confirms the "Create new category?" prompt, and Accepts the NEW review
-  row, the accept path (`import_review_widget.PendingRowController.accept_new`)
-  resolves the buffered text through `import_review.resolve_or_create_category`,
-  a thin get-or-create wrapper over `ledger.resolve_category` — the single writer
-  of category rows. Previously accept used the LOOKUP-ONLY
-  `category_id_for_name`, which returns `None` for unknown text, so a freshly
-  typed category was silently dropped and the transaction posted with no
-  category; the user had to re-add it by hand afterward.
-- **Only an ACCEPTED row invents a category, never a previewed one.**
-  `category_id_for_name` stays lookup-only and is still what `predict_fields`
-  uses while a row is merely being previewed — a category is only ever minted at
-  the commit point, from text the user typed and confirmed.
-- **Transfer detection still wins, and blank invents nothing.** A `[Account]`
-  category names a transfer target and is resolved first
-  (`transfer_account_id_for_name`); only when the text is neither a transfer
-  target nor blank is a category get-or-created. `ledger.resolve_category`
-  reuses an existing category case-insensitively and creates each missing
-  `Parent:Child` level, so accept never forks a near-duplicate. Regression:
-  `test_review_new_category.py`.
-
-### 5.5e Historical quote backfill
-- Get Quotes carries **"Also fetch monthly history back to each holding's first
-  transaction"**. Ticked, it calls `investments.fetch_quote_history`, which asks
-  the `QuoteSource` for a monthly series (`get_history`, optional — a source that
-  only reports the latest close says so rather than failing obscurely).
-- Why: net worth values a holding at the newest price recorded ON OR BEFORE the
-  sampled date, so a security priced in 2015 and not again until 2023 holds its
-  2015 value flat and then jumps. Across a portfolio those steps land on
-  different dates and the growth curve comes out jagged — not because the money
-  moved that way, but because that is when prices happened to get recorded.
-- **Existing prices are never overwritten** (`record_prices_if_absent`): a price
-  carried by a real transaction is what the user actually paid that day, and a
-  monthly close must not displace it. Re-running is therefore cheap and
-  idempotent.
-- Recorded under the **holding's name**, not the ticker — same reason as
-  §5.5c — and bounded by each security's first transaction IN THIS ACCOUNT
-  (`first_transaction_dates`), grouped so it is one request per distinct start
-  date rather than one per holding.
-- The backfill is a separate, failable step from the latest-close fetch: a
-  provider with no history for one security must not cost the user the closes it
-  already returned.
-
-### 5.5f A share move's price is data, not decoration
-- `ShrsIn`/`ShrsOut` carry **price and gross amount** in the edit dialog's field
-  map. `ShrsOut` listed neither, so opening a plan's fee removal in the editor
-  and pressing OK silently blanked what the broker sent. Cash effect is zero
-  either way (`_CASH_ZERO_ACTIONS`), so the amount is a gross annotation, never a
-  cash movement.
-- `learn_prices_from_transactions` **derives** the per-share price as
-  `(|amount| - |commission|) / quantity` when the row states value and shares but
-  no price. Commission comes out first, matching the basis convention
-  (`basis = price*qty + commission`), so a commissioned trade never reports a
-  price no share traded at.
-- Why it matters: a quarterly fee removal from a fund quoted nowhere public is
-  often the ONLY quote that fund will ever have, and net worth values a holding
-  at the newest price on or before each sampled date. Measured on the real
-  ledger, 552 of 599 `ShrsOut` rows carry no price at all.
-- A share move stating only a share count yields nothing, and nothing is
-  invented for it.
-
-### 5.5b Learned description mapping (payees and investment actions)
-- One engine, two domains (`rename_tree._DOMAINS`): statement description
-  and/or the source's own payee field → payee, and a source's raw activity text
-  → Quicken investment action. Both are importer vocabulary guesses that only
-  the user's own corrections can make right.
-- **The engine is a decision tree rebuilt from the user's accepted corrections
-  at every prediction** (modelled on webSlinger's `selector_tree`, features
-  replaced by tokens, branching one). Nothing is learned online. The corpus is
-  `rename_examples` (schema v60): one row per accepted review row — source
-  text, supplied payee field, the label chosen, and the id of the transaction
-  the accept created. The label is read **live** through that id, so a payee
-  edited in the register or an undone accept changes the next answer without
-  re-teaching. Review retention never touches the table, so a rename taught
-  from a review row purged a year later is not forgotten.
-- **Only corrections train the payee domain.** A row accepted with the text it
-  was shown with (the description, its title-cased default, or the supplied
-  payee) is not a rename and is not counted. A bulk Accept All logs only a row
-  whose payee was actually renamed by an applied fill. The action domain counts
-  every accept: a kept importer guess is a confirmation.
-- **The user's display rule.** The register shows the source's payee field if
-  the record carried one, else the bank's description (title-cased when the
-  feed shouts), until the same text has been renamed **at least twice**
-  (`rename_tree.MIN_FILL`) and the matched leaf names ONE payee — then that
-  payee fills the cell. A leaf with several payees is a dropdown, never a fill.
-- Answering a row: (1) candidates are the examples sharing a *distinctive*
-  token — a non-boilerplate token carried by at most
-  `MAX_LABELS_PER_TOKEN` (5) payees — plus exact token-set matches (how an
-  all-boilerplate `MOBILE DEPOSIT` finds its own history); (2) a binary
-  decision tree on token presence is grown over them by information gain;
-  (3) the leaf's leading label is **generalized the way webSlinger
-  generalizes an array selector over its fields** (the user's rule): each
-  example is a feature set — every token, the token before it, the token
-  after it, the same over the payee field, and "no payee field" as a value —
-  and the pattern keeps a feature only when every example has it, with its
-  value when they agree, as a bare "something here" slot when they differ,
-  dropped when any example lacks it. `June rent` and `July rent` renamed
-  Tenant generalize to "a token, then RENT": `August rent` fits, a bare
-  `rent` does not until it is named too, after which anything with RENT
-  fits. A pattern from identical rows stays exact, so a youth theater in
-  Anytown does not inherit Walmart's exact rows on the town's tokens. A
-  label spanning unrelated formats (Amazon) is split by shape first so its
-  pattern pins a merchant token. (4) the leading label fills when the row
-  fits, ≥ `MIN_FILL` (2) of its examples back it, and it holds ≥
-  `FILL_PURITY` (0.9) of the leaf; else the leaf's labels and the other
-  candidates (each with ≥ `RENAME_MIN_SIGHTINGS` sightings) go in the
-  dropdown and the raw text stays.
-- Measured, predicting each accepted row before learning it: on the fresh
-  ledger (42 corrections) 20 fills, 0 wrong, first fill on the third sighting
-  of every recurring payee (the online trie: 15 fills, 1 wrong, on the fourth);
-  on the older ledger (679 rows) 369 fills at 98.6% precision with the right
-  answer in the dropdown for 71 of the 138 unfilled rows (the trie: 255 fills
-  at 96.9%, 58 of 71). The five misses: two payees the user spelled two ways,
-  one ambiguous deposit, two first sightings. Suggest costs under a
-  millisecond.
-- **A supplied payee field is evidence, not a gate.** Its tokens join the
-  description's in the query and its features join the pattern, so the
-  truncated-field case (`Dividend Earned For Period O`) is renamed once
-  corrected twice, while the Venmo counterparty case is not: a pattern learned
-  from description-only rows requires the absence of a payee field, and a
-  pattern learned under one counterparty's name requires that name.
-- Importer `action_map` tables are being retired in favour of this learning —
-  Interactive Brokers ships with none.
-
-### 5.5g Rule conditions and the Rules Manager (roadmap item 10)
-The keyword engines above learn a bare `keyword -> category` / `keyword ->
-account` that fires on any transaction whose bank text carries the token. That
-is right most of the time and wrong exactly when one merchant means two things —
-an "AMAZON" that is Shopping on the credit card but a Prime-Video charge on
-checking, a round "TRANSFER" that is savings below a threshold and brokerage
-above it. Roadmap item 10 lets a rule ALSO carry optional conditions — roughly
-*which account, how much, what memo* — and gathers all three learned-rule
-engines behind one editor. The schema lives in Section 4 (four NULLABLE columns
-on both `category_rules` and `transfer_rules`, schema v40); the matcher is
-`mammon/keywords.py`, the domain layer `category_rules.py` / `transfer_rules.py`
-/ `categorize.py`, and the editor `mammon/ui/rules_manager_widget.py`, reached
-from **Tools ▸ Rules Manager…**. Rules are app-learned and never imported, and
-`mammon.ledger` stays the sole writer of transaction rows — these tables hold no
-money movement.
-
-- **A condition narrows WHEN a keyword rule fires; all-NULL is the old
-  behaviour.** A rule may carry any subset of `account_id` (scope to one
-  account), `amount_min_cents` / `amount_max_cents` (an inclusive SIGNED
-  integer-cent range, negative = money out), and `memo_contains` (a
-  case-insensitive substring). `keywords.match_rule(desc, rules, *,
-  context=None)` still matches the keyword whole-token, longest-first (so "CAT"
-  never matches "CATERPILLAR" and "AMAZON WEB" out-ranks "AMAZON"); when the
-  caller supplies transaction `context` (a mapping/object exposing `account_id`,
-  `amount_cents` and/or `memo`), a candidate must ALSO satisfy every non-NULL
-  condition (`_conditions_hold`, ANDed together), and a rule that fails one is
-  skipped so a narrowly-conditioned keyword falls through to a broader rule.
-  **`context=None` — the default, and what every shipped import caller passes —
-  consults no conditions and is byte-identical to the prior keyword-only
-  match**, so nothing changes on the import path until a caller opts in by
-  passing context.
-
-- **A set condition the context cannot confirm fails closed.** If a rule is
-  scoped but `context` has no `account_id` (or it is `None`), the rule does not
-  fire — a scoped rule never classifies a row it cannot positively place.
-  Amounts compare as signed cents against the inclusive bounds, so a "-$120.00
-  or more out" rule is `amount_max_cents = -12000`. `normalize_conditions` casts
-  the integer columns (a stray Decimal/str cannot poison the row) and collapses
-  a blank `memo_contains` to NULL, so an empty substring can never degrade into
-  an always-false condition.
-
-- **The domain layer forwards conditions but never invents them.**
-  `load_rules` / `list_rules` / `get_rule` select the four columns;
-  `apply_rules` / `match_rule` take and forward the optional `context`;
-  `upsert_rule` accepts the four conditions, each defaulting to `None`. On a
-  fresh row all four are written (`None` → NULL); when re-teaching an existing
-  keyword only the conditions explicitly supplied (non-`None`) are changed, so
-  learning a keyword again never silently wipes a condition the manager set.
-  Clearing a condition back to NULL is the editor's job, not upsert's — delete
-  and re-add the rule for that. `transfer_rules` gained `list_rules` /
-  `get_rule` / `delete_rule` for parity with `category_rules`, and `categorize`
-  gained `list_mappings` / `forget_mapping` so the learned payee → category
-  table is inspectable and prunable too.
-
-- **The Rules Manager is a thin projection** (`ui/rules_manager_widget.py`, a
-  `QDialog` opened from **Tools ▸ Rules Manager…**, mirroring `budget_widget`).
-  It holds no SQL and no money logic; every read and write goes through the
-  domain layer, and amounts are rendered/parsed only through the shared
-  `ui.models.fmt_cents` / `parse_amount` chokepoints and stored as signed
-  integer cents like everywhere else. A `QTabWidget` carries three tabs:
-  - **Category Rules** and **Transfer Rules** — one row per keyword rule.
-    Keyword and target are display-only (fixed when the rule is first learned);
-    the four conditions are inline-editable: the **account scope** through a
-    combo delegate where a blank choice means *all accounts* (NULL `account_id`),
-    **min** and **max** through `MoneyDelegate` as signed integer cents, and
-    **memo** as free text. Each edit saves through `upsert_rule` with
-    **`compound=True`** — the non-compound path would re-run `extract_keyword`
-    and collapse a multi-word keyword into a *different* rule, so an in-place
-    condition edit must keep the existing keyword verbatim.
-  - **Learned Payees** — a read-only list of the `import_mappings` (normalized
-    payee → category, §5.5) with a **forget** action (`categorize
-    .forget_mapping`); it is inspect-and-prune only, since the mapping itself is
-    (re)learned from the next correction.
-  - Deletes on every tab route through the `QMessageBox.question` seam the tests
-    patch, never a bare `exec_()` modal, so the dialog terminates under the
-    offscreen platform.
-
-- Regression: `mammon/tests/test_rule_conditions.py` (matcher plus the domain
-  forwarding and re-teach preservation) and `mammon/tests/test_rules_manager_ui
-  .py` (the dialog as a thin projection, including the delete seam).
-
-### 5.10a Register chrome and entry feedback
-- Account actions (Details, Reconcile, Import, Download, Review, Loan Setup,
-  Hide) live in a **gear menu** at the right of the account-name line, not on a
-  toolbar row — in the investment register too, where the gear additionally
-  carries **Get Quotes** (§5.5c). Every one of them opens a dialog, and a row of buttons that only
-  lead elsewhere is a poor trade for register height. `AccountToolbar` still owns
-  the actions and their account-id wiring; it is simply never shown.
-- The **one-line/two-line choice is per account** (`ui/prefs.account_view_mode`,
-  QSettings). The layout that suits a register depends on the account: a card
-  whose rows carry long statement descriptions wants the second line, a
-  hand-entered checking account does not. Settings sets the DEFAULT; an account
-  that chose from its gear menu keeps its choice when the default changes.
-- **Display Preferences (Settings) are QSettings, never DB, and theme-sensitive
-  colors are remembered PER THEME.** Font family/size, the date display format,
-  row-shading on/off and the two-line default mean the same thing in light and
-  dark, so they are stored globally. But the **alternate-row shade** and the
-  **negative-amount color** are legible only against their own background, so
-  each theme keeps its own slot (`display/theme_colors/<theme>/<role>`) and
-  `ui/prefs.alt_row_color()` / `negative_color()` read the slot of the currently
-  active theme, falling back to that theme's palette value (`style.palette_for`)
-  when unset. A single shared key was the reported defect: a color picked in dark
-  mode overwrote light's (and vice-versa), so switching themes back and forth
-  lost the alternate-row color. A pre-namespacing single-key value is migrated
-  into the active theme's slot on first read, so an existing user loses nothing
-  and the pick lands in the theme it was chosen under rather than leaking into
-  the other. A color chosen in the same Display-Preferences change that also
-  switches the theme belongs to the newly chosen theme (the dialog has already
-  reseeded its swatches to that theme), and the dialog's theme combo reseeds each
-  swatch from that theme's remembered pick so toggling it can never clobber the
-  other theme's saved color.
-- The accounts list gives **credit cards their own heading**. Quicken separates
-  them only by ordering, leaving the boundary implicit; the order still matches
-  (cards directly below Banking).
-- A **transaction-accepted sound** plays on save, switchable in Settings. It is
-  driven by `RegisterModel.transactionSaved`, which fires only when a write
-  actually altered or created a row — NOT by `committed`, which also fires for a
-  no-op rewrite.
-- **One sound per TRANSACTION, not per field.** The register saves per field:
-  editing an existing row commits each cell as its editor closes, so tabbing
-  across four fields is four database writes to one transaction. The unit the
-  user works in is the transaction, so `transactionSaved` carries the txn id and
-  the register coalesces on it, sounding when the user is done with that row —
-  on Enter, or on moving to another row. A brand-new row commits as a whole and
-  needs no coalescing. **Enter on an existing row is the accept gesture**: it
-  commits any open cell editor and acknowledges the transaction once. (It does
-  not perform the write; the row is already saved.)
-- The sound also fires from the **review list** (`ImportReviewPanel
-  .transactionSaved`) for a MATCHING row accepted or a NEW row saved, and not for
-  a discard. Review is the high-volume accept gesture and where the confirmation
-  is worth most; `changed` is not a substitute, as it also fires for edits,
-  visibility switches and discards. Qt commits an editor on focus-out whether or not it was touched,
-  so a chime keyed off "an edit was committed" would fire for clicking a cell and
-  clicking away, and a confirmation that fires on nothing is one you stop
-  hearing. The waveform is synthesized into the data dir on first use rather than
-  shipped as a binary blob; playback degrades silently with no audio backend.
-- Reconcile panes **gray a row once it is cleared**. The Clr mark is at the far
-  left and the amount at the far right, so with two identical amounts it is easy
-  to re-click the row already cleared. Dimming answers "have I done this one?" at
-  the amount itself.
-
-### 5.5a Category entry
-- A category is completed from any **unambiguous fragment**
-  (`ui/delegates.resolve_category_input`), in order: exact path, exact LEAF name
-  (`fuel` → `Auto:Fuel`), path prefix (`land` → `Landscaping`), leaf prefix. Each
-  step requires a unique winner; ambiguity resolves to nothing and falls through
-  to the existing typo guard, which is what keeps that guard useful for genuinely
-  new categories. Before this, typing `land` for the sole Landscaping category
-  prompted "Create new category 'land'?" — the guard firing on exactly the
-  gesture it should have completed.
-- **A split line's category widget is the register's**, built by the same
-  `make_category_combo`. It was a bare combo with no completer at all, so typing
-  habits learned in the register silently did not work one dialog away.
-- **The completer popup matches on the subcategory name too**
-  (`CategoryCompleter` / `category_completions`). Qt's default filter is "starts
-  with" against the whole `Parent:Child` path, so typing a leaf produced an EMPTY
-  popup — nothing begins with `fuel` — and the subcategory was unreachable by its
-  own name. The list is the ordered union across match tiers (exact path, exact
-  leaf, path prefix, leaf prefix, substring), so the highlighted entry is what
-  the fragment almost always means.
-- **Enter/Tab takes the first offering; focus-out does not.** A deliberate commit
-  with the popup on screen resolves an ambiguous fragment to the highlighted
-  entry (`accept_category_text(take_first=True)`). Focus-out chose nothing, so
-  only an unambiguous fragment is accepted — guessing there would categorize a
-  transaction because a click landed elsewhere, the same failure `MoneyDelegate`
-  prevents for amounts.
-- An **ambiguous** fragment reaching commit anyway offers the matches to choose
-  from (`category_matches`), never "create a new category". A real ledger has both
-  `Auto:Fuel` and `Moving:Fuel`, so `fuel` is a question — and offering to create
-  a third category called `fuel` is a wrong answer to a question the user did not
-  ask.
-- **Any dialog raised from a delegate's `setModelData` MUST be deferred** one
-  event-loop turn (`QTimer.singleShot(0, …)`) and parented to the VIEW, never the
-  editor. `setModelData` runs while Qt is destroying the editor; a modal there
-  opens a nested event loop that lets the teardown finish and frees the editor
-  the frame still holds. The observed result was a silent heap corruption
-  (`0xc0000374`) with no Python traceback — the same class of failure
-  `RegisterModel._write` defers its reload to avoid. The deferred write goes
-  through a `QPersistentModelIndex` and drops a row that vanished meanwhile.
-- **Tab selects the field, a click places the caret.** Opening a classification
-  editor (Category, Payee, Memo, Tag) by Tab or the keyboard SELECTS ALL its text,
-  so the first keystroke REPLACES the highlighted value — matching the
-  click-to-edit path, which select-alls too. The ONE case that appends is a mouse
-  click, which lands the caret where the user pressed. The choice is a pure function
-  of the Qt focus reason (`ui/delegates.select_all_on_focus`), applied on focus-in
-  by `_FocusSelectLineEdit` (and, through it, `CategoryLineEdit`), so it is testable
-  headless. Before this, Tabbing into a pending review row's field left the caret at
-  the end and the first key APPENDED — disagreeing with a click on the same field,
-  the same "typed into a pre-filled field without selecting first" hazard §5.11
-  removed for statement dates.
-
-### 5.10b Dates: one format, everywhere
-- A single **date-format preference** (`ui/prefs.date_format`, one of
-  `MM/DD/YYYY`, `DD/MM/YYYY`, `YYYY-MM-DD`) governs every date the user sees or
-  types — registers, dialogs, report filters, printed output and chart axes.
-- Two chokepoints, and no date may bypass them:
-  - `ui/models.fmt_date` — stored ISO → the chosen DISPLAY format.
-  - `ui/models.parse_date` — anything typed (or a QDate) → ISO `YYYY-MM-DD`, or
-    `""` when it is not a date. ISO is always accepted, since it is the storage
-    format and what download scripts return. A two-slash date is genuinely
-    ambiguous (`03/04` is March 4th or April 3rd depending on where you live), so
-    the PREFERENCE decides — that is what the preference is for. Separators may
-    be `/ - .`; two-digit years map into 1970-2069.
-- **Storage, the ledger validators and every download script speak ISO.** The
-  conversion happens once, at the parse chokepoint, never at the call site.
-- **Every date field offers both entry routes**: typing and a calendar picker.
-  They are all built by `ui/delegates.make_date_edit`, read back through
-  `date_edit_iso`. A `QDateEdit` cannot hold a non-date, so nothing downstream
-  has to defend against one.
-- **An unbound date field opens on TODAY and is typeable.** With no initial value
-  `make_date_edit` sets the widget to the current date, never the Qt sentinel
-  minimum (1752-09-14) — which rendered as blank AND refused keystrokes, so a
-  field defaulted to it looked broken. A `blank_ok` field also opens on today; the
-  sentinel is reached only when the user clears the field, which `date_edit_iso`
-  reports as `""`. The one deliberate exception is a field that must be blank ON
-  OPEN — a date FILTER, where today would hide all history — which opts in with
-  `setDate(edit.minimumDate())` after building; an ENTRY field never does.
-- Changing the preference **reaches windows already open**:
-  `ui/delegates.refresh_date_format` re-stamps every date editor under the main
-  window, and displayed dates re-render through `fmt_date`.
-- This was the inconsistency the preference was supposed to remove. Each site had
-  hardcoded its own answer — the register editor said `MM/dd/yyyy` while report
-  filters, scheduled payments, the reconcile setup and the download date range
-  all said `yyyy-MM-dd` — and the transaction dialog, the investment dialog and
-  the loan wizard took dates as FREE TEXT that only accepted ISO, with no picker
-  at all. Choosing `DD/MM/YYYY` changed the register and nothing else.
-- **Tabular date cells follow the preference too.** After the loan wizard's scalar
-  date fields adopted `make_date_edit`, its rate-history and extra-amount TABLES
-  still carried each effective date as raw ISO text in a bare `QTableWidgetItem`,
-  bypassing both chokepoints. Every effective-date cell is now a `make_date_edit`
-  editor (calendar-pickable, in the chosen format), read back through
-  `date_edit_iso`; storage and the amortization domain stay ISO.
-- **The new-account dialog's opening date is a date editor too.** Its optional
-  opening-date field was the last holdout — a bare `QLineEdit` with a hardcoded
-  `YYYY-MM-DD` placeholder read raw, so it ignored the preference and only accepted
-  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso`, like
-  the reconcile setup: the DISPLAY honors the setting while the stored/returned
-  value stays ISO `YYYY-MM-DD`. It **opens on today** and is immediately typeable;
-  the first `make_date_edit(blank_ok=True)` port pinned it to the sentinel minimum,
-  which rendered blank and refused input, so the field looked broken. `blank_ok` is
-  retained only so the user can clear the field back to `None`; the visible default
-  is today.
+Code: `mammon/ledger.py`, `mammon/ui/reconcile_dialog.py`.
 
 ### 5.11 Reconcile against a statement
 - Two-pane workspace (debits left, credits right) after a setup dialog that
@@ -2969,6 +3154,7 @@ money movement.
   transaction id, so a reopened reconcile updates that charge rather than posting
   a duplicate.
 
+
 ### 5.11a Audit log of changes to reconciled transactions
 A reconciled transaction should rarely be changed. Once a row is locked in
 against a statement, editing its amount or date, un-reconciling it, or deleting
@@ -2995,6 +3181,718 @@ per-account basis, to make that class of problem easy to diagnose after the fact
   first). The viewer is a strictly read-only dialog reachable from the account's
   Details window ("Reconciled change log…"); like all of `ui/` it holds no SQL
   and no money logic, rendering the stored strings as-is.
+
+
+### 5.11b Reconciling SHARE balances in investment accounts
+**The share balance is to a security what the cash balance is to a bank
+account** (user-stated), so every investment account gets a reconcile of its own,
+per security, against the statement's share counts. The case that forces it: a
+401(k) holding the plan's own internal funds has **no ticker** (`ticker_of`
+returns "" — Compartment D), so no quote and no downloaded share count exist, and
+the statement's share figure is the ONLY truth available. Accurate share balances
+are a problem for listed securities too; this is how they are asserted rather
+than assumed.
+
+- **Scope: quantities, not value.** A plan statement prints, per fund, starting
+  and ending shares, starting and ending price, and starting and ending value.
+  The share reconciliation needs only the **first pair**; the prices are carried
+  in the draft for the dialog's value columns and are never part of the
+  arithmetic. What the user clears is **every transaction that changes the number
+  of shares** for that security — acquisitions, disposals, short legs and splits
+  (`investments.is_quantity_action`). A Div/IntInc/RtrnCap row moves cash or
+  basis only and never appears as a line; a voided row is out of the share math
+  (5.8-series void convention).
+- **The shapes mirror the cash reconcile one-for-one**, deliberately, so the two
+  cannot drift: `share_reconcile_summary` / `finish_share_reconciliation` /
+  `get`-`save`-`clear_share_reconcile_draft` against
+  `ledger.reconcile_summary` / `finish_reconciliation` / the cash draft
+  functions. Per-row `cleared` and `reconciled` flags live on
+  `investment_transactions`; a finished period is a `share_reconciliations` row
+  keyed `(account_id, symbol, statement_date)`; an unfinished one persists in
+  `share_reconcile_drafts`, keyed per `(account, security)` (schema v65,
+  Section 4). Quantities are **Decimal-encoded TEXT** in and out, never floats.
+  **`mammon/investments.py` is the only writer** — no second write path.
+- Like the bank reconcile, no start date is asked for: the window is everything
+  not yet reconciled through the statement date, and the same bound applies to
+  the summary and to the UPDATE that stamps rows, so the set that zeroed the
+  difference is exactly the set that gets locked. `prior_qty` comes from the
+  already-reconciled rows; a typed statement starting count is accepted as an
+  override (`starting_qty`) for a security whose earlier history was never
+  entered. Statement dates are ISO and validated, never free text.
+- **A SPLIT rescales the running balance; it is not a share delta.** Summing
+  buys and transfers in, minus sells and transfers out, is wrong across a split
+  by the whole ratio. On the split's date the running share balance is
+  multiplied by M/N and the replay continues with the later transactions. This
+  reuses the **existing `StkSplit` action** and the same exact-Fraction
+  `investments.apply_split` the holdings replay uses (Compartment D, split_num /
+  split_den, migration 34) — there is no new action and no second definition of
+  a split, so a reconciliation and the Holdings window can never disagree. A
+  split is not a line the user checks off: it is history the statement's share
+  count already reflects, so it is reported separately and stamped along with
+  the cleared lines when the period is finished.
+- **A renamed security is ONE identity, summed BEFORE any difference is
+  reported.** Quicken offered share adjustments that were sometimes enormous,
+  and the usual cause was a security whose name had changed without the earlier
+  transactions being renamed. Mammon has the alias table for that
+  (`security_aliases`, 5.8-series / Compartment D), so every quantity is summed
+  over the canonical symbol AND all of its aliases, via the `resolve_symbol` /
+  `_identity_symbols` chokepoint, before a difference is shown and long before
+  an adjustment is offered. The dialog can show WHICH spellings were summed
+  (`share_identity`), and reconciling under an old spelling resolves to the
+  canonical period.
+- **The adjustment is an ordinary transaction, marked and deletable.** When the
+  stated ending share count still cannot be reached, the remaining gap may be
+  booked as a `ShrsIn`/`ShrsOut` row dated the statement date, with no cash
+  effect, carrying `investments.SHARE_ADJUSTMENT_MARK` on its memo and linked
+  from `share_reconciliations.adjustment_txn_id`, so it stays identifiable
+  forever (`list_share_adjustments`).
+- **The user must be told, up front, what deleting it later means**
+  (`investments.SHARE_ADJUSTMENT_WARNING`, which the UI shows verbatim): they
+  CAN delete the adjustment if the missing shares later turn up, but deleting it
+  does not undo the reconciliation — **the affected period has to be reconciled
+  again by hand**. `delete_share_adjustment` therefore deliberately unwinds
+  nothing else: the rows stay stamped, the `share_reconciliations` row survives
+  as the record that the period was reconciled, and it merely loses its link and
+  gains a note saying the adjustment was removed. A reconcile is a stamped fact
+  about rows; deleting one transaction cannot honestly un-stamp them.
+- Finishing refuses a non-zero difference, exactly as the cash side does, unless
+  an adjustment is booked; finishing the same `(account, security, statement
+  date)` again is idempotent (one row, nothing re-stamped, the adjustment link
+  preserved).
+
+**Where the stated share counts come from: the holdings SNAPSHOT import.**
+Quicken received positions along with the transactions it downloaded; a manual
+download usually cannot. The user can fetch quotes and balances as a CSV, but
+**not in the same file as the transactions** (a webSlinger extraction may
+eventually hit both at once — Compartment L). So a share reconcile needs a
+second, non-transaction import shape:
+
+- **A snapshot is a statement of fact, and NEVER becomes a transaction.**
+  Nothing on this path reaches `importers/core.py`'s insert/dedup path, and
+  re-importing the same statement is a no-op: the price is keyed `(symbol,
+  date)` and the reconcile target `(account, security)`, so there is no history
+  to duplicate. Turning a position line into a trade would invent history that
+  never happened.
+- **Funds match by symbol when the file prints one and BY NAME otherwise**,
+  because a 401(k) export of the plan's internal funds usually has no symbol
+  column at all. Both routes end at the canonical symbol through `securities` /
+  `security_aliases` (so a statement still printing an old fund name lands on
+  the new identity), and a line matching nothing is **reported, never guessed
+  at**.
+- **The snapshot price is recorded** in `price_history` under its own source
+  (`investments.SNAPSHOT_PRICE_SOURCE`). For a tickerless plan fund this is the
+  only price that will ever exist, since no quote feed can price it; where the
+  file prints a market value but no price, the price is derived from
+  value / shares as Decimal, never a float.
+- **Each stated ending count is left in the per-security reconcile draft** —
+  `statement_date`, `ending_qty`, `ending_price` — which is exactly where the
+  dialog opens on it (`investments.snapshot_targets`). Import then reconcile is
+  one sitting with nothing retyped.
+
+**The dialog (`mammon/ui/share_reconcile_dialog.py`).** The cash reconcile
+workspace, multiplied per security, because the answers do not add up to one
+number — missing shares of one fund say nothing about another:
+
+- A top table lists **every security on the account** with the statement's
+  starting and ending share counts (both editable in place, pre-filled from the
+  draft and otherwise from the book quantity), what clearing has explained so
+  far, and the difference still unexplained — green at zero, red otherwise.
+- **One TAB per security** lists only that security's quantity-changing rows.
+  Clicking a row toggles its cleared mark, persisted immediately, so a
+  half-finished reconcile survives closing the window; a reconciled row shows
+  `R` and is not the user's to un-clear, and a split shows as history rather
+  than as a line to check off.
+- Finish reconciles the **current** security's period and leaves the window
+  open, because one statement covers several funds. A residual difference is
+  closed only by an adjustment the user explicitly accepts, and
+  `SHARE_ADJUSTMENT_WARNING` is shown **verbatim in a permanent label on the
+  window** — not only in the prompt that is clicked through once — because what
+  it warns about is discovered years later.
+- 'Import Holdings Snapshot…' runs the import above against this account and
+  adopts the file's statement date. Its modal seams (`confirm_adjustment`,
+  `warn`, `choose_snapshot_file`) are overridable methods, so the whole life
+  cycle is driven headless in tests (Compartment M, headless-modal hazard).
+
+
+## Compartment J. Reports, charts and customization
+
+Read-only aggregations and how they are presented: the shared
+customization bar, chart behaviour, saved filter sets, export and print,
+and budgets.
+
+Code: `mammon/reports/` (pure functions returning plain data),
+`mammon/ui/report_filters.py`, `mammon/ui/widgets.py`.
+
+### 5.9 Reporting
+- Priority: a spending report itemized by category over a selectable time
+  period (month/quarter/year/custom).
+- Then other Quicken-equivalent reports (income vs expense, net worth over
+  time, cash flow, account balances).
+- A chart states the units it is drawn in. The shared price-history canvas
+  (`ui/charts.PriceHistoryCanvas`) takes a `currency` argument from the window
+  that opens it and labels the y axis, the plot title and the dialog title with
+  it, printing a bare `$` on the ticks only for USD; see §5.8 for the rule that
+  the currency is the ACCOUNT's, not the security's.
+
+
+### 5.9c The universal report customization bar
+- ONE control set for every report (`ui/report_filters.ReportFilterBar`, opened
+  by the gear as `CustomizeDialog`): **time range, accounts, categories, and
+  Include hidden accounts**. Every reporting dialog — Spending by Category,
+  Spending Pie / Spending Chart, Income Pie / Income Chart, Itemize, Net Worth
+  Over Time — shows the same bar AND the same Period dropdown; the three chart
+  windows (Net Worth over time, Income by category, Spending by category) were
+  once the odd ones out with no Period dropdown at all, and now host the shared
+  one like the rest.
+- **A check-list is shown only where it filters — and where a report CAN filter,
+  it must.** `ReportSpec.show_accounts` / `show_categories` decide, per report,
+  which of the two lists the gear popup renders; a report whose pure function
+  takes no such argument must leave the flag off rather than offer a control
+  that silently does nothing. The converse is equally binding: a report that
+  groups by category may not withhold the category list. The matrix, which was
+  full of holes and is now complete:
+
+  | Report | Accounts | Categories | Scope |
+  |---|---|---|---|
+  | Itemize by Category | yes | yes (`reports.itemize_tree(top_level_names=…)`) | **both** |
+  | Income by Category (pie) | yes | yes (by name over `reports.income_category_rows`) | **income** |
+  | Spending by Category (pie/chart) | yes | yes | **expense** |
+  | Cash Flow | yes | yes (`reports.cash_flow(top_level_names=…)`) | **both** |
+  | Income vs Expense | yes | yes (`reports.income_expense(top_level_names=…)`) | **both** |
+  | Transactions | yes | yes (`reports.transactions(top_level_names=…)`) | **both** |
+  | Net Worth Over Time | yes | yes (the what-if below) | **expense** |
+  | Account Balances | yes (`reports.account_balances(account_ids=…)`) | no — it does not group by category | — |
+  | By Payee, By Tag, Investment Performance | yes | no — no category grouping | — |
+
+  Each of those `run` functions really consumes `filters.selected_categories()`;
+  a visible check-list that does not reach the pure function is the same bug in
+  a new place. Two consequences of filtering in the reports layer rather than
+  the projector: **Account Balances' total is net worth over exactly the rows
+  shown**, never the whole ledger's, so the table and its total cannot disagree;
+  and **Cash Flow's Transfers section is deliberately left whole** by a category
+  pick, because a transfer carries no category and silencing the section would
+  leave Net claiming money stayed put when it moved. In the Transactions
+  listing, rows with no category — uncategorized entries and transfer legs —
+  match no category filter, so narrowing drops them.
+- **Restricting to a top-level category always includes its sub-categories**
+  (`reports._lines.top_level_ids_for_names`, which expands each named top level
+  through `category_subtree`). "Just my Church spending" must keep every
+  Church:* row, expandable, or the restriction answers a different question than
+  the one asked. **Expansion is skipped when the pick came from the category
+  TREE** (`reports.listing.transactions(expand_subtree=False)`): there a parent
+  can be ticked with one child deliberately unticked, and re-expanding the
+  parent would put the excluded child straight back.
+- **ONE category picker, parameterized by scope.** Category narrowing is
+  available per report with an explicit scope — **expense, income or both**
+  (`report_filters.CATEGORY_KIND_*`, declared per report as
+  `ReportSpec.category_kind` and passed to `CustomizeDialog(category_kind=…)`;
+  the older boolean `show_categories` is kept in step with it, a bare True
+  meaning `both`). There is exactly one builder,
+  `report_filters.category_picker_tree` over `category_types.category_forest`
+  (with `category_picker_names`/`top_level_categories` still answering for the
+  callers that only want the top-level names), and every report —
+  window-driven or chart dialog — consumes it with the scope in the matrix
+  above. Four ad-hoc lists is how this went wrong; adding a fifth is how it
+  comes back.
+  - **The picker is a checkable TREE, not a list of top levels.** A parent
+    expands to its children, to any depth, and every row is individually
+    checkable, because a top-level-only picker cannot say "Taxes:Federal but
+    not Taxes:Property" — which is the ordinary shape of a tax report.
+    Scope still applies at the TOP level only: a subtree is offered exactly
+    when its top level is of the requested kind.
+  - **Checking a parent implies its whole subtree; unticking one child leaves
+    the parent PARTIALLY checked**, read as "this parent's own postings, plus
+    the children still ticked". A parent therefore clears completely only when
+    its own tick is gone — unticking the last child of `Taxes:Federal` must
+    leave Federal partial, or Federal-without-Withholding would be
+    unsayable. The one thing three states cannot express is "my children but
+    not my own postings": ticking a lone child rounds the parent up to ticked,
+    the visible and correctable direction to err in. Propagation is Python on
+    `itemChanged`, not `Qt.ItemIsAutoTristate` (which also makes a user click
+    cycle through partial, and whose offscreen behavior across Qt versions is
+    not something the tests should have to pin).
+  - **The selection travels to the reports as category IDS, at any depth**
+    (`ReportFilterBar.selected_category_ids`, the ticked-or-partial rows).
+    `ledger.rename_category` keeps the id, so a name-keyed filter silently
+    drops a category the moment the user renames it; ids are also the only
+    spelling that can name a single sub-category. Every category-filtered
+    report takes `category_ids=` and really drops an unticked sub-category
+    from the BODY and from its parent's rolled-up total, so the numbers on
+    screen sum to what is shown. `selected_categories()` (top-level names) is
+    kept for the callers that group by top level.
+  - The tree answers `count()`/`item(i)`/`addItem()` over its top-level rows
+    and defaults the column on `text()`/`checkState()`/`setCheckState()`, so
+    everything written against the earlier flat `QListWidget` picker keeps
+    working unchanged. Those three are non-virtual inline wrappers in Qt;
+    the virtual `data()` is deliberately left alone.
+  - **The names come from the ledger's category TREE, never from a report
+    aggregation.** A picker sourced from `reports.spending_by_category` can only
+    ever name money-OUT categories, so income was un-tickable by construction,
+    and it silently dropped any category with no activity in the current range,
+    making a tick vanish when the dates moved. The tree answer includes
+    zero-activity categories and is range-independent; hidden top levels are
+    excepted.
+  - **A top level's side is decided by its ROLLED-UP subtree**, matching how
+    `itemize_tree` picks the section it will render under — otherwise "Rental",
+    whose money all sits on "Rental:Rent", would be offered on the wrong side
+    and the ticked name would never appear where the user looked for it. A
+    declared `categories.type` wins over the derived sign, which is what lets a
+    never-used income category be listed as income at all.
+- **Itemize by Category's picker is scoped `both`**, which for a while it was
+  not: first the reusable report window hardcoded the list off, so Itemize's
+  account picker worked while its category filter was dead; then the list was
+  built from a spending-only source, so the report showed an INCOME section
+  whose categories could not be selected — reported as unacceptable. Restricting
+  to a subset is the point of the report — "a report of just my Church
+  spending", or Rent income plus Landlord expense for a whole rental summary,
+  and the second ask needs both signs. The filter applies BEFORE income/expense
+  classification, so a pick spanning both signs keeps both sections, each still
+  expanding to its sub-categories and their transactions, and an income-only
+  pick renders the INCOME section rather than an empty report. All checked means
+  no filter; an EMPTY pick also means all — for every category-filtered report,
+  through the one `report_window._category_ids` helper, whose `or None` collapses
+  the empty pick — since Clear-all is the first half of "clear, then tick one"
+  and an empty report reads as a broken one.
+- **One look-and-feel across every report.** The affordance is the same
+  everywhere: a shared **Period dropdown** on top beside one enlarged gear
+  tool-button. Its option set (`report_filters.PERIOD_PRESETS`) is the **UNION**
+  of the two families this dropdown has ever offered — the original calendar
+  ranges **This Month, Last Month, This Year, Last Year, Year-to-Date** and the
+  rolling ranges **Last 7 days, Last 30 days, Last 12 months, Last 3 years, Last
+  5 years, Last 10 years, This quarter, Last quarter, Earliest to date** — ending
+  with **Custom**. Ordered shortest span
+  first, widening to the whole ledger. An earlier unification wrongly REPLACED the
+  calendar ranges with only the rolling ones; both families must remain reachable
+  so neither set of habits is broken. A preset re-ranges and refreshes at once;
+  **Custom** opens the gear's `CustomizeDialog` to type an explicit From/To. The
+  rolling and calendar presets delegate to the pure
+  `reports.spending.preset_range`; "Earliest to date" spans the ledger's own
+  bounds. Every report and chart window opens on **Year-to-Date**
+  (`report_filters.PERIOD_DEFAULT`), so a freshly opened report answers "how am I
+  doing this year" without a first trip to the dropdown. **Net Worth Over Time is
+  the one deliberate exception** — it opens on "Earliest to date"
+  (`report_filters.NET_WORTH_PERIOD_DEFAULT`), because a cumulative curve is
+  meaningless over a partial-year slice and a YTD default would lop off decades of
+  history. `report_filters.resolve_period(key, conn, today)` is the one
+  place a key becomes a range (returning `None` for Custom), keeping the date
+  math in the report layer, not the UI. The **saved filter sets** (Save / Recall /
+  Delete) live INSIDE that gear popup too, not on an inline row — range,
+  accounts, categories AND saved sets share the single gear.
+- **Hiding an account EXCLUDES it**, from `ledger.net_worth`, the account bar,
+  and every report by default. That is not merely a display convention: hiding
+  is the only tool Mammon offers for "the records for this account are
+  incomplete, leave it out of my totals" — an employer plan whose internals were
+  never entered carries a balance the ledger cannot justify. Do not make hidden
+  accounts count by default; it was tried, and it silently added a phantom
+  balance to a real net worth.
+- **Include hidden accounts is an opt-in checkbox**, off by default. Ticking it
+  adds hidden accounts to the picker AND to the report. It earns its place on a
+  growth curve: an account zeroed before it was hidden contributes nothing today
+  but held money for years, and leaving it out makes decades of saving look like
+  a recent windfall.
+- Each check-list carries **Mark all** and **Clear all**. Narrowing to one
+  account out of ninety is clear-then-tick-one, so widening back has to be one
+  click rather than ninety. Both are built by `_list_button`, which denies
+  auto-default — see the next point for why that matters.
+- **Enter in the bar means Apply.** A `QPushButton` in a dialog is `autoDefault`,
+  so Return fired the first one in the focus chain — the accounts "Clear all" —
+  and pressing Enter after typing a date wiped every account checkbox. The
+  Clear-all buttons are explicitly not auto-default; Apply is the default button.
+- With hidden accounts excluded, an all-checked picker is a REAL filter, so
+  `selected_account_ids()` returns the explicit visible list rather than `None`.
+  `None` means "no filter", and a report that receives it queries every account —
+  which would have quietly re-included the accounts just excluded.
+- **Net worth accepts account and category filters.** Accounts subset it (a
+  balance belongs to an account). Categories do NOT — a balance carries no
+  category — so unticking one draws a **counterfactual**: net worth as if that
+  spending had never happened, with the cumulative flow added back at each
+  sample so the effect compounds forward. A top-level name reaches its whole
+  subtree (money posts to leaves), split lines count (a split's parent row
+  carries a NULL category), scheduled placeholders do not, and transfers never
+  register as spending since they carry no category. The window titles itself
+  "as if no <categories>" so a what-if curve cannot be mistaken for the real one.
+
+
+### 5.9a Report computations as a tool surface (roadmap item 4)
+The aggregations Quicken ships as windows exist first as pure functions in
+`mammon/reports/`, returning plain dataclasses, so the MCP server (item 3)
+and a future report window compose the same deterministic numbers. Shared
+extraction lives in `reports/_lines.py` and fixes three rules no report may
+drift from: a split is represented by its lines (each inheriting the
+parent's payee/tag), a transfer is excluded unless a report asks for the
+legs whose other side is OUTSIDE its account set, and a scheduled placeholder
+(`scheduled = 1`) is excluded unless asked for. Hidden accounts are left out
+of every report unless asked for (§5.8d). Amounts are SIGNED cents throughout
+(negative = out), so a refund shrinks its expense category rather than
+counting as income.
+
+- `flows.income_expense(start, end, bucket)` -- every category's signed net
+  per month / quarter / year / total, income rows then expense rows, with
+  per-bucket and grand totals. Categories are classified income/expense the
+  way the pies are (`category_types`, by the sign of the whole-ledger net);
+  uncategorized money is one pseudo-row classified by its net in the window.
+  A range yields every bucket it spans, quiet ones included.
+- `flows.cash_flow(start, end)` -- the same over one window, plus a
+  TRANSFERS section when the report covers a subset of accounts: money that
+  went to or came from accounts outside the subset really did move. Over every
+  account that section is empty by construction.
+- `flows.compare_periods(a, b)` -- category nets in period A against period
+  B with the change in cents and percent (percent is None when A is zero).
+- `flows.category_averages(start, end, bucket)` -- per-bucket averages whose
+  divisor is the number of buckets the range spans, quiet ones included, which
+  is the number a budget wants. ROUND_HALF_UP.
+- `balances.account_balances(as_of)` and `balances.balances_over_time(start,
+  end, bucket)` -- valued the way the account bar values accounts
+  (`investments.display_balance`: investments at market), so a report and the
+  bar never disagree by default.
+- `payees.by_payee` / `payees.by_tag` with `direction` out (magnitudes of
+  money out; the default), in, or net; `count` is transactions, not lines.
+  (`payees.by_tag` groups by a row's whole tag string, the single-tag view.)
+  **A payee is billed the WHOLE transaction.** `by_payee` reads collapsed lines
+  (`_lines.signed_lines(split_lines=False)`): a split contributes its parent's
+  own amount, never its legs. Split legs carry no payee of their own, so
+  re-grouping them by payee changes nothing -- except that the shared extraction
+  drops transfer legs, which unbalances the split. That is how a real ledger's
+  paychecks (salary in, tax legs out, a 401(k) deferral transferring away)
+  totalled an employer at $12,000 of withholding for a year in which they had
+  deposited $60,000. The parent's amount is safe to use because
+  `ledger.set_splits` guarantees the legs sum to it. `by_tag` and
+  `tags.spending_by_tag` keep the legs: a tag says what money was FOR, a
+  category-shaped question, and payroll tax is a real expense however the
+  paycheck nets out.
+  **The By Payee window and the `by_payee` MCP tool both default to `net`**, and
+  that amount is SIGNED the way the register is -- negative = money out. A payee
+  on both sides nets: pay someone $200 and take $50 back and they read
+  `-150.00`. The report total is signed too, not a magnitude. Rows still rank by
+  MAGNITUDE, so the biggest mover leads whichever way it points.
+- `tags.spending_by_tag` -- money by FIRST-CLASS tag, same `direction`s, but each
+  line is attributed to EVERY tag it carries (many-per-transaction), so a
+  two-tagged charge counts under both and overlapping tag totals can exceed the
+  grand total. Untagged money groups under `(no tag)`. Surfaced as Reports ▸ By
+  Tag (Window).
+- `listing.transactions(...)` -- the structured cousin of Find: date range,
+  accounts, categories (subtree; a split matches on any line), payee/memo
+  text, tag, absolute amount range, cleared state, transfers on/off, with a
+  `limit` and a `truncated` flag so a tool answer stays bounded.
+
+
+### 5.9b Report windows: export, print, saved filter sets (roadmap item 9)
+The pure computations of §5.9a become on-screen windows through a reusable
+framework (`ui/report_window.ReportWindow`, a modeless `QDialog`) that gives
+every hosted report ONE look-and-feel: the shared **Period dropdown** on top
+(beside the enlarged gear that opens the `ReportFilterBar` as `CustomizeDialog`,
+§5.8d), a plain table below, and Export CSV, Export HTML and Print (PDF) actions.
+The Period dropdown re-ranges the report from a preset (or "Custom", which opens
+the gear); its **Year-to-Date** default (§5.8d) makes the first paint answer "how
+am I doing this year", while Net Worth Over Time alone keeps the whole-ledger
+"Earliest to date" default. Its options are the UNION of the calendar and rolling
+preset families (§5.8d) — no previously offered range was dropped when the rolling
+ones were added. The same dropdown was retrofitted onto the three inline chart windows
+that lacked it (Net Worth over time, Income by category, Spending by category),
+so every window that shows money over a range now offers the identical control.
+It is built by one shared factory (`report_filters.make_period_combo`), used by
+both the generalized window and the inline chart dialogs, so its width is pinned
+wide enough for the longest preset — `Earliest to date` — which the surrounding
+stretch layout otherwise clipped to `Earliest to d...`.
+The **Period selector follows the customization date range**: it is a label as
+well as an input, and always names the range the report is actually using.
+When the user changes the dates inside the
+customization (gear) dialog — or recalls a saved filter set that carries its own
+range — the dropdown re-reads the live From/To dates on Apply and selects the
+preset they equal, or reads **Custom** when they match no preset. The reverse
+lookup is `report_filters.period_for_range(start_iso, end_iso, conn, today)`,
+which walks the same `PERIOD_PRESETS` through the same `resolve_period`, so the
+two directions can never drift apart; `report_filters.sync_period_combo` applies
+it with the combo's signals blocked, because re-entering the selection handler on
+`Custom` would reopen the very dialog that triggered the sync. Both the
+generalized `ReportWindow` and the inline chart dialogs' shared header go through
+it, so every window that shows the dropdown behaves the same way. Dates cross
+this boundary as ISO strings, like every other date in the domain. **Named saved filter sets moved off the old inline row into
+that same gear popup** (`CustomizeDialog.add_saved_filter_row`), so range,
+accounts, categories and saved sets share one affordance. The
+window is a **thin projection**: it holds no SQL and does no money math. It
+calls a report function (e.g. `reports.cash_flow`) with the bar's getters
+(`start_iso`, `end_iso`, `selected_account_ids`, `include_hidden`), projects the
+returned dataclass into display rows, and repaints. Adding a report to the
+framework is writing one pure `*_rows(report) -> list[ReportRow]` projector
+(like `cash_flow_rows`) and one `ReportSpec` (title + a `run` that calls the
+pure function + that projector) — no new window class, no new write path, no
+new money logic. The framework hosts seven reports, each opened from its own
+Reports-menu entry and driven by one shared `ReportWindow`: **Cash Flow**
+(`reports.cash_flow`, whose spec renames the shared first column `Section` ->
+`Direction` — its values are Income / Expense / Transfers / Net, the directions
+money flowed — because Cash Flow alone adds a TRANSFERS section and folds it into
+its Net), **Income vs Expense** (`reports.income_expense`; kept DISTINCT from Cash
+Flow deliberately, not a duplicate — it excludes transfers entirely and its Net is
+income + expense only, so the two answer different questions),
+**Account Balances** (`reports.account_balances`, which reads the "To" date as
+its as-of and honors the account checklist via `account_ids=` — it once hid that
+checklist, because the aggregation took no account filter at all; it is a
+print/export table, so its
+rows are re-ordered to match the LEFT SIDEBAR's account grouping — Banking, Credit
+Card, Investing, Property & Debt (`_SIDEBAR_TYPE_ORDER`, which mirrors
+`widgets._BAR_GROUPS` and a drift-guard test keeps in step), stable within each
+group — and its first column is renamed `Section` -> `Account Type`), **By Payee**
+(`reports.by_payee`, whose spec overrides the shared header with a two-column
+`["Payee", "Net Amount"]` set — **Payee first** — so the payee name has its own
+column instead of riding in the generic Category / Account slot, and the
+always-"Payee" Section column is dropped; the shared `payee_rows` projector is
+unchanged, so By Tag still shows its Section column. The window runs it at
+`direction="net"`, NOT the pure function's `"out"` default: half a household's
+payees pay IN — an employer, a pension, a tenant, a marketplace that both bills
+and remits — and summing one side reported an employer at their withholding
+while summing the other would hide every store. Net signs each payee the way the
+register does, negative = money out, so both read correctly in one column, and
+the header names it; the spec also sets `fit_first_column`, so the Payee column
+opens sized to its widest name rather than truncating long payees), the **Transactions**
+listing (`reports.transactions`, whose spec overrides the shared three-column
+header with an explicit six-column set — Date, Payee, Category / Account, Tag,
+Memo, Amount — via `ReportSpec.columns`, **Date first** so the Date header sits
+over the date value and not over the payee, and the payee is its own column
+instead of being jammed onto the category. Each `ReportRow` from the
+`listing_rows` projector carries a `cells` list, one string per column — the Tag
+and Memo the register already holds surfaced beside the resolved
+Category / Account (`[Other Account]` for a transfer) — that `_row_cells` renders
+verbatim, so the one chokepoint keeps the table, CSV, HTML and PDF in agreement),
+**Itemize by Category** (`reports.itemize_tree`, an expandable drill-down — the
+one hosted report that is a `QTreeWidget` rather than the flat table, flagged by
+`ReportSpec.is_tree`; each INCOME / EXPENSES / TRANSFERS section expands to its
+categories, a category to its sub-categories, and a leaf to the individual dated
+transactions. Its four columns — Category, Date, Payee / Memo, Amount — override
+the shared three-column set via `ReportSpec.columns`, **Category first** so the
+Date header sits over the dates and not over the category names; its spec hides
+the include-hidden toggle because the pure function takes no such flag. The
+`ReportWindow` projects the tree through one pure `itemize_tree_rows(tree)` into a
+depth-tagged `TreeRow` list feeding both the widget — re-nested by a depth stack —
+and the CSV / HTML / PDF export, which flattens it by indenting the Category
+column by depth so the hierarchy survives. Clicking a column header sorts the
+transactions within each open group — Date (2nd key payee), Payee (2nd key date)
+or Amount (2nd key date), a second click on the same column toggling descending
+while the secondary key stays ascending; `itemize_tree_rows` takes the sort as a
+pure argument (`sort_key`/`sort_desc`) and the window re-projects the cached tree
+and re-opens the same groups. TRANSFERS counterparty rows stay in alphabetical
+order UNLESS Amount is the sort key, where they order by their net), and **Investment Performance**
+(`reports.investment_performance`, a consolidated
+per-holding snapshot — cost basis, market value, unrealized/realized gain, %
+return, dividend/interest income and return of capital — valued at prices as of
+the "To" date, with portfolio totals. Its five columns — Account, Ticker, Amount
+(market value), Gain/Loss $, Gain/Loss % — override the shared three via
+`ReportSpec.columns`: the ticker and both gain figures each get their own header
+instead of the account landing under a generic "Section" and the gain being
+buried inside the label. Because it carries three distinct numeric columns and the
+shared layout offers only one trailing money column, each `ReportRow` fills every
+column explicitly through `cells`; `_row_cells` renders a full-length `cells`
+verbatim, so the projector renders the money through the same `fmt_cents`
+chokepoint and the percent — not money — as signed text). The last is a pure read-only assembly
+over `mammon.investments`: it reuses the same `security_positions` replay the
+Holdings window and a security-filtered register read, so the three never
+disagree; `as_of` caps only the valuation price, never the share/cost replay.
+**The Gain/Loss columns are bounded to the resolved period.** Given a `start`
+(the report window always passes the filter bar's From date), each open, priced
+holding's Gain/Loss $ and % are measured over the window as `value_at(To) −
+value_at(From) − net contributions in (From, To]` — buys add capital, sells
+return it, income and reinvestments are not contributions — so `Last 3 years`,
+`Last 5 years` and `Last 10 years` report DIFFERENT gains rather than the same
+inception-to-date figure they all used to show (the start date was previously
+decorative for this report). This period path rewinds the share count to BOTH
+dates (via `investments.holding_values_at` / `net_contributions_by_symbol`),
+unlike the inception path where `as_of` caps only the price. Called with no
+`start` (the `investment_performance` MCP tool, Holdings reconciliation) it stays
+inception-to-date, byte-for-byte as before. The Portfolio **Market Value**
+headline gain is the sum of the per-holding period gains, so it reconciles with
+the line items; the separate lifetime Unrealized / Realized / Dividend / Return
+of Capital total lines are unchanged. Clicking a column header sorts the holdings
+— by period Gain/Loss, ticker, account then ticker (ticker secondary), or
+Gain/Loss % — reusing the exact `sort_key`/`sort_desc` seam the Itemize tree uses
+(`ReportSpec.sortable` names which flat columns sort); a second click toggles
+direction and the Portfolio totals never move.
+
+- **One money chokepoint feeds table, CSV, HTML and PDF.** A `ReportRow`
+  carries `section`, `label`, and `amount` as **signed integer cents** (negative
+  = out) and does no arithmetic; every surface renders that amount through the
+  single `ui/models.fmt_cents` chokepoint, so what is on screen, in the exported
+  file, and on the printed page agree by construction rather than by three
+  parallel formatters drifting apart. Share/price figures, when a report
+  surfaces them, stay Decimal-encoded text per the money conventions.
+- **CSV export is a pure, importable function.** `report_rows_to_csv(rows,
+  columns=COLUMNS) -> str` writes the header (a report's own set — the shared
+  three, By Payee's `Payee,Net Amount`, or Itemize's `Category,Amount`) then one line
+  per row, the amount via
+  `fmt_cents`, using `\n` endings and the `csv` module's quoting so a
+  thousands-separated amount or a comma-bearing category name survives. A single
+  `_row_cells(row, columns)` helper maps a `ReportRow` onto whichever set is in
+  force, so table, CSV, HTML and PDF never drift. `ReportWindow.export_csv_to(
+  path)` is the testable seam — an explicit path, no dialog — that
+  `_export_csv_dialog` calls after the file picker; e.g. a Cash Flow window
+  writes `Direction,Category / Account,Amount` then rows like
+  `Income,Salary,"4,200.00"`, a By Payee window writes `Payee,Net Amount` then rows
+  like `Acme Grocers,150.00`, and an Itemize window writes `Category,Amount`.
+- **HTML/PDF print reuses one renderer.** `report_rows_to_html(rows, title,
+  columns=COLUMNS) -> str` mirrors the CSV writer — same columns, same order, amount via `fmt_cents`,
+  every field HTML-escaped (the analogue of CSV quoting) so a category name with
+  `&` or `<` renders as text — and emits a standalone document whose `title` is
+  both `<title>` and heading. `export_html_to(path)` writes that string;
+  `print_to_pdf(path)` renders it to a PDF. Both are dialog-free seams so the
+  output is verified headless. There is exactly one HTML→document
+  implementation: `ui/printing.py`'s QTextDocument/QPrinter helper
+  (`render_html_to_pdf` for a file, `render_html_to_printer` for a live
+  `QPrintDialog`), which works under the offscreen platform (an offscreen
+  `QApplication` is enough to emit a PDF), so printing needs no physical printer.
+- **Named saved filter sets are a UI display preference, never DB.** Following
+  the `ui/prefs.py` convention, a filter configuration recalled by name lives in
+  QSettings (an INI file in the user's scope) — there is no schema change and
+  nothing is written into `mammon.db`. This spares re-ticking a ninety-account
+  check-list to reproduce a monthly report.
+- **The serializers are pure and QSettings-free.** `report_saved_filters.
+  filter_state_to_dict(bar)` captures the bar's state as a JSON-able dict —
+  `{start, end, include_hidden, account_ids, categories, category_ids}`, where
+  `account_ids` and `categories` are `None` for "no filter" (everything checked)
+  and every list is sorted for a stable blob — and `apply_filter_state(bar,
+  state)` re-applies it. The round-trip is unit-testable on a bare bar without
+  QSettings. Order matters on re-apply: the include-hidden toggle is set BEFORE
+  the account ticks, because flipping it rebuilds the account list (preserving
+  surviving ticks by id), and setting the accounts first would lose them
+  (§5.8d).
+  - **`category_ids` is the authoritative half, and the only one re-applied
+    when a set has any.** It carries the picker's tick at whatever DEPTH the
+    user set it (§5.9c), which names cannot express, and it survives
+    `ledger.rename_category` — which keeps the id, so a name-keyed set silently
+    drops a category the moment the user renames it. The top-level `categories`
+    NAMES are still written beside it so a set stays readable by anything that
+    only understands names.
+  - **Back-compat runs both ways.** A set written before the picker went
+    id-keyed has no `category_ids`, so re-apply falls back to resolving the
+    names (ticking each named top level and its subtree, as ticking a top level
+    has always meant) and the state left behind is id-keyed from then on. In
+    the other direction `category_ids` is OMITTED entirely when the picker is
+    in its no-filter state, so a no-filter set still serializes byte-for-byte
+    as it did before the tree existed. Name resolution deliberately matches on
+    the row TEXT rather than resolving through ids first: a bar built with an
+    explicit `categories=` list may be showing synthesized buckets that are not
+    rows in `categories` at all, and resolving those would tick nothing.
+- **Storage is one JSON blob under one key.** The whole `name -> state` mapping
+  is kept as a single value under `reports/saved_filters` rather than one key per
+  name — QSettings treats `/` in a key as a group separator, so a single blob
+  lets a saved-set name contain any character. `save_filter_set`,
+  `load_filter_set`, `delete_filter_set` and `saved_filter_names` take an
+  injectable QSettings store (the test seam), matching how `ui/prefs.py` is
+  exercised. The name prompt (`ReportWindow._prompt_filter_name`) is an
+  overridable seam so headless tests never block on a modal.
+
+
+### 5.10d Full-ledger export (roadmap item 8)
+- Owning the file is not owning the data unless another program can read it.
+  File ▸ Export Ledger… (`ui/export_dialog.py`, `mammon/export.py`, and
+  `python -m mammon.export` for a terminal) writes the ledger in three open
+  shapes, each for a different need:
+  - **QIF** -- accounts (the account list and a section per account),
+    categories with income/expense, every posted cash transaction with its
+    splits, transfer legs on both sides, cleared/reconciled flags and check
+    numbers, every investment transaction, the security list and the price
+    history. Quicken's conventions: `MM/DD/YYYY` dates, a Buy/Sell/Div amount
+    as a positive magnitude, a stock split as new shares per ten old, `U`
+    beside `T` on every cash record. **The dialect is verified against ground
+    truth, never reasoned about**: `D:\QLite\data` holds Intuit's
+    `QIF_Specification.txt` and 27 years of Quicken's own exports of this very
+    ledger, and every shape here was checked against both. Two things that
+    look wrong are right, and were briefly "fixed" on a guess before the files
+    said otherwise: a split's `L` line echoes the first leg including a
+    bracketed `[Account]` (the spec's own mortgage example is `L[linda]`
+    followed by `S[linda]`), and both sides of a transfer are written. What
+    was genuinely wrong: a cash row on an INVESTMENT account must be an
+    investment record -- an `XIn`/`XOut` for a transfer leg with the
+    counter-account bracketed and a `$` amount line, a `Cash` line with its
+    category otherwise -- never a bank-style record, which carries no action
+    code and is malformed inside `!Type:Invst`. Quicken read the 401(k) side
+    of a paycheck written that way as a bare transfer and, on matching the
+    pair, kept the transfer and dropped the paycheck's whole split. (The spec
+    also documents `!Option:AllXfr`, placed right after the top header, which
+    forces Quicken to import all transfers regardless of its Ignore Transfers
+    setting; not written today.) **The migration is one-way, by decision
+    (2026-09-02).** The file is right and Quicken still cannot read it back:
+    its QIF import applies transfer detection but NOT inside a split, so it
+    lifts the transfer line out of a split and files it separately -- a
+    paycheck arrives as nothing but its 401(k) deferral, a mortgage payment as
+    nothing but its principal. This is a longstanding Quicken limitation,
+    reported across versions and confirmed in its own community; 2017 is
+    affected, and later versions dropped nearly all QIF import processing
+    EXCEPT the transfer detection that causes it. Mammon will not contort the
+    format to suit it -- writing transfer legs as ordinary categories would
+    survive the import but silently sever every transfer. Bring a ledger to
+    Mammon; do not plan on taking it back to Quicken. The
+    measure of completeness is the **round trip**: importing the file into an
+    empty Mammon database reproduces every balance, split leg, holding and
+    price (`test_export.py`). What QIF cannot carry stays behind, and the
+    dialog says so: tags, loan setups, scheduled payments, learned rules, and
+    the exact ratio of an odd split (4:3 is rounded).
+  - **JSON** -- every table, every row, exactly as stored, under the schema
+    version: the complete ledger, nothing interpreted so nothing lost. The
+    identifying columns (account numbers, bank URLs, download settings) are
+    blanked unless asked for, since sharing the ledger is the common case and
+    moving it to another machine the rare one; the file records which it was.
+  - **CSV** -- one register per account into a folder, with the running
+    balance (the balance on that date even when a date range narrows the
+    rows) and each split's legs in the last column.
+- Pending pre-entries (`scheduled=1`) are placeholders, not history, and are
+  left out of QIF and CSV; JSON has them like everything else.
+- **One file, or one per year.** The default is one QIF for the whole ledger;
+  Mammon has no trouble writing or reading it. Quicken could not WRITE its
+  whole ledger as one QIF (the migration had to be exported a year at a
+  time); whether it reads one large file is untested, so the dialog and
+  `--by-year` offer `<name>-YYYY.qif` per year of activity as a fallback. Each
+  yearly file stands alone (account list, categories, securities, that year's
+  prices and transactions), only the first carries the opening balances, and
+  an account with nothing that year has no section in it. Importing the set
+  in date order into an empty database reproduces the ledger exactly as the
+  single file does (`test_export.py`).
+- Two things the round trip taught the importer, which apply to any Quicken
+  file too. An account's opening balance travels as a transfer to the account
+  itself payee'd "Opening Balance"; into an account holding nothing from
+  before that import it now becomes the account's opening balance
+  (`ledger.set_opening_balance`) rather than a row -- but a ledger built under
+  the older reading, with the opening balance as a +row, re-imports exactly as
+  before, since the row dedups against itself. And the `!Type:Cat` list is
+  read (`QifExtras.categories`): a category is created if missing and given
+  its income/expense kind when it has none, never overriding a kind already
+  set. The exported security list names each security by the text its
+  transactions use, because that is how the importer keys `!Type:Prices`
+  quotes; the descriptive name lives in the JSON export.
+- **Downloads merge into placeholders** (`importers/core.py`). A funding-side
+  loan pre-entry merges with the funder's debit on amount within the loan
+  match window, re-deriving the split for the actual amount and clearing the
+  pending flag on both legs; a plain pre-entry from a definition (a bill, a
+  paycheck, a transfer leg) merges on exact amount within 7 days
+  (`scheduled.find_matching_placeholder`), keeping the definition's own payee
+  and category. Before this only loan-register placeholders merged, so every
+  other pre-entry became a duplicate the moment the real row downloaded.
+- The projection follows the money the same way: with a funder known, the
+  whole payment leaves the funder and only the principal reaches the loan.
+- **Financial Calendar** (the register area's own page, shown at startup and
+  again from View ▸ Financial Calendar): the same projection laid out as a
+  month grid, Sunday first, each day listing its events (a dot marks one not
+  yet entered) and its end-of-day balance; past days show what was entered,
+  days from today on the projection; Prev/Next step months. It is a PAGE of the
+  register stack rather than a modal -- it is what the window opens on, it
+  survives account switches, and a register can be opened over it and the
+  calendar returned to without losing the month. A write elsewhere marks it
+  stale and it redraws when next shown, so edits never pay for a projection
+  nobody is looking at.
+- **Spending trend chart** (below the calendar on the same page): a bar chart of
+  total money-out per month over the trailing twelve months ending with the
+  month on screen, so stepping the calendar walks the chart with it. The data is
+  a pure read-only aggregation, `reports.charts.spending_by_period` — money-OUT
+  magnitude in integer cents per calendar bucket, transfers excluded (moving
+  your own money is not spending), splits honored, scheduled placeholders left
+  out, quiet months zero-filled — with no SQL or money logic in the Qt layer
+  (`ui/charts.SpendingBarCanvas` only renders it). **Its value axis does not
+  start at zero**: it auto-scales to the data's own min–max with a little
+  padding, holding the lower bound strictly above zero while every value is
+  positive. On a real ledger each month's spending sits in the thousands and the
+  month-to-month change worth seeing is only hundreds; a zero-based axis would
+  flatten every bar to the same height and hide exactly that swing. matplotlib
+  is imported lazily and a draw failure degrades to no chart, never a crash of
+  the home page.
+
 
 ### 5.12 Budgets (roadmap item 6)
 Named per-category monthly spending targets, so "did I overspend Groceries in
@@ -3093,73 +3991,397 @@ reached from **Tools ▸ Budgets…**. Budgets are app-generated and never impor
   the new-budget name prompt is an overridable seam, per the app's date and
   headless-modal conventions.
 
-## 6. Import strategy (Quicken 2017 -> Mammon)
 
-### 6.1 Can we read Quicken's native file directly? (answering Q3)
-User direction: TRY BOTH a direct-from-Quicken read and the QIF export path,
-and let whichever reconciles win.
-- Direct read (spike): MoneyDance can "import from Quicken", which is evidence a
-  usable path exists, so we will spike it. Caveat to verify: MoneyDance's Quicken
-  import is (as far as is publicly documented) driven by Quicken EXPORT formats
-  (QIF/QMTF), not a raw read of the binary .QDF. The .QDF (plus auxiliary
-  .QEL/.QSD/.QPH) is a proprietary, undocumented compound-document container with
-  no public spec or maintained parser, so a raw-QDF read is high-risk for a
-  40-year archive. The spike's job is to confirm what actually works on the
-  user's real file before committing.
-- QIF export (workhorse): high probability of covering the full 40-year file;
-  Quicken now exports all account types to QIF. This is the reliable path and the
-  default the parser is built against.
-- Decision rule: build the QIF importer first, run the direct-read spike in
-  parallel, and keep whichever reconciles per account (Section 6.2 acceptance).
+## Compartment K. Database, backups and encryption
 
-### 6.2 Recommended path: export from Quicken, import into Mammon
-Quicken can export its own data; we import that. Options and their limits:
-- QIF (Quicken Interchange Format): Quicken can now export ALL account types to
-  QIF. Best coverage for a full-history dump, BUT: transfers appear on both
-  accounts (must dedup the mirror), investment transactions can be lossy, and it
-  is single-currency per file. We will handle transfer-dedup and investment
-  quirks explicitly.
-- QXF (Quicken Transfer Format): Quicken's own migration format, cleaner for
-  cash/categories/scheduled txns, BUT does NOT reliably carry investment or
-  business accounts - so it cannot be the whole story for a 40-year file with
-  investments.
-- Plan: use QIF for the bulk one-time migration (all cash + investment
-  accounts), treat investment accounts with extra care, and reconcile the
-  resulting Mammon balances against Quicken's reported balances per account as
-  the acceptance test. If specific accounts import poorly via QIF, fall back to
-  a per-account QXF or CSV export for those.
-- User to provide a representative sample export (a few accounts incl. one
-  investment) so the parser is built and validated against real data.
+### 5.8x Journal mode and durability (WAL)
 
-### 6.3 Ongoing import formats
-- QFX/OFX: the standard bank/CC/investment download format (SGML/XML). Direct
-  parser -> normalized records. Preferred for institutions that offer it.
-- CSV: per-institution CSV (e.g. Fidelity) where QFX is unavailable.
-- Crypto CSV: a block-explorer by-address native-coin export (Etherscan shape)
-  imported onto a `type='crypto'` wallet-account via its own parser + core
-  (`importers/crypto_csv` + `importers/crypto_core`), with the on-chain `tx_hash`
-  as the exact-dedup key. See Section 5.8i for the import rules (gas attribution,
-  historical FMV, own-wallet transfer detection).
-- JSON: canonical schema for webSlinger-scraped sites (Section 7.2).
+Every connection is opened in **WAL** (`journal_mode=WAL`) with
+`synchronous=NORMAL`, set in `db.connect` -- the one place a connection is ever
+opened, so the MCP server and the backup stager inherit it.
 
-### 6.4 Normalized import record (all parsers converge here)
-Cash transaction:
-```
-{ "external_account": "<institution account id or name>",
-  "date": "YYYY-MM-DD",
-  "amount_cents": -12345,           # signed; negative = money out
-  "payee": "SAFEWAY #123",
-  "memo": "",
-  "category": "Groceries",          # optional; auto-categorize fills if absent
-  "check_number": "",
-  "fitid": "<unique id from source, for dedup>",
-  "type": "" }
-```
-Investment transaction adds: action, symbol, quantity, price, commission.
+This is a measured decision. The write path commits once per ROW
+(`ledger.add_transaction` commits, and the checkpoint cascade it triggers commits
+again), so importing one 1.1 MB yearly Quicken QIF issued about 2,700 commits and
+spent 79% of its wall clock inside `commit()` on an encrypted SQLCipher file --
+46s for a single file, which put a 32-file full-history migration into the tens of
+minutes. Under WAL a commit appends to a log rather than rewriting and fsyncing a
+rollback journal: the same import measured 5.68s -> 0.40s on a fresh ledger and
+1.63s -> 0.31s on one already carrying history. Batching the commits instead would
+have meant touching some 84 commit sites across `ledger`, `investments`,
+`import_review`, `crypto` and `importers/core`; WAL captures most of the win from
+one place and leaves `mammon.ledger` the sole writer, untouched.
 
-## 7. Download / institution list (Q4)
+WAL is safe with everything that copies a Mammon database, and that was checked
+before enabling it:
 
-### 7.1 Institutions to support
+- `backup.create_backup` uses SQLite's **online backup API** (`conn.backup`),
+  which reads through the WAL and writes a fully checkpointed standalone file; the
+  incremental page-delta diff then reads that *staged* copy, never the live
+  database. A backup that copied only the `.db` file would instead have captured a
+  stale ledger -- the specific trap WAL sets.
+- `encryption` converts through `ATTACH` + `sqlcipher_export()` from an open
+  connection, so it too reads committed data through the WAL.
+- WAL leaves transient `<db>-wal` and `<db>-shm` files beside the database between
+  commits; a clean close checkpoints and removes them.
+
+**Durability is split from the journal mode, because only one of the two costs
+anything.** WAL is permanent and free -- it cannot lose a commit and cannot corrupt
+the file. `synchronous` is the setting that trades safety for speed, so:
+
+- **At rest: `synchronous=FULL`** (`db.connect`). Every commit is forced to disk
+  before it returns, so nothing the user types by hand can be lost. This is the
+  right default for a ledger keyed in a transaction at a time.
+- **During a bulk import: `synchronous=NORMAL`**, for the duration only, via the
+  `db.bulk_write(conn)` context manager wrapped around `importers.core`'s
+  `import_records` -- the one database-facing choke point every file import passes
+  through. Under NORMAL a power loss can lose the most recent commits, which is
+  acceptable here and nowhere else: an import's source file is still on disk, so
+  the remedy is to run it again. `bulk_write` restores the PRIOR value rather than
+  assuming FULL, so nesting cannot leak a relaxed setting, and the restore is in a
+  `finally` so a failed import does not leave the session running without
+  durability.
+
+`test_db.py` pins all of it: the journal mode (a silent fall back to the rollback
+journal is a 5-14x slowdown with no other symptom), FULL at rest, NORMAL inside the
+scope, no leak on nesting or on an exception, that a real import runs inside the
+scope and hands the connection back strict, and that a backup taken with rows still
+resident in the WAL restores a complete ledger.
+
+The canonical schema, how it migrates, how balances stay fast over 40
+years, and how the file is snapshotted. The database is one SQLite
+file the user owns.
+
+Encryption is optional, off by default, and documented separately in
+`docs/encryption.md` (SQLCipher via `sqlcipher3`: what it uses, where
+the key lives, setting/changing/removing a password, what it means for
+backups and for the MCP server). README.md points users at that file,
+so it stays where it is rather than folding in here.
+
+Code: `mammon/db.py` (schema + migrations only, no business logic),
+`mammon/backup.py`, `mammon/paths.py`.
+
+### 4. Data model (canonical schema)
+One SQLite database. Core tables:
+
+- accounts(id, name, type[checking|savings|credit|cash|investment|asset|liability],
+  currency, opening_balance, opening_date, institution, note, closed_flag) -
+  `currency` is the account's native ISO 4217 code (TEXT NOT NULL DEFAULT 'USD',
+  the base), chosen at creation and treated as immutable thereafter (see 5.4a).
+- categories(id, name, parent_id, type[income|expense], hidden) - hierarchical,
+  Quicken-style "Parent:Child".
+- payees(id, name, normalized_name) - for matching/auto-fill.
+- transactions(id, account_id, date, num, payee, category_id, memo, tag,
+  amount, cleared, reconciled, transfer_account_id,
+  transfer_pair_id, import_id, fitid, created_at) - `tag` is a normalized,
+  comma-joined CACHE of the row's first-class tags (see `tags` below), not an
+  independent field.
+- splits(id, transaction_id, category_id, amount, memo, tag_id) - a transaction
+  split across multiple categories. `tag_id` is the LEG's own tag (v54): Quicken
+  tags a split leg to attribute part of one payment to a project, and folding
+  those onto the parent would credit the whole payment to every tag in the
+  split. A leg carries at most one tag, which is all QIF can express.
+- tags(id, name[UNIQUE, COLLATE NOCASE], color, description) /
+  transaction_tags(transaction_id,
+  tag_id, PRIMARY KEY(transaction_id, tag_id)) - first-class,
+  MANY-tags-per-transaction (schema v45). The junction is the AUTHORITATIVE store;
+  `transactions.tag` is kept as a normalized comma-joined cache of a row's tag
+  names so the register cell, the global Find and the report line loader keep
+  reading one plain column. `mammon/ledger` is the SOLE writer of both, in
+  lockstep (`set_tags` / `set_tags_text` rebuild the junction, then recompute the
+  cache from it). Tags are PER-LEG: a transfer's mirror is never tagged from its
+  other side, so net worth never double-counts. `ON DELETE CASCADE` retires a
+  deleted transaction's (and both transfer legs') tag links. `name` collates
+  NOCASE, so "Home" and "home" are one tag. The legacy single free-text `tag`
+  (schema v2) is migrated forward, one tag per row. App-entered/derived, never
+  imported.
+- balance_checkpoints(account_id, year, balance) - fast running balances.
+- import_mappings(id, payee_pattern, mapped_payee, mapped_category_id, source,
+  hit_count) - learned payee -> category for auto-categorization.
+- category_rules(id, keyword, category_id, match_count, account_id,
+  amount_min_cents, amount_max_cents, memo_contains, created_at, updated_at) /
+  transfer_rules(id, keyword, transfer_account_id, match_count, account_id,
+  amount_min_cents, amount_max_cents, memo_contains, ...) - learned
+  keyword -> category and keyword -> account rules, keyed on a distinguishing
+  UPPER-CASED token pulled from raw statement text. The last four columns are
+  OPTIONAL, NULLABLE conditions (roadmap item 10, schema v40) that narrow WHEN a
+  rule fires: an account scope, an inclusive SIGNED-cent amount range
+  (amount_min_cents .. amount_max_cents), and a case-insensitive memo substring.
+  App-learned from the user's corrections, never imported.
+- imports(id, provider, source_format, file_hash, filename, imported_at, status,
+  counts) - audit of each import run + dedup at file level.
+- transaction_matches(id, imported_txn_id, existing_txn_id, score, approved) -
+  fuzzy dedup review on import.
+- holdings(id, account_id, symbol, name, quantity, cost_basis) - investment
+  positions.
+- price_history(id, symbol, date, close_price, source) - per-holding quotes.
+- asset_values(id, account_id, date, value_cents, source, note,
+  UNIQUE(account_id, date)) - the dated MARKET-VALUE series for a non-investment
+  `asset` account (schema v42), shaped like `price_history` is for securities and
+  kept separate from the account's ledger balance (its cost basis). `value_cents`
+  is signed integer cents; `date` is ISO YYYY-MM-DD; `source` distinguishes a
+  hand-entered `manual` value from a fetched `zillow` one. Net worth reads the
+  LATEST value on or before the as-of date through `investments.display_balance`.
+  Written only by `mammon/asset_values.py`; the zEstimate wiring is 5.8e.
+- investment_transactions(id, account_id, date, action[Buy|Sell|Div|ReinvDiv|
+  IntInc|...], symbol, quantity, price, amount, commission, memo) - lot-level
+  investment activity (kept distinct from cash transactions).
+- crypto_transactions(id, account_id, date, action[BUY|SELL|SWAP_OUT|SWAP_IN|
+  TRANSFER_OUT|TRANSFER_IN|SEND|RECEIVE|REWARD|INTEREST|AIRDROP|MINING|FEE|FORK],
+  symbol, quantity, price, amount, basis, fee_symbol, fee_quantity, fee_amount,
+  transfer_account_id, transfer_pair_id, swap_group_id, tx_hash, memo, import_id,
+  fitid, created_at) - the event log for a cryptocurrency wallet-account (account
+  type 'crypto'), one row per single-asset delta (schema v51). Kept distinct from
+  both cash `transactions` and equity `investment_transactions`: quantities and
+  per-unit prices are text-encoded Decimal at wei scale (18 decimals), while the
+  fiat that moves is signed integer cents. A wallet-to-wallet move uses the same
+  transfer-mirror model as cash (two legs linked by `transfer_pair_id`), a
+  coin-for-coin swap links its two legs by `swap_group_id`, and `tx_hash` is the
+  on-chain exact-dedup key (fitid's role for chain activity). MAMMON domain layer
+  in mammon/crypto.py, which is the SOLE writer of the crypto_* tables (mirroring
+  investments.py's single-writer discipline); ledger.py stays the only writer of
+  the cash `transactions` table.
+- crypto_holdings(id, account_id, symbol, name, quantity, cost_basis,
+  UNIQUE(account_id, symbol)) - current coin position per (account, symbol), a
+  replay cache like `holdings` (schema v52).
+- crypto_holdings_checkpoints(account_id, year, symbol, quantity, cost_basis,
+  income, realized, ever_held, lots, PRIMARY KEY(account_id, year, symbol)) - the
+  per-(account, year, symbol) replay snapshot, the crypto twin of
+  `holdings_checkpoints` for fast open/scroll (schema v52). `income` is
+  staking/airdrop/mining income to date; `lots` is the JSON lot list.
+- The 'crypto' account type is a DISTINCT `accounts.type` value but is classified
+  INVESTMENT-LIKE for net-worth valuation, sidebar grouping and the allocation
+  pie via a single-source-of-truth `ledger.INVESTMENT_LIKE_TYPES` constant (which
+  every such classification tests membership in, rather than comparing to the
+  "investment" literal). The wallet address reuses the existing `account_number`
+  column (already blanked from the MCP surface); `asset_class = 'crypto'` carries
+  the allocation classification. Crypto quantity arithmetic runs under a raised
+  (>= 40 significant-digit) decimal context, because the Python default 28-digit
+  context can silently drop a wei when summing a large balance -- TEXT storage is
+  exact at any decimal count, so only summation is at risk.
+- reconciliations(id, account_id, statement_date, statement_balance, ...) - the
+  record of COMPLETED reconciliations only.
+- reconciled_change_log(id, account_id, transaction_id, changed_at, operation,
+  field, old_value, new_value) - a per-account audit trail of every change made
+  to an ALREADY-reconciled transaction (schema v63; see 5.11a). Append-only,
+  written only by `mammon/ledger.py` (the sole transaction writer) and otherwise
+  read-only. `transaction_id` carries no foreign key on purpose: after a delete
+  the row it names is gone, and the log entry must outlive it.
+- reconcile_drafts(account_id PK, statement_date, beginning/ending_cents,
+  charges/payments/credits/finance_cents, finance_category, finance_txn_id) -
+  the statement inputs of an UNFINISHED reconcile, one per account (schema v30).
+  A reconcile spans several sittings: the user closes the window to look
+  something up in the register and comes back, and the typed statement figures
+  must survive that. Deleted when finish_reconciliation locks the statement in.
+  finance_txn_id is load-bearing - it is how a reopened reconcile UPDATES the
+  posted finance charge instead of posting a duplicate.
+- loan_params / loan_rates / loan_extras - a liability account's amortization
+  definition (principal, term, rate history, escrow/PMI extras). Drives the loan
+  payment schedule and the principal/interest/escrow split.
+- scheduled_payments(id, account_id, payee, amount, frequency[weekly|biweekly|
+  monthly|quarterly|annual], next_date, category_id, memo, active) - generalized
+  recurring-payment DEFINITIONS for subscriptions, fixed-price utilities,
+  memberships, etc. (schema v16). MAMMON-GENERATED, never imported (see 5.10).
+- budgets(id, name, active) / budget_lines(id, budget_id, category_id, period
+  ['YYYY-MM'], amount_cents, rollover, UNIQUE(budget_id, category_id, period)) -
+  named per-category monthly spending targets (roadmap item 6, schema v39). App-
+  generated, never imported. Actuals are NOT stored: budgeted-vs-actual is
+  derived read-only from transactions via reports/spending.py, so the ledger
+  stays the sole writer. Domain layer in mammon/budgets.py; the Budgets panel
+  (Tools ▸ Budgets…, mammon/ui/budget_widget.py) is a thin projection over it -
+  choose/create a budget, edit per-category monthly targets, and view
+  budgeted/actual/remaining for a month, with no SQL or money logic of its own.
+- allocation_targets(id, name, active, sleeve, the two drift bands) /
+  allocation_target_lines(id, target_id, asset_class, pct, locked) - the named
+  target asset mixes and their per-class weights (roadmap item 7, schema v44).
+  `pct` is Decimal-encoded TEXT, like a share price: a mix is a precise quantity
+  the user typed and float drift in numbers that must total 100 reads as
+  phantom deviation. `locked` (schema v66, `INTEGER NOT NULL DEFAULT 0`) is the
+  per-line hold flag the Target & Drift editor sets; it lives in the database
+  rather than the dialog because "this class is settled" outlives the window
+  that said so, and every later edit redistributes across the unlocked lines
+  only (5.8f). Domain layer in mammon/rebalance.py; no transaction is ever
+  written from it.
+
+Monetary amounts: stored as signed integer CENTS (avoids float rounding).
+Share quantity and per-share price: stored as text-encoded Decimal to preserve
+precision for fractional shares / multi-decimal prices. (Q5 RESOLVED: confirmed.)
+Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
+
+
+### 5.8c Backup scoping (one folder per database)
+- Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
+  the Restore picker opens in the CURRENT database's folder.
+- **Restore refuses a snapshot belonging to a different database.** A snapshot
+  names the ledger it was taken from (`backup.snapshot_db_name`), and
+  `backup.restore_backup` compares that against the file being replaced,
+  raising `ForeignSnapshotError` on a mismatch. The check applies when the
+  target already exists — writing a snapshot out to a NEW file destroys nothing
+  and stays allowed.
+- Why both: a scratch `mammon2.db` was opened for a test, and hours later — from
+  the old shared flat folder — its snapshot was picked to roll back a mistake
+  and overwrote the real ledger. The restore succeeded and produced a valid,
+  completely wrong ledger; the loss was not noticed until accounts looked
+  unfamiliar, and weeks of investment work had to be redone. Folder separation
+  keeps a foreign snapshot out of sight; the name check makes navigating to one
+  insufficient to destroy a ledger. Opening another database is what
+  File ▸ Open Database is for.
+- Nothing already on disk was stranded: `list_backups` reads the per-database
+  folder AND legacy flat snapshots, a delta looks for its baseline in both, and
+  `python -m mammon.backup organize [--dry-run]` moves the old files into place.
+- **Each snapshot carries a "what changed" summary**, so a user choosing among a
+  hundred near-identical one-minute auto-backups can tell them apart — the file
+  name records only the moment and the manual/auto tag. At snapshot time
+  `backup.build_manifest` takes a lightweight, READ-ONLY census of the just-taken
+  copy (total transaction count, and per account: id, name, transaction count,
+  balance in cents, latest date/payee), and `backup.summarize` diffs it against
+  the previous snapshot **of the same tag** to produce one line, e.g.
+  `+3 txns: Checking +3 txns (bal 1,234.56->1,250.00); deleted Visa`. The first
+  snapshot of a tag has no predecessor and reads `baseline / initial`. The
+  manifest is read-only — it never writes the ledger (single-writer rule) — and
+  money stays integer cents, rendered without floats.
+- **The summary is stored WITHOUT changing the restorable bytes.** A delta keeps
+  the manifest+summary as extra keys in its existing JSON header (which is not
+  part of the checksummed image: the recorded `sha256` covers the reconstructed
+  database bytes, never the header, so a rebuilt delta still verifies); a full
+  `.bak` — a plain SQLite file anything can open — gets a `<name>.bak.meta.json`
+  sidecar next to it. Retention (`prune_backups`, `purge_auto_backups`) deletes a
+  sidecar in lockstep with its `.bak`, and `organize_backups` moves it along, so
+  a sidecar never outlives or is orphaned from its snapshot.
+- **Where it surfaces:** `python -m mammon.backup list` appends the summary to
+  each snapshot's line, and the Restore confirm dialog shows the chosen
+  snapshot's summary. The UI reads it through `backup.snapshot_summary` only — no
+  SQL and no money logic live in `ui/`.
+
+
+### Implementation notes
+
+How this compartment is built, and what each shape
+prevents. Moved out of CLAUDE.md 2026-09-11: it is
+reference for whoever works here, not per-call context.
+
+#### Schema migrations
+
+`mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 66 —
+`_V66` added `locked INTEGER NOT NULL DEFAULT 0` to `allocation_target_lines`, see §5.8f).
+**Append a new `_Vn` and add it to the list — never edit an existing migration**, since real
+databases have already applied them. `init_db()` is idempotent and safe on new and existing files.
+
+#### Balance checkpoints
+
+Running balances use per-`(account, year)` rows in `balance_checkpoints` so a 40-year multi-account
+file opens and scrolls fast. Any write that changes history calls `_touch_checkpoints(...)`, which
+cascades a recompute from the earliest year touched forward. `ledger.account_balance` reads through
+the checkpoint path; the full-sum version is retained as the oracle it must match, asserted by
+`test_year_end_snapshots.py`. Investments have the analogous `holdings_checkpoints`.
+
+#### Backups are incremental, by page
+
+`backup.py` writes two kinds of snapshot into `data/backups/<db-file-name>/` — **one folder per
+database**:
+
+- `<db>.<tag>.<stamp>.bak` — a full copy, a plain SQLite file anything can open. Manual backups are
+  always this.
+- `<db>.<tag>.<stamp>.delta` — only the 4 KB pages that differ from the newest full snapshot,
+  gzipped, behind a JSON header naming its baseline and the checksum of the reconstructed file.
+
+Two independent guards keep the 1/minute auto-backup cheap, and both are load-bearing:
+`db_fingerprint` skips the write entirely when nothing changed, and the delta stops the writes that
+*do* happen from copying 12 MB to record a 15 KB change. Measured on the real ledger, a minute of
+work touches ~14 pages of 2,999.
+
+**Each snapshot also carries a "what changed" summary**, because the file name alone (time + tag)
+cannot tell one one-minute auto-backup from the next when picking a restore point. At snapshot time
+`build_manifest` takes a lightweight, READ-ONLY census of the staged copy — per-account transaction
+count, balance in cents, and latest row — and `summarize` diffs it against the previous snapshot
+**of the same tag** (within a tag the timestamp-before-extension name sorts chronologically; across
+tags it does not, so the diff is tag-scoped, and each tag forms its own chain). The first snapshot
+of a tag reads as `baseline / initial`. A delta stashes the manifest+summary as extra keys in its
+JSON header; a full `.bak` (a plain SQLite file with nowhere to put metadata) gets a
+`<name>.bak.meta.json` sidecar. `_describe` (CLI `list`) and the Restore confirm dialog surface the
+summary; the UI reads it through `backup.snapshot_summary` only — no SQL or money logic in `ui/`.
+
+Five invariants:
+
+- **A restore never crosses databases.** `restore_backup` refuses a snapshot whose own
+  `<db-file-name>` prefix disagrees with the file being replaced (`snapshot_db_name` /
+  `check_same_database`), and the Restore picker opens in this database's own folder. This is not
+  hypothetical: a scratch `mammon2.db` snapshot was once restored over the real ledger from the old
+  shared folder, and the result is a perfectly valid, completely wrong ledger — the loss went
+  unnoticed for hours. The check applies when the target EXISTS; writing a snapshot out to a new
+  file destroys nothing and is allowed. Legacy flat snapshots are still listed and restorable;
+  `python -m mammon.backup organize` moves them into their folders.
+
+
+- **Deltas reference the baseline directly, never each other.** No chains — one damaged delta costs
+  one restore point, not every point after it. Growth against a fixed baseline is sublinear, so this
+  costs almost nothing.
+- **Retention must never orphan a baseline — or a sidecar.** `prune_backups` and
+  `purge_auto_backups` hold a full snapshot back past its turn while any surviving delta names it
+  (dropping it is the one way this scheme loses real data), and both delete a full snapshot's
+  `.bak.meta.json` sidecar in lockstep with the `.bak` (as does `organize_backups` when it moves a
+  legacy snapshot into its per-db folder). A sidecar left behind names a snapshot that no longer
+  exists.
+- **A rebuilt delta is checksum-verified** against the hash taken when it was written; a mismatch
+  raises rather than handing back a plausible-looking database. The manifest/summary keys must stay
+  OUT of that hash: the `sha256` is of the reconstructed DB bytes, never of the header, so the added
+  header keys cannot corrupt a restore (regression: `test_backup_summary.py`).
+
+Anything needing a real file from either kind calls `backup.restore_backup(snapshot, out)`.
+`python -m mammon.backup list|verify|restore` does the same from a terminal, so a delta is never a
+dead end without the GUI. Rejected: year/account-scoped backups (SQLite doesn't lay rows out by
+year, and rename-tree/mapping/review changes touch no transaction at all) and an operation log
+(makes backup correctness depend on the code version that replays it, to save megabytes that no
+longer exist).
+
+#### Paths, and why they are the way they are
+
+**`mammon/paths.py` is the only place that decides where data lives.** Never resolve a data path
+anywhere else. Three modules used to answer this separately and the copies drifted: `backup` and
+`download_log` honoured `$MAMMON_DATA_DIR`, `app._resolve_db` did not, so redirecting that variable
+moved the snapshots and the log while leaving the database in the install.
+
+`paths.data_dir()` answers in this order:
+
+1. **`$MAMMON_DATA_DIR`** — wins outright. Tests and alternate installs use it, and it must move
+   the database with everything else.
+2. **A packaged build** (PyInstaller sets `sys.frozen`) — `~/Documents/Mammon`. An installed app
+   cannot write beside itself: `Program Files` is read-only to a standard user, and Windows does not
+   fail cleanly, it redirects the writes into a per-user VirtualStore copy, so the ledger appears to
+   save and then appears to vanish. Documents over `%LOCALAPPDATA%` is deliberate — the whole promise
+   is that the user owns the file, and a file they cannot find is not one they own.
+3. **A source checkout** — `data/` beside the package, resolved from the package location and never
+   from the CWD. Resolving relative to the CWD meant launching from a different directory silently
+   opened a *different*, empty database, and learned rules looked lost.
+
+`--db` is still authoritative and used verbatim, ahead of all of this.
+
+Nothing in `paths.py` creates directories; the callers that write do that, so importing it can never
+leave a stray folder behind. `backup.DEFAULT_BACKUP_DIR` stays a module attribute resolved at import,
+because tests monkeypatch it to redirect snapshots into a tmp dir — that seam is what keeps a test
+run from writing into a real install's data folder. A test run once reached a real ledger and
+migrated it. **Any new default path must go through `paths.py` and be test-overridable**; a test that
+can write outside `tmp_path` will eventually write somewhere that matters.
+
+## Compartment L. Downloads, webSlinger and the MCP server
+
+How transactions arrive from institutions, and the read-only tool surface
+an LLM sees. The app holds NO credentials: login and secrets belong
+entirely to the webSlinger/keyCocoon side.
+
+Code: `mammon/downloads.py`, `mammon/webslinger.py`,
+`mammon/mcp_tools.py`, `mammon/mcp_server.py`.
+
+### 5.7 Download from institutions (see Section 7)
+- Pull transactions from the user's banks, cards, and investment institutions,
+  preferring a direct download format (QFX/OFX/CSV) where the site offers one,
+  and webSlinger scraping -> JSON only where it does not.
+
+
+### 7. Download / institution list (Q4)
+
+#### 7.1 Institutions to support
 There is deliberately NO central institution registry. Each account carries its
 own recorded webSlinger script name (`accounts.download_script`) and that
 script's saved inputs (`accounts.download_config`), both set in Account Details,
@@ -3191,7 +4413,7 @@ already-recorded scripts, which is the intended cost for Mammon users after thei
 institution scripts exist. Mammon itself (ledger, import of files, reports) works
 with no subscription; only the automated download step calls webSlinger.
 
-### 7.2 Utilities (separate from the main Mammon program)
+#### 7.2 Utilities (separate from the main Mammon program)
 A companion utility set (not the core ledger app):
 - Venmo, PayPal: capture the real counterparty. These get their own *account*, so
   money moving through them is an ordinary transfer and the real payee lives on
@@ -3342,7 +4564,7 @@ A companion utility set (not the core ledger app):
   - **Refunds are out of scope** (not on an invoice; handled manually). The
     allocator rejects a credit outright.
 
-### 7.2a Amazon invoice itemization: review integration (phase 2, IMPLEMENTED)
+#### 7.2a Amazon invoice itemization: review integration (phase 2, IMPLEMENTED)
 
 Phase 1 (§7.2) parses an invoice and allocates the split; phase 2 wires that into
 the register's import-review flow (`mammon/import_review.py`, the SOLE review-flow
@@ -3392,7 +4614,7 @@ writer) so the item legs actually reach the ledger. Locked behavior:
   holding no SQL and no money math, and routes accept to the Amazon path by the
   presence of `amazon_alloc` on the row.
 
-### 7.3 The MCP server: asking an LLM about the ledger (roadmap item 3)
+#### 7.3 The MCP server: asking an LLM about the ledger (roadmap item 3)
 - `python -m mammon.mcp_server [--db PATH] [--transport stdio|streamable-http|sse]`
   serves the ledger over the Model Context Protocol. The tool surface is
   `mammon/mcp_tools.py`: plain functions over a connection returning JSON
@@ -3429,7 +4651,13 @@ writer) so the item legs actually reach the ledger. Locked behavior:
   hosted model is a per-user choice; aggregate-first tools keep what it sees
   small. The HTTP transport exists for clients that connect over a local port.
 
-## 8. Non-functional requirements
+
+## Compartment M. Platform, architecture and open items
+
+Non-functional requirements, the resolved technology decisions, and what
+is still open.
+
+### 8. Non-functional requirements
 - Correctness first: automated tests for balances, transfers, and import dedup.
 - Data safety: easy backup (the SQLite file), and an import audit trail so any
   import can be traced and, ideally, undone.
@@ -3438,13 +4666,14 @@ writer) so the item legs actually reach the ledger. Locked behavior:
 - Portable, dependency-light: stdlib + PyQt5 + a small, justified set of
   packages (e.g. yfinance for quotes).
 
-## 9. Architecture
+
+### 9. Architecture
 - mammon/ package: db.py (schema/migrations), domain layer (accounts,
   transactions, transfers, balances), importers/ (qif, ofx, json, csv),
   investments (quotes), reports/, and a UI layer.
 - Clear separation of DB/domain from UI so logic is unit-testable headless.
 
-### 9.1 Language / UI technology (RESOLVED: Python for everything)
+#### 9.1 Language / UI technology (RESOLVED: Python for everything)
 Decision: PYTHON backend AND GUI (PyQt5 desktop). Rationale retained below.
 - Data ownership: Python's sqlite3 reads/writes a real .db file the user owns
   and backs up. A bare .html file is browser-sandboxed (IndexedDB) or must
@@ -3466,7 +4695,8 @@ IMPORTANT: the DB + domain layer (schema, ledger, transfers, importers, quotes)
 is Python in BOTH recommended options, so ledger-core work can proceed before the
 UI skin is chosen. Only the UI task depends on this decision.
 
-## 10. Open items / decisions to confirm
+
+### 10. Open items / decisions to confirm
 - Q5: integer cents + Decimal-text prices/quantities - RESOLVED (confirmed).
 - Language/UI - RESOLVED: Python everywhere, PyQt5 desktop.
 - Direct Quicken read - RESOLVED to "try both" (Section 6.1); QIF is the
@@ -3479,9 +4709,26 @@ UI skin is chosen. Only the UI task depends on this decision.
 - Sample Quicken export (a few accounts incl. one investment) - needed to build
   and validate the QIF importer (Task 5a) and the direct-read spike.
 
-## 11. Project name
+
+### 11. Project name
 RESOLVED: the project is **Mammon**. The name is a deliberate reminder rather
 than a boast -- "you cannot serve God and mammon" -- so the ledger you open every
 day names the thing it is meant to keep in its place. It is short, ownable, and
 carries no vendor echo. The Python package is `mammon`; the default database is
 `data/mammon.db`.
+
+### Implementation notes
+
+#### Configuration
+
+- **The app holds no credentials at all.** Login, MFA, and secret storage belong entirely to the
+  webSlinger/keyCocoon side — the MCP server drives the site using the credentials in the user's own
+  browser session. Nothing on the download path gates on a secret, and no credential vault belongs
+  in this repo. Don't reintroduce one.
+- UI display preferences go to QSettings, never to the database (`ui/prefs.py`). This includes
+  the PER-ACCOUNT one/two-line register layout (`account_view_mode`) and the
+  transaction-accepted sound.
+- Env vars: `MAMMON_WEBSLINGER_MCP_CMD` (MCP launch command), `MAMMON_DATA_DIR`,
+  `MAMMON_DOWNLOAD_LOG`, `MAMMON_ACCEPTANCE_DB` (opt into the real-ledger acceptance tests).
+- `crashlog.py` installs a `sys.excepthook` early in startup because PyQt otherwise swallows
+  exceptions raised inside slots; crashes land in a log next to the database.

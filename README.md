@@ -1,26 +1,28 @@
 # Mammon
 
-A personal-finance ledger for people who want to own their own data.
+An open-source personal-finance ledger for people who want to own their own 
+data.
 
-Mammon is a Python desktop application (PyQt5) with a classic, dense, keyboard-
-friendly account register. Everything it knows lives in one SQLite file on your
-disk — a file you can copy, back up, query, and read with any tool that speaks
-SQL, or encrypt with a password. There is no cloud, no account, and no
-subscription.
+Mammon is a Python desktop application (PyQt5) with a GUI that feels familiar. 
+Everything it knows lives in one SQLite file on your disk — a file you can 
+copy, back up, query, and read with any tool that speaks SQL, or encrypt 
+with a password. There is no cloud, no account, and no subscription.
+
+It's written in Python, so it runs identically in Windows, Linux or MacOs. The
+database is portable between system types.
 
 It exists because financial history outlives the software that recorded it.
 
 ## What it looks like
 
-The register: transfers render as `[Other Account]` rather than a category,
-split transactions collapse to `--Split--`, and a scheduled payment that has not
-posted yet sits greyed at the bottom of the account it will land in.
+The register: Lists transaction with date, payee/payer, category, tags, memo, 
+payment or deposit, reconciliation status, transfers and splits.
 
 ![The Mammon register, dark theme](docs/images/register-dark.png)
 
 The window opens on a financial calendar — a month of what is coming, per
-account, with the projected balance on each day and income against spending
-below it.
+account, with scheduled or predicted spending and the projected balance on each 
+day. Income against spending for last year is shown below it.
 
 ![The financial calendar, dark theme](docs/images/home-dark.png)
 
@@ -28,7 +30,7 @@ Investment accounts get a register of their own, with share quantities at
 `Decimal` precision and a running cash balance beside the share balance. This one
 is in the light theme — the two above are dark. Both ship; pick one under
 **Settings → Display Preferences**, along with the font, the row shading and the
-colour used for negative amounts.
+color used for negative amounts.
 
 ![An investment register, light theme](docs/images/investments-light.png)
 
@@ -38,12 +40,12 @@ The data in them comes from `--demo` (see [Demo data](#demo-data)).
 
 Mammon is the name I used for my financial database for 40 years. I chose it 
 as a continual reminder that money is not my master. 
-Now it is an application you can use to master your finances.
+Now it is an application you can use to master your finances. Enjoy.
 
 ## What it does
 
 - **Register** — per-account ledger with inline editing, splits, running
-  balances, cleared/reconciled flags, and transfers modelled as two linked
+  balances, cleared/reconciled flags, and transfers modeled as two linked
   transactions so totals never double-count.
 - **Import** — QIF, OFX/QFX, CSV, and JSON files can all be imported into the register. 
   Columns are automatically identified and if Mammon can't figure them out it runs 
@@ -54,7 +56,8 @@ Now it is an application you can use to master your finances.
   from your corrections, so the third review needs far less work than the
   first.
 - **Investments** — holdings, cost basis, price history, and account valuation,
-  with share quantities kept at the downloaded precision.
+  and share balance reconcilation, even handling splits and reverse splits. Price
+  history is also corrected for splits and can be downloaded for securities with tickers.
 - **Loans** — amortization with a full interest-rate history, and payments split
   into principal / interest / escrow / other. Auto-recalulated when interest, escrow 
   and payment changes.
@@ -65,16 +68,25 @@ Now it is an application you can use to master your finances.
 - **Multi-currency** — accounts carry their own currency with a dated FX-rate
   store, so net worth reports per currency or totals through FX into one
   presentation currency. Rates are `Decimal` text, never floats.
+- **Cryptocurrency** — two kinds of account, wallet (just the cyrptocurrency, 
+  no cash) and exchanges (multiple coins and/or currencies).
 - **Backups** — an automatic snapshot every minute, stored as only the database
-  pages that changed, so a minute of work costs kilobytes rather than megabytes.
-- **Encryption (optional)** — set a password and the whole file is encrypted with
+  pages that changed, so changes in the current session cost kilobytes rather 
+  than megabytes.
+- **Encryption** — set a password and the whole file is encrypted with
   SQLCipher, backups included. Leave it unset and the file stays plain SQLite.
+- **MCP Server** — give an LLM access to your database and ask it questions
+  about your finances. Generate any kind of report or chart you can conceive of.
 
 ## Importing from Quicken
 
-Quicken may be able to export the whole file at once for small ledgers, but 
-we recommend a **series of one-year QIF exports, imported one at a time in date order**. 
-Export each year from Quicken, then import them oldest first:
+Quicken may be able to export the whole ledger to a single file for small 
+ledgers. But for multi-year ledgers with multiple accounts we recommend a 
+**series of calendar-year QIF exports** (Quicken seems to have trouble 
+with large exports). Mammon can import multiple files all at once.
+Export all the data for each year and use the same name for each file with
+the year appended, e.g. myLedger_2024.qif, myLedger_2025.qif, ..., then
+when importing into Mammon, select the files for all the years at once.
 
 ```
 File → Import Quicken File (QIF)…
@@ -85,13 +97,15 @@ A QIF from Quicken is already curated: its payees and categories come across as
 given and land straight in the register. Mammon does not second-guess data you
 spent years cleaning up.
 
-Order matters because each year builds on the one before it — accounts, opening
-balances and running balances — and because it lets you check what one import
-did before loading the next. Re-importing a year you already loaded is safe:
-duplicates are matched against what is already there.
+Note that the QIF format does not support different currencies — Quicken's export
+carries no currency field at all, so an account created by the import always
+defaults to USD. Rows *do* import into an account that already exists, and that
+account keeps its own currency. So for every non-USD account, create it in Mammon
+first — empty, with the right currency — named **exactly** as it is in Quicken,
+**including capitalization**. Account names are matched exactly: a name differing
+in case silently creates a second, USD account and imports the transactions into 
+that one instead, with no reported error. So be careful.
 
-`docs/qif_import_research.md` covers what Quicken's own export format does and
-does not carry.
 
 ## Install
 
@@ -104,15 +118,26 @@ everything else should follow. Reports from either are welcome.
 From a clone of the repository:
 
 ```
-pip install -r requirements.txt        # PyQt5 and matplotlib: the app itself
+pip install -r requirements.txt        # PyQt5, matplotlib, yfinance: the app itself
 ```
 
-Optional extras, installed as a package from the same clone:
+That is everything: `yfinance` (quotes,FX rates, crypto prices, the asset-mix 
+split), `mcp` (the ledger's read-only LLM tool server), `sqlcipher3` (at-rest 
+encryption) and `pytest`/`pytest-xdist` (the test suite). 
+Every one of them ships wheels for Windows, Linux and macOS, and the heavier 
+imports are lazy, so an offline session never reaches the network.
 
-```
-pip install -e .[mcp,quotes,dev]       # the MCP server, quote download, the tests
-pip install -e .[encryption]           # optional database encryption (SQLCipher)
-```
+**The one optional component is webSlinger**, and it is not a Python package: it
+is a separate MCP automation tool that Mammon launches over stdio to drive your
+own browser. Mammon runs without it — that is a supported way to use it:
+
+* download transactions from your bank yourself and File ▸ Import the files;
+* enter home and asset valuations by hand (Get Value is the automated path);
+* enter share balances by hand.
+
+The download fields in Account Details simply stay empty, and clicking Download
+explains what is missing rather than failing. To enable automation, install
+webSlinger separately and point `$MAMMON_WEBSLINGER_MCP_CMD` at it.
 
 An editable install (`pip install -e .`) also puts `mammon` and `mammon-mcp`
 commands on your path; `python -m mammon.app` from the repository root works
@@ -192,22 +217,26 @@ The register is built to be quick and responsive, even for 30 year ledgers:
 ## Automatic downloads
 
 Mammon can drive your bank's own site through
-[webSlinger](https://webslinger.ai) and pull transactions in. Downloaded rows do
-not enter the register: they land in a review queue below it, classified NEW or
-MATCHING, and wait for you.
+[webSlinger](https://webslinger.ai) and pull transactions in. Downloaded 
+transactions do not enter the register: they land in a review queue below 
+it, just like Importing from a file, classified NEW or MATCHING, and wait 
+for you to accept them.
 
 Mammon holds **no credentials** — login, MFA and secrets belong entirely to the
-webSlinger side, which drives the browser you are already signed in to.
+webSlinger side, which drives your own browser.
 
 Recording a script is a one-time demonstration: you drive your bank once and
-webSlinger replays it after that. Its free plan covers recording, and an
-execution-only tier runs your saved scripts for $2/month with the first month
-free — so you can record everything you need on the free plan and then switch to
+webSlinger replays it after that. webSlinger offers a 30-day free trial and
+an execution-only tier runs your saved scripts for only $20/year. 
+So you can record everything you need on the free plan and then switch to
 execution-only to use them.
 
 A curated community library of institution scripts is planned, with ratings and
 a safety review, so that over time most people will only need to record a script
 for an uncommon institution.
+
+The vision includes other approaches to automatic downloads but depends on
+other people helping out.
 
 ## Ask an LLM about your finances (MCP server)
 
@@ -334,7 +363,7 @@ across to checking. The chart is measuring that hop, not the tenants.
 Which is the argument for the design Mammon pushes everywhere: give the
 intermediary its own account. Then the tenant's payment and the sweep to checking
 are two dated events instead of one blurred one, and the same question gets a
-real answer.
+more accurate answer.
 
 ## Tests
 
@@ -376,7 +405,7 @@ things *and* adds a feature is hard to review and impossible to revert cleanly.
 
 **Ground rules**
 
-- **Tests come with the change.** Every behavioural fix lands with a regression
+- **Tests come with the change.** Every behavioral fix lands with a regression
   test in `mammon/tests/`, named after the module it covers. Run the full suite
   before you open a pull request: `python -m pytest mammon/tests -q`
 - **`mammon/ledger.py` is the only writer of transaction rows.** Importers, the
@@ -390,7 +419,7 @@ things *and* adds a feature is hard to review and impossible to revert cleanly.
   already applied the old ones.
 - **Explain *why* in the module docstring**, not just what. The docstrings here
   carry the reasoning, including which bug the current shape prevents. When you
-  change behaviour, update that reasoning rather than deleting it.
+  change behavior, update that reasoning rather than deleting it.
 - **Never commit financial data.** `data/`, `*.db`, `*.qif`, `*.ofx` and `*.qfx`
   are gitignored. The only exception is `mammon/tests/fixtures/`, which is
   synthetic. No real account numbers, no real names — check your test fixtures.
@@ -404,10 +433,9 @@ through before you write it.
 
 ## Coming soon
 
-- **Cryptocurrency support** — wallets and exchange accounts as first-class
-  holdings, with the same `Decimal` precision the securities path already uses.
-- **Investment Center** — one place for allocation, drift against targets and
-  rebalancing, instead of reaching them through individual accounts.
+- **Investment Center** — one place for allocation, rebalancing to target 
+  investment mixes, and visualization tools, instead of reaching them through 
+  individual accounts or individual reports.
 
 ## Status
 
