@@ -35,6 +35,10 @@ docs/*_plan.md
 # this glob does not untrack them; it keeps NEW design docs, e.g. the crypto redesign,
 # private by default.)
 docs/*_design.md
+# Research/taxonomy working docs are the same kind of artifact: an undecided
+# proposal that quotes the user verbatim, whose public form is an SRD section.
+# Matched by SHAPE for the same reason as the globs above.
+docs/*_taxonomy.md
 
 # Build output: PyInstaller's dist/build, and the icon preview blowups.
 build/
