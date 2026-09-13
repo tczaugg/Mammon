@@ -135,10 +135,30 @@ class IncomeExpenseReport:
 def income_expense(conn, start: str, end: str, *, bucket: str = "month",
                    account_ids: Optional[Iterable[int]] = None,
                    include_hidden: bool = False,
+                   top_level_names: Optional[Iterable[str]] = None,
+                   category_ids: Optional[Iterable[int]] = None,
                    include_scheduled: bool = False) -> IncomeExpenseReport:
     """Every category's signed net per bucket over ``[start, end]``, income
     rows then expense rows, with per-bucket and grand totals. Transfers are
-    excluded (they are neither); a split contributes its lines."""
+    excluded (they are neither); a split contributes its lines.
+
+    ``category_ids`` restricts the report to EXACTLY those categories (``None``
+    = all) -- the customization bar's category tree (SRD 5.9c), which can tick a
+    sub-category on its own. The filter is applied to the finished rows on each
+    row's OWN ``category_id``, so ticking ``Taxes:Federal`` while leaving
+    ``Taxes:Property`` unticked drops the Property row and its money; the picker
+    has already expanded a ticked parent to its subtree, so nothing is expanded
+    here.
+
+    ``top_level_names`` is the older top-level-only form, kept for callers that
+    still hold names; it matches on the row's ``top`` ancestor, so a named top
+    level brings its whole subtree with it. Both may be given and a row must
+    satisfy both.
+
+    Either way the per-bucket totals and Net below are recomputed over exactly
+    what is left. ``Uncategorized`` is not a category at all and so drops out of
+    any narrowed report, which is why the totals of a narrowed report do not add
+    up to the unfiltered one -- they are not meant to."""
     keys = buckets_in(start, end, bucket)
     acct_list = resolve_accounts(conn, account_ids, include_hidden)
     lines = signed_lines(conn, start, end, acct_list, include_scheduled=include_scheduled)
@@ -160,6 +180,13 @@ def income_expense(conn, start: str, end: str, *, bucket: str = "month",
             top = path.split(":")[0]
             typ = types.get(cid, EXPENSE)
         rows.append(FlowRow(cid, path, top, typ, {k: byb.get(k, 0) for k in keys}, total))
+    if top_level_names is not None:
+        wanted = {str(n) for n in top_level_names}
+        rows = [r for r in rows if r.top in wanted]
+    if category_ids is not None:
+        wanted_ids = {int(c) for c in category_ids}
+        rows = [r for r in rows
+                if r.category_id is not None and int(r.category_id) in wanted_ids]
     income = sorted((r for r in rows if r.type == INCOME),
                     key=lambda r: (-r.total, r.path.lower()))
     expense = sorted((r for r in rows if r.type == EXPENSE),
@@ -206,14 +233,26 @@ class CashFlowReport:
 def cash_flow(conn, start: str, end: str, *,
               account_ids: Optional[Iterable[int]] = None,
               include_hidden: bool = False,
+              top_level_names: Optional[Iterable[str]] = None,
+              category_ids: Optional[Iterable[int]] = None,
               include_scheduled: bool = False) -> CashFlowReport:
     """Quicken's Cash Flow: inflows by category, outflows by category, and --
     when the report covers a SUBSET of accounts -- the transfers to and from
     accounts outside that subset, which really did move money out of or into
     it. Over every account the transfers section is empty by construction, so
-    ``net`` is simply what the ledger gained or lost."""
+    ``net`` is simply what the ledger gained or lost.
+
+    ``category_ids`` (and the older ``top_level_names``) narrow the income and
+    expense sections exactly as in :func:`income_expense`, sub-categories
+    included. Neither deliberately touches the transfers section: a transfer
+    carries no category, so a category pick has nothing to say about it, and
+    silencing the section would leave ``net`` claiming money stayed put when it
+    moved."""
     ie = income_expense(conn, start, end, bucket="total", account_ids=account_ids,
-                        include_hidden=include_hidden, include_scheduled=include_scheduled)
+                        include_hidden=include_hidden,
+                        top_level_names=top_level_names,
+                        category_ids=category_ids,
+                        include_scheduled=include_scheduled)
     acct_list = ie.account_ids
     by_acct: dict[int, int] = {}
     for ln in signed_lines(conn, start, end, acct_list, transfers="external",

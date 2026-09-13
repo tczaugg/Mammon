@@ -17,6 +17,7 @@ so init is safe to call on a brand-new file or an existing one.
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3          # type annotations only; see mammon.sqldriver
 from pathlib import Path
 from typing import Optional
@@ -1887,6 +1888,59 @@ CREATE INDEX idx_security_aliases_canonical ON security_aliases(canonical_symbol
 """
 
 
+# 65: share reconciliation (SRD 5.11b). The share balance is to a security what
+# the cash balance is to a bank account, and a 401(k) of untickered internal
+# funds is the case that forces it: no quote source exists, so the statement's
+# share count is the ONLY truth available. This mirrors the cash reconcile
+# shapes exactly -- cleared/reconciled flags on the rows plus a finished-period
+# record and a resumable draft -- one period per (account, security).
+#   * quantities are Decimal-encoded TEXT, never floats (SRD 5.8);
+#   * `symbol` holds the CANONICAL symbol (a renamed security reconciles as one
+#     identity across its security_aliases spellings);
+#   * adjustment_txn_id links the share-adjustment row the user accepted to
+#     close an unexplained gap, so it stays identifiable and deletable. Deleting
+#     it does NOT unwind this row -- the period must then be reconciled by hand.
+# UNIQUE(account_id, symbol, statement_date) is what makes finishing the same
+# period twice an upsert rather than a second, conflicting record.
+_V65 = """
+CREATE TABLE share_reconciliations (
+    id                 INTEGER PRIMARY KEY,
+    account_id         INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol             TEXT NOT NULL,
+    statement_date     TEXT NOT NULL,
+    starting_qty       TEXT NOT NULL,            -- Decimal text
+    ending_qty         TEXT NOT NULL,            -- Decimal text
+    adjustment_txn_id  INTEGER REFERENCES investment_transactions(id) ON DELETE SET NULL,
+    note               TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, symbol, statement_date)
+);
+CREATE INDEX idx_share_recon_account ON share_reconciliations(account_id, symbol);
+CREATE TABLE share_reconcile_drafts (
+    account_id        INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol            TEXT    NOT NULL,
+    statement_date    TEXT    NOT NULL DEFAULT '',
+    starting_qty      TEXT    NOT NULL DEFAULT '',
+    ending_qty        TEXT    NOT NULL DEFAULT '',
+    starting_price    TEXT    NOT NULL DEFAULT '',
+    ending_price      TEXT    NOT NULL DEFAULT '',
+    updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (account_id, symbol)
+);
+ALTER TABLE investment_transactions ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE investment_transactions ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0;
+"""
+
+
+# 66: per-line lock on an allocation target (SRD 5.8f). A target mix must add
+# up to 100, so editing one class has to move the others; the lock is how the
+# user says "this one is settled, take it out of the adjustable pool". It lives
+# on the line rather than in the UI because the decision outlives the dialog.
+_V66 = """
+ALTER TABLE allocation_target_lines ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -1952,6 +2006,8 @@ MIGRATIONS: list[str] = [
     _V62,
     _V63,
     _V64,
+    _V65,
+    _V66,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -1975,7 +2031,82 @@ def connect(path: str | Path, key: Optional[str] = None) -> sqlite3.Connection:
         sqldriver.apply_key(conn, key)
     conn.row_factory = sqldriver.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WRITE-AHEAD LOGGING, and a relaxed fsync to go with it. Measured, not
+    # cosmetic: this codebase commits once per WRITTEN ROW (ledger.add_transaction
+    # commits, then its checkpoint cascade commits again), so importing one 1.1 MB
+    # yearly Quicken QIF issued ~2,700 commits and spent 79% of its wall clock
+    # INSIDE commit() on an encrypted (SQLCipher) file -- 46s for a single file,
+    # putting a 32-file full-history migration into the tens of minutes. In WAL a
+    # commit appends to a log instead of rewriting and fsyncing a rollback
+    # journal: the same import went 5.68s -> 0.40s on a fresh ledger, and
+    # 1.63s -> 0.31s on one that already had history.
+    #
+    # This is safe with everything that copies a Mammon database, which was
+    # verified before turning it on rather than assumed:
+    #   * `backup.create_backup` uses SQLite's ONLINE BACKUP API (conn.backup),
+    #     which reads through the WAL and writes a fully checkpointed, standalone
+    #     file; its page-delta diffing then reads that STAGED copy, never the live
+    #     database. A backup that copied only the .db file WOULD have captured a
+    #     stale ledger -- that is the trap WAL sets, and this code avoids it.
+    #   * `encryption` converts via ATTACH + sqlcipher_export from an OPEN
+    #     connection, so it likewise sees committed data through the WAL.
+    # WAL keeps `<db>-wal` and `<db>-shm` beside the database between commits.
+    # Both are transient, and a clean close checkpoints and removes them.
+    #
+    # Durability is deliberately SPLIT from the journal mode, because the two are
+    # independent and only one of them costs anything. WAL above is free: it
+    # cannot lose a commit and cannot corrupt the file. `synchronous` is the part
+    # that trades safety for speed, so it is set STRICT here and relaxed only for
+    # the duration of a bulk import (see :func:`bulk_write`).
+    #
+    # FULL means every commit is forced to the physical disk before it returns:
+    # nothing the user types can be lost, which is the right default for a ledger
+    # keyed in by hand. NORMAL (what a bulk import switches to) lets the OS flush
+    # in its own time, so a power loss can lose the most recent commits --
+    # acceptable for an import, whose source file is still sitting on disk and can
+    # simply be re-run, and never acceptable for hand entry.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except Exception:
+        # Switching journal mode WRITES to the database, so it cannot be done to
+        # a read-only ledger. Opening one must still work; it simply keeps the
+        # rollback journal. (For ":memory:" the pragma is a no-op that reports
+        # "memory" rather than raising.) This is the one deliberately tolerant
+        # line in this function: the alternative is refusing to open a file the
+        # user can legitimately only read.
+        pass
+    # Per CONNECTION, not a property of the file -- so it must be set on every
+    # open, unlike journal_mode which persists in the database header.
+    conn.execute("PRAGMA synchronous = FULL")
     return conn
+
+
+@contextlib.contextmanager
+def bulk_write(conn):
+    """Relax fsync for a BULK, RE-RUNNABLE write (an import), then restore it.
+
+    Why this is scoped rather than global: `synchronous=FULL` is what guarantees
+    that a transaction the user typed survives a power cut, and that guarantee is
+    worth keeping for every ordinary write. An import is the one case where it
+    buys nothing -- the rows come from a file that is still on disk, so the
+    remedy for a crash mid-import is to run it again, not to recover it -- and
+    where the cost is large, because this codebase commits once per written row
+    (importing one yearly Quicken QIF issued ~2,700 commits; forcing each to
+    disk on an encrypted file took 46s for a single file).
+
+    Restores the PRIOR value rather than assuming FULL, so nesting is safe and an
+    unkeyed/`:memory:`/read-only connection keeps whatever it actually had.
+    NORMAL is safe against corruption under WAL -- only the newest commits are at
+    risk -- which is exactly the trade described in :func:`connect`."""
+    prior = conn.execute("PRAGMA synchronous").fetchone()[0]
+    conn.execute("PRAGMA synchronous = NORMAL")
+    try:
+        yield conn
+    finally:
+        # Numeric form: PRAGMA synchronous reads back as an int (0=OFF, 1=NORMAL,
+        # 2=FULL, 3=EXTRA) and accepts the same, so the exact prior level is
+        # restored without mapping it back through a name.
+        conn.execute(f"PRAGMA synchronous = {int(prior)}")
 
 
 def init_db(path: str | Path, key: Optional[str] = None) -> sqlite3.Connection:

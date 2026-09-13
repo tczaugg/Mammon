@@ -1183,7 +1183,17 @@ def link_as_transfer(conn, txn_id: int, other_account_id: int, *, basis=None):
     row = get_event(conn, txn_id)
     if row is None:
         raise KeyError(f"no crypto transaction {txn_id}")
-    if row["transfer_pair_id"] is not None:
+    # A row is linked when it has EITHER a paired crypto leg or a cash leg.
+    # The cash path (`_link_cash_leg`) sets `transfer_account_id` ALONE -- its
+    # other half lives in `transactions`, so there is no crypto id to pair with
+    # -- so testing only the pair let an already-linked cash row be linked
+    # AGAIN, and every re-link minted another `create_transfer` pair in the
+    # other account while this row stayed single: the bank register grew a
+    # duplicate per attempt with one lone counterparty here. Callers that mean
+    # to RE-target a link (`_write_transfer`, the Amount edit) unlink first,
+    # which clears both columns and lets the link through.
+    if (row["transfer_pair_id"] is not None
+            or row["transfer_account_id"] is not None):
         raise ValueError("this row is already one leg of a transfer")
     if row["swap_group_id"] is not None:
         raise ValueError("a swap leg cannot be re-linked as a transfer")
@@ -1349,9 +1359,29 @@ def _link_cash_leg(conn, row, cash_account_id: int):
     # expressed as the two rows it really is. (The ordinary leg this writes on the
     # crypto account is NOT sleeve cash either: `account_valuation` reads the
     # sleeve, not `ledger.account_balance`.)
-    if amount > 0:                       # proceeds leaving the exchange
+    act = _norm(row["action"])
+    # Which way the money travels is NOT the sign of `amount` alone: a trade and
+    # a cash move mean opposite things by it.
+    #
+    #   A TRADE's cash is CREATED by the trade. `amount` is what the disposal
+    #   realized (+) or the purchase cost (-), so +ve means the exchange now
+    #   holds proceeds and the link says they were wired OUT to the bank
+    #   (crypto -> cash); -ve means the purchase was funded IN from the bank.
+    #
+    #   A DEPOSIT/WITHDRAW's cash is MOVED, not created. `amount` is already the
+    #   sleeve delta of THIS side -- a WITHDRAW is -ve because money left the
+    #   exchange -- and the linked account is simply the other end of that same
+    #   move. So the direction is the MIRROR of the trade rule: a WITHDRAW
+    #   (-ve) is crypto -> cash, a DEPOSIT (+ve) is cash -> crypto.
+    #
+    # Reading the sign the trade way for a cash row put a Coinbase WITHDRAW into
+    # the checking register as a NEGATIVE (Payment column) when the money was
+    # arriving -- a Deposit. `_link_cash_mirror` (crypto <-> crypto) already
+    # negated correctly; this is that same rule for an ordinary cash account.
+    outbound = amount < 0 if act in _CASH_ACTIONS else amount > 0
+    if outbound:                         # money leaving the exchange
         from_id, to_id = int(row["account_id"]), cash_account_id
-    else:                                # a purchase funded from the bank
+    else:                                # money arriving at the exchange
         from_id, to_id = cash_account_id, int(row["account_id"])
     legs = ledger.create_transfer(
         conn, from_id, to_id, row["date"], abs(amount),
@@ -1360,7 +1390,6 @@ def _link_cash_leg(conn, row, cash_account_id: int):
     # is not cosmetic: it is how the register SAYS the proceeds left, so a row
     # reading SELL with a Transfer beside it cannot be mistaken for a sale whose
     # money is still sitting in the account.
-    act = _norm(row["action"])
     updates = {"transfer_account_id": cash_account_id}
     if act in ("SELL", "BUY"):
         updates["action"] = act + "X"
@@ -1422,11 +1451,18 @@ def _unlink_cash_leg(conn, row) -> None:
     # a transfer pointing back here), then deleted through `ledger`, the sole
     # writer of `transactions`. A plain SELECT to locate it is a READ, which the
     # single-writer rule does not restrict.
+    # MAGNITUDE, not the signed amount. A DEPOSIT/WITHDRAW's bank leg carries
+    # the OPPOSITE sign of the crypto row -- that is exactly what
+    # `_link_cash_leg`'s direction rule establishes -- so matching the signed
+    # value found nothing for precisely half the cash links: the row survived
+    # un-deleted while the link was cleared anyway, leaving an orphan in the
+    # bank register that no crypto row claimed. `transfer_targets` matches the
+    # same way, and for the same reason.
     hit = conn.execute(
-        "SELECT id FROM transactions WHERE account_id=? AND date=? AND amount=? "
-        "AND transfer_account_id=? ORDER BY id LIMIT 1",
-        (int(row["transfer_account_id"]), row["date"], int(row["amount"] or 0),
-         int(row["account_id"]))).fetchone()
+        "SELECT id FROM transactions WHERE account_id=? AND date=? "
+        "AND ABS(amount)=? AND transfer_account_id=? ORDER BY id LIMIT 1",
+        (int(row["transfer_account_id"]), row["date"],
+         abs(int(row["amount"] or 0)), int(row["account_id"]))).fetchone()
     if hit is not None:
         # Deleting either leg of a transfer removes both (the mirror model), so
         # this one call clears the crypto account's offsetting row too.
@@ -1439,6 +1475,100 @@ def _unlink_cash_leg(conn, row) -> None:
     _invalidate_holdings_checkpoints_from(conn, row["account_id"], row["date"])
     conn.commit()
     rebuild_holdings(conn, row["account_id"])
+
+
+def transfer_targets(conn, txn_id: int) -> list:
+    """The other side(s) of a crypto row's transfer, as ``(account_id, txn_id)``
+    pairs -- what the register's 'Go to [account]' menu entry needs to navigate.
+    Empty for a row that is not a transfer leg, which is how the menu knows to
+    hide the entry. The id may be ``None``: the target account is still known,
+    so the jump lands on the register even when the exact mirror row is not.
+
+    Two shapes, matching the two ways :func:`link_as_transfer` links:
+
+      1. crypto <-> crypto -- both legs live in ``crypto_transactions`` and are
+         cross-linked by ``transfer_pair_id``, so the mirror id is stored;
+      2. crypto <-> ordinary account -- the cash leg lives in ``transactions``
+         (written by :mod:`mammon.ledger`, the sole writer) and the crypto row
+         keeps only ``transfer_account_id``. There is no id to store, so the
+         mirror is re-located by the shape the link created: same account, date
+         and magnitude, pointing back here. Magnitude, not signed amount: a
+         DEPOSIT/WITHDRAW's cash leg carries the OPPOSITE sign of the crypto
+         row (see :func:`_link_cash_leg`), so matching the signed value would
+         silently find nothing for exactly half the cash links.
+
+    A read, not a write: locating rows is not restricted by the single-writer
+    rule, and keeping it here (not in :mod:`mammon.ui`) keeps the register a
+    thin projection with no SQL of its own."""
+    row = get_event(conn, txn_id)
+    if row is None:
+        return []
+    acct = row["transfer_account_id"]
+    if acct is None:
+        return []
+    pair = row["transfer_pair_id"]
+    if pair is not None:
+        return [(int(acct), int(pair))]
+    hit = conn.execute(
+        "SELECT id FROM transactions WHERE account_id=? AND date=? "
+        "AND ABS(amount)=? AND transfer_account_id=? ORDER BY id LIMIT 1",
+        (int(acct), row["date"], abs(int(row["amount"] or 0)),
+         int(row["account_id"])),
+    ).fetchone()
+    return [(int(acct), int(hit[0]) if hit is not None else None)]
+
+
+def crypto_txn_for_cash_leg(conn, txn):
+    """The ``crypto_transactions.id`` a CASH register row's transfer points at,
+    or ``None`` -- the mirror image of :func:`transfer_targets`, walking the link
+    from the ordinary side instead of the crypto side.
+
+    This exists because the two sides of a crypto<->cash link do NOT live in the
+    same id space, and the cash register used to forward its raw
+    ``transfer_pair_id`` regardless. :func:`_link_cash_leg` routes through
+    ``ledger.create_transfer``, so the cash leg's ``transfer_pair_id`` names the
+    SHADOW ``transactions`` row create_transfer writes on the crypto account
+    purely to carry the mirror invariant. The crypto register's grid is built
+    from ``crypto_transactions``, never from that shadow row, so 'Go to
+    [exchange]' handed ``select_txn`` an id from the wrong table, found nothing,
+    and left the user at the bottom of the register with no selection -- while
+    the reverse direction worked, because :func:`transfer_targets` re-locates its
+    counterpart by SHAPE and returns a real ``transactions.id``.
+
+    So this matches by that same shape key: same crypto account, same date, same
+    MAGNITUDE, pointing back at the cash account. Magnitude, not signed amount --
+    a DEPOSIT/WITHDRAW's cash leg carries the opposite sign of the crypto row and
+    a trade's carries the same one (see :func:`_link_cash_leg`), so only the
+    absolute value is a stable key across both.
+
+    ``txn`` is a cash-side row (sqlite3.Row or dict) with ``id``, ``account_id``,
+    ``date``, ``amount`` and ``transfer_account_id``. When the shape matches more
+    than one crypto row -- a same-day deposit and withdrawal of the same size,
+    say -- the one whose memo also matches wins, and failing that the lowest id,
+    so the jump is at least deterministic rather than absent.
+
+    A read, not a write: crypto.py stays the sole writer of ``crypto_*``."""
+    if not txn:
+        return None
+    acct = _row_value(txn, "transfer_account_id")
+    own = _row_value(txn, "account_id")
+    if acct is None or own is None:
+        return None
+    rows = conn.execute(
+        "SELECT id, memo FROM crypto_transactions WHERE account_id=? AND date=? "
+        "AND ABS(amount)=? AND transfer_account_id=? ORDER BY id",
+        (int(acct), _row_value(txn, "date"),
+         abs(int(_row_value(txn, "amount") or 0)), int(own)),
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        memo = (_row_value(txn, "memo") or "").strip()
+        if memo:
+            for r in rows:
+                if (r["memo"] or "").strip() == memo:
+                    return int(r["id"])
+    return int(rows[0]["id"])
 
 
 def find_transfer_candidate(conn, account_id: int, date: str, *, symbol=None,

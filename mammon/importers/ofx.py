@@ -11,6 +11,13 @@ activity (interest credited, account fees) and becomes an INVESTMENT row, not a
 cash one -- see :func:`_parse_cash`. Investment security actions live in
 ``<BUYSTOCK>``/``<SELLSTOCK>``/``<INCOME>``/``<REINVEST>`` aggregates and are
 parsed best-effort.
+
+A statement also names its own CURRENCY: ``<CURDEF>`` is an ISO 4217 code (OFX
+2.2 sec 5.2), carried out on ``NormalizedTxn.account_currency`` so a
+foreign-currency feed creates its account in its real currency instead of
+silently inheriting the USD default. OFX is the ONLY import format that can
+state this -- QIF has no currency field in any version of its spec -- which is
+why it is read here rather than asked for in the import UI.
 """
 from __future__ import annotations
 
@@ -88,7 +95,33 @@ def parse_ofx(text: str, default_account: Optional[str] = None) -> list[Normaliz
     records: list[NormalizedTxn] = []
     records.extend(_parse_investment(body, account, sec))
     records.extend(_parse_cash(body, account))
+    # <CURDEF> is a property of the STATEMENT (hence of the account), not of any
+    # one row, so it is stamped on every record here rather than threaded through
+    # each parse helper: core.py takes it from whichever record first resolves the
+    # account, and applies it only if that account is being created.
+    currency = _statement_currency(body)
+    if currency:
+        for r in records:
+            r.account_currency = currency
     return records
+
+
+def _statement_currency(body: str) -> str:
+    """The statement's own currency from ``<CURDEF>``, as an ISO 4217 code.
+
+    Returns "" when absent or not a plausible code, leaving the account on the
+    schema's USD default. The shape check is deliberate: this value lands in
+    ``accounts.currency``, which is immutable once set (SRD 5.4a), so a malformed
+    feed must not be able to brand an account with junk the user cannot correct
+    without rebuilding it.
+
+    A per-transaction ``<CURRENCY>``/``<ORIGCURRENCY>`` aggregate -- an amount in
+    some other currency than the statement's -- is deliberately NOT read: mammon
+    stores every amount in its account's own currency, so honouring one needs an
+    FX rate per row. A mixed-currency statement is separate work, not something to
+    approximate silently."""
+    code = _first(body, "CURDEF").strip().upper()
+    return code if len(code) == 3 and code.isalpha() else ""
 
 
 # OFX TRNTYPE is a fixed enumeration from the SPEC -- not an institution's own

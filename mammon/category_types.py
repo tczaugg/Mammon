@@ -27,6 +27,10 @@ from . import ledger
 
 INCOME = "income"
 EXPENSE = "expense"
+# The third value a *picker* can ask for: neither side filtered out. It is not a
+# classification a category can carry -- every category is income or expense --
+# only a scope a caller selects (see :func:`top_level_categories`).
+BOTH = "both"
 
 # Income before expenses wherever categories are ordered by type.
 TYPE_ORDER = {INCOME: 0, EXPENSE: 1}
@@ -34,6 +38,7 @@ TYPE_ORDER = {INCOME: 0, EXPENSE: 1}
 __all__ = [
     "INCOME",
     "EXPENSE",
+    "BOTH",
     "TYPE_ORDER",
     "classify",
     "net_by_category",
@@ -41,6 +46,8 @@ __all__ = [
     "category_type",
     "persist_types",
     "group_by_type",
+    "top_level_categories",
+    "category_forest",
 ]
 
 
@@ -117,6 +124,96 @@ def persist_types(conn) -> int:
         conn.execute("UPDATE categories SET type=? WHERE id=?", (typ, cid))
     conn.commit()
     return len(types)
+
+
+def top_level_categories(conn, kind: str = BOTH, *,
+                         include_hidden: bool = False) -> list[dict]:
+    """The TOP-LEVEL categories of the requested ``kind`` as ``{'id', 'name',
+    'type'}``, sorted case-insensitively by name.
+
+    This is the one source of truth behind every report's category picker
+    (``ui.report_filters.category_picker_names``). ``kind`` is :data:`INCOME`,
+    :data:`EXPENSE` or :data:`BOTH`.
+
+    Two properties the pickers depend on, each fixing a real defect:
+
+    * It reads the ledger's own category TREE, never a report aggregation. The
+      chart pickers used to list `reports.spending_by_category`, which sums only
+      money OUT, so every income category was missing by construction and a
+      category with no activity in the shown range vanished from the list --
+      re-dating a report made a tick disappear. Here a zero-activity category is
+      still offered.
+    * A top level is classified by the ROLLED-UP net of its whole subtree, the
+      same rule :func:`mammon.reports.itemized.itemize_tree` uses to decide which
+      section a top level lands in. Classifying on the parent's own rows alone
+      would call "Income" an expense whenever the money sits on Income:Salary,
+      and the picker would then disagree with the report it filters.
+
+    A persisted ``categories.type`` wins over the derived label (that column is
+    the declaration hook, §5.9c), so a genuinely-income category that has never
+    been used can still be declared income rather than defaulting to expense.
+    """
+    if kind not in (INCOME, EXPENSE, BOTH):
+        raise ValueError(f"unknown category kind: {kind!r}")
+    rows = conn.execute(
+        "SELECT id, name, parent_id, type, hidden FROM categories").fetchall()
+    nets = net_by_category(conn)
+    kids: dict[Optional[int], list] = {}
+    for r in rows:
+        kids.setdefault(r["parent_id"], []).append(r)
+
+    def rolled(cat_id: int) -> int:
+        """Net signed cents for a category and every descendant. Hidden children
+        still count -- hiding a sub-category does not change what the parent is."""
+        total = nets.get(int(cat_id), 0)
+        for kid in kids.get(cat_id, ()):
+            total += rolled(kid["id"])
+        return total
+
+    out: list[dict] = []
+    for r in kids.get(None, ()):
+        if r["hidden"] and not include_hidden:
+            continue
+        stored = r["type"] if r["type"] in (INCOME, EXPENSE) else None
+        typ = stored or classify(rolled(r["id"]))
+        if kind != BOTH and typ != kind:
+            continue
+        out.append({"id": int(r["id"]), "name": r["name"], "type": typ})
+    out.sort(key=lambda d: d["name"].lower())
+    return out
+
+
+def category_forest(conn, kind: str = BOTH, *,
+                    include_hidden: bool = False) -> list[dict]:
+    """The whole category HIERARCHY the report picker offers, scoped to ``kind``.
+
+    Returns nested ``{'id', 'name', 'type', 'children': [...]}`` dicts: the
+    top-level categories of the requested kind (exactly what
+    :func:`top_level_categories` answers, same order and same classification
+    rule) with every descendant hung underneath, each level sorted
+    case-insensitively by name. ``type`` is carried on the top levels only --
+    income-vs-expense is a property of the SIDE of the ledger a top level sits
+    on, and a sub-category inherits its parent's side by construction.
+
+    The scope is applied at the top level only, which is the whole of rule 2 of
+    the picker: a subtree is offered only under a top-level category of the
+    requested kind, so an ``income`` picker can never smuggle in an expense
+    sub-category and the tree agrees with the flat list it replaced.
+
+    The hierarchy walk is :func:`mammon.ledger.category_children`, so the UI
+    layer never issues a hierarchy query of its own (the picker is a pure
+    projection of this).
+    """
+    tops = top_level_categories(conn, kind, include_hidden=include_hidden)
+
+    def walk(parent_id: int) -> list[dict]:
+        return [{"id": int(c["id"]), "name": c["name"], "type": None,
+                 "children": walk(int(c["id"]))}
+                for c in ledger.category_children(conn, parent_id,
+                                                  include_hidden=include_hidden)]
+
+    return [{"id": t["id"], "name": t["name"], "type": t["type"],
+             "children": walk(t["id"])} for t in tops]
 
 
 def group_by_type(conn, *, include_hidden: bool = False) -> dict[str, list[dict]]:

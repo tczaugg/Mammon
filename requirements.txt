@@ -2,9 +2,24 @@
 # standard library (SQLite included).
 PyQt5>=5.15
 matplotlib>=3.7
+# Quotes, FX rates, crypto prices and the asset-mix split all default to this.
+# Not optional: it was, and "optional" meant the documented install produced an
+# app whose Get Quotes and Refresh Rates buttons failed on first click. The
+# import stays lazy, so an offline session still never reaches the network.
+yfinance>=0.2
+mcp>=1.2          # python -m mammon.mcp_server (ask an LLM about the ledger)
+sqlcipher3>=0.6   # at-rest encryption; prebuilt wheels on Windows/Linux/macOS
+pytest>=8         # the test suite is part of the product, not an extra
+pytest-xdist>=3   # python -m pytest mammon/tests -q -n auto (the pre-push run)
 
-# Optional, imported only when the feature is used. Uncomment what you want,
-# or install the extras from pyproject.toml: pip install -e .[mcp,quotes,dev]
-# mcp>=1.2          # python -m mammon.mcp_server (ask an LLM about the ledger)
-# yfinance>=0.2     # Get Quotes in the investment register
-# pytest>=8         # python -m pytest mammon/tests
+# Nothing here is optional. The one optional COMPONENT is webSlinger, which is
+# not a Python package: it is an external MCP automation tool that Mammon
+# launches over stdio. Without it Mammon runs perfectly well --
+#
+#   * download transactions from your bank yourself and File > Import the files;
+#   * enter home/asset valuations by hand (Get Value needs webSlinger);
+#   * enter balances by hand.
+#
+# The download-related fields in Account Details simply stay empty, and clicking
+# Download explains what is missing instead of failing. To enable automation,
+# install webSlinger separately and point $MAMMON_WEBSLINGER_MCP_CMD at it.

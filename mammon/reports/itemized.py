@@ -411,22 +411,34 @@ def _period_lines_by_transfer_account(conn, start, end,
 
 def itemize_tree(conn, start: str, end: str,
                  account_ids: Optional[Iterable[int]] = None,
-                 top_level_names: Optional[Iterable[str]] = None) -> ItemizedTree:
+                 top_level_names: Optional[Iterable[str]] = None,
+                 category_ids: Optional[Iterable[int]] = None) -> ItemizedTree:
     """Hierarchical Itemize-by-Category report over ``[start, end]`` (inclusive).
 
     Returns an :class:`ItemizedTree` of INCOME / EXPENSES (and TRANSFERS) sections,
     each holding top-level category nodes that expand into their sub-categories and
     ultimately their transactions, with every amount rolled up. ``account_ids``
-    restricts by account (``None`` = all); ``top_level_names`` restricts which
-    TOP-LEVEL categories appear (``None`` = all) -- this is the customization
-    widget's "which categories are eligible" choice. Transfers follow the account
+    restricts by account (``None`` = all). Transfers follow the account
     filter only. A top-level category is classified income vs expense by the sign
     of its rolled-up net.
+
+    Two category filters, both ``None`` = all:
+
+    * ``category_ids`` is the one the picker uses. It names EXACTLY the
+      categories that may appear, at any depth, and it is applied per NODE --
+      selecting ``Taxes:Federal`` while leaving ``Taxes:Property`` unticked drops
+      the Property subtree and its money from the rolled-up totals, rather than
+      keeping the whole Taxes subtree because its parent was eligible. A parent
+      in the set but with an excluded child still contributes its own postings
+      (the "Other <path>" line), which is what a partially-ticked parent means.
+    * ``top_level_names`` is the older top-level-only form, kept for callers that
+      still hold names. Both may be given; a category must satisfy both.
     """
     _validate_date(start)
     _validate_date(end)
     acct_list = None if account_ids is None else [int(a) for a in account_ids]
     name_filter = None if top_level_names is None else set(top_level_names)
+    id_filter = None if category_ids is None else {int(c) for c in category_ids}
 
     lines_by_cat = _period_lines_by_category(conn, start, end, acct_list)
 
@@ -452,6 +464,8 @@ def itemize_tree(conn, start: str, end: str,
         return sorted(kids.get(pid, []), key=lambda i: cats[i]["name"].lower())
 
     def build(cid: int) -> Optional[TreeNode]:
+        if id_filter is not None and cid not in id_filter:
+            return None                     # excluded: this node and its subtree
         own_lines = lines_by_cat.get(cid, [])
         child_nodes = [n for n in (build(k) for k in sorted_kids(cid)) if n]
         if not own_lines and not child_nodes:

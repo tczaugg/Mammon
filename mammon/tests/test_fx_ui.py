@@ -80,8 +80,14 @@ def _two_accounts(conn):
 # ---------------------------------------------------------------------------
 def test_entering_a_rate_makes_a_foreign_account_value_correctly(conn, monkeypatch):
     _two_accounts(conn)
-    # No rate yet: net worth falls back to the naive base sum (100 + 50).
-    assert AccountsModel(conn).net_worth() == 150_00
+    # No rate yet: the EUR 50 is UNCONVERTED, so it is left OUT of the total
+    # rather than folded in at 1:1. Reporting 150.00 for a ledger holding USD 100
+    # plus EUR 50 would overstate net worth by the whole foreign balance -- the
+    # same shape of error as a double-counted transfer -- so the honest total
+    # before any rate exists is the base currency alone (SRD 5.4a).
+    # test_currency_networth pins the same rule from the domain side, where
+    # 150_00 is named outright as "the 1:1-folded wrong answer".
+    assert AccountsModel(conn).net_worth() == 100_00
 
     dlg = FxRatesDialog(conn)
     try:

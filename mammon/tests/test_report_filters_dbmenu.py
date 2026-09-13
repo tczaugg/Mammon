@@ -196,7 +196,7 @@ def test_report_dialogs_default_to_ytd_except_net_worth(qapp, tmp_path,
                                                         monkeypatch):
     """Every report/chart dialog opens on Year-to-Date, EXCEPT Net Worth Over
     Time, which keeps its whole-ledger 'Earliest to date' default -- a cumulative
-    curve is meaningless over a partial-year slice (SRD §5.8d). Each dialog exposes
+    curve is meaningless over a partial-year slice (SRD §5.9c). Each dialog exposes
     its Period combo as ``dlg._period_combo`` before it calls exec_(); we capture
     the selection there instead of letting the modal block."""
     from PyQt5.QtWidgets import QDialog
@@ -287,6 +287,99 @@ def test_report_period_custom_opens_dialog_with_default(qapp, tmp_path, _no_moda
     combo.setCurrentIndex(combo.findData("custom"))
     assert (customize.filters.start_iso(), customize.filters.end_iso()) \
         == ("2025-02-01", "2025-02-15")
+
+
+# ---- the Period label follows the range the user actually picked ------------
+def _report_win(tmp_path, spec=None):
+    """A real :class:`ReportWindow` (the combo every hosted report shares)."""
+    from mammon.ui.report_window import ReportWindow, CASH_FLOW_SPEC
+    spec = spec or CASH_FLOW_SPEC
+    # One fresh file per window: reusing the path would re-open a ledger that
+    # already holds "Checking" and the seeding below would collide.
+    path = tmp_path / f"rw_{spec.title.replace(' ', '_')}.db"
+    c = db.init_db(path)
+    chk = ledger.create_account(c, "Checking", "checking", opening_balance=500_00)
+    ledger.add_transaction(c, chk, "2026-03-01", -40_00, payee="Store")
+    return ReportWindow(c, spec=spec), c
+
+
+def test_period_combo_follows_a_hand_picked_range(qapp, tmp_path):
+    """The user's report: editing the dates inside the customization dialog must
+    move the Period dropdown. A 17-day span matches no preset, so it reads
+    'Custom' -- and applying must NOT reopen the dialog (selecting Custom in the
+    combo is what opens it, so a naive sync loops forever)."""
+    win, conn = _report_win(tmp_path)
+    try:
+        assert win.period_combo.currentData() == "ytd"   # the shared default
+        reopened, painted = [], []
+        win._open_customize = lambda: reopened.append(True)
+        # Count repaints at _populate: PyQt holds the bound ``self.refresh`` it
+        # was connected to, so replacing the attribute would not be seen.
+        real_populate = win._populate
+        win._populate = lambda rows: (painted.append(True), real_populate(rows))[1]
+
+        win.filters.set_range("2026-02-05", "2026-02-21")
+        win.filters.applied.emit()      # what the Apply button does
+
+        assert win.period_combo.currentData() == "custom"
+        assert reopened == []           # the dialog did not reopen
+        assert len(painted) == 1        # and the report re-ran exactly once
+        # The range the user typed survives the sync untouched.
+        assert (win.filters.start_iso(), win.filters.end_iso()) \
+            == ("2026-02-05", "2026-02-21")
+    finally:
+        win.close()
+        conn.close()
+
+
+def test_period_combo_names_a_preset_range_picked_by_hand(qapp, tmp_path):
+    """Dates typed in the dialog that happen to equal a preset's range are
+    labelled with that preset, not left on 'Custom'."""
+    from datetime import date
+    from mammon.ui.report_filters import resolve_period
+    win, conn = _report_win(tmp_path)
+    try:
+        # Start somewhere else so the assertion cannot pass by standing still.
+        win.period_combo.setCurrentIndex(win.period_combo.findData("last_7_days"))
+        start, end = resolve_period("ytd", conn, date.today())
+        win.filters.set_range(start, end)
+        win.filters.applied.emit()
+        assert win.period_combo.currentData() == "ytd"
+    finally:
+        win.close()
+        conn.close()
+
+
+def test_period_combo_sync_reaches_every_report_kind(qapp, tmp_path):
+    """One combo, one sync: the Period label follows the range on every hosted
+    report, not just the one this was first noticed on."""
+    from mammon.ui.report_window import (CASH_FLOW_SPEC, BY_PAYEE_SPEC,
+                                         TRANSACTIONS_SPEC, ITEMIZE_SPEC)
+    for spec in (CASH_FLOW_SPEC, BY_PAYEE_SPEC, TRANSACTIONS_SPEC, ITEMIZE_SPEC):
+        win, conn = _report_win(tmp_path, spec)
+        try:
+            win._open_customize = lambda: None
+            win.filters.set_range("2026-02-05", "2026-02-21")
+            win.filters.applied.emit()
+            assert win.period_combo.currentData() == "custom", spec.title
+        finally:
+            win.close()
+            conn.close()
+
+
+def test_chart_dialog_period_combo_follows_a_hand_picked_range(qapp, tmp_path,
+                                                               _no_modal):
+    """The legacy chart windows share the same dropdown through
+    ``_report_period_header``; their Apply path syncs it too."""
+    win = _win_with_spending(tmp_path)
+    dlg, combo, customize, calls = _period_header(win)
+    try:
+        assert combo.currentData() == "ytd"
+        customize.filters.set_range("2026-02-05", "2026-02-21")
+        customize.applied.emit()
+        assert combo.currentData() == "custom"
+    finally:
+        win.close()
     win.close()
 
 

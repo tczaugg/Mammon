@@ -187,8 +187,15 @@ def set_line(conn, target_id: int, asset_class: str, pct) -> None:
     value = Decimal("0") if blank else _D(pct, None)
     if value is None:
         raise ValueError(f"not a percentage: {pct!r}")
-    if value == 0:
+    if value == 0 and not is_locked(conn, target_id, asset_class):
         conn.execute("DELETE FROM allocation_target_lines "
+                     "WHERE target_id=? AND asset_class=?",
+                     (int(target_id), asset_class))
+    elif value == 0:
+        # A LOCKED line at zero is a decision ("hold nothing here"), not an
+        # empty field: deleting it would throw the lock away and let the next
+        # redistribution hand the class weight the user just refused.
+        conn.execute("UPDATE allocation_target_lines SET pct='0' "
                      "WHERE target_id=? AND asset_class=?",
                      (int(target_id), asset_class))
     else:
@@ -221,6 +228,123 @@ def target_total(conn, target_id: int) -> Decimal:
     worth SHOWING rather than silently normalizing away -- normalizing would
     turn a forgotten line into a plausible, wrong target."""
     return sum(target_lines(conn, target_id).values(), Decimal("0"))
+
+
+# ---------------------------------------------------------------------------
+# locks and the always-100 edit (SRD 5.8f)
+# ---------------------------------------------------------------------------
+# A mix that does not add up to 100 is not a mix, and the old editor let the
+# user build one a keystroke at a time. The fix is not validation after the
+# fact but an edit that cannot leave the total: raising one class LOWERS the
+# others. The lock is what makes that livable -- without it, the class settled
+# three edits ago drifts back out from under the user. Locked classes are never
+# touched, so the workflow is: set a class, lock it, move on.
+_PCT_Q = Decimal("0.01")       # weights are stored to the cent of a percent
+
+
+def locked_classes(conn, target_id: int) -> set:
+    """The asset classes whose weight the user has pinned on this target."""
+    return {r["asset_class"] for r in conn.execute(
+        "SELECT asset_class FROM allocation_target_lines "
+        "WHERE target_id=? AND locked=1", (int(target_id),)).fetchall()}
+
+
+def is_locked(conn, target_id: int, asset_class: str) -> bool:
+    row = conn.execute(
+        "SELECT locked FROM allocation_target_lines "
+        "WHERE target_id=? AND asset_class=?",
+        (int(target_id), asset_class)).fetchone()
+    return bool(row and row["locked"])
+
+
+def set_locked(conn, target_id: int, asset_class: str, locked: bool) -> None:
+    """Pin (or release) one class's weight.
+
+    Locking a class that has no line yet writes a zero line, so "locked at 0%"
+    survives: the lock is a statement about the class, and a class with no row
+    would otherwise be handed weight by the next redistribution.
+    """
+    if asset_class not in portfolio.ASSET_CLASSES:
+        raise ValueError(f"unknown asset class {asset_class!r}; one of "
+                         f"{portfolio.ASSET_CLASSES}")
+    flag = 1 if locked else 0
+    cur = conn.execute(
+        "UPDATE allocation_target_lines SET locked=? "
+        "WHERE target_id=? AND asset_class=?",
+        (flag, int(target_id), asset_class))
+    if cur.rowcount == 0 and flag:
+        conn.execute(
+            "INSERT INTO allocation_target_lines(target_id, asset_class, pct, "
+            "locked) VALUES (?,?,'0',1)", (int(target_id), asset_class))
+    conn.commit()
+
+
+def apply_target_edit(lines: dict, locked, asset_class: str, pct) -> dict:
+    """Set ``asset_class`` to ``pct`` and rebalance the rest to total exactly 100.
+
+    Pure Decimal arithmetic over ``{asset_class: pct}``; no database, no float.
+
+    The locked classes keep their exact stored values. What is left of 100 after
+    them is split between the edited class and the other UNLOCKED classes, in
+    proportion to what those already held (equally, if they are all at zero --
+    proportional sharing of nothing gives nothing, and the total would break).
+    The edit is CLAMPED into ``0 .. 100 - locked``: an edit that cannot be
+    absorbed is trimmed, never allowed to push the total off 100, because a
+    silently wrong total is worse than a value that stops where it must.
+    """
+    locked = set(locked or ())
+    out = {k: _D(v) for k, v in (lines or {}).items()}
+    out.setdefault(asset_class, Decimal("0"))
+    want = _D(pct, None)
+    if want is None:
+        raise ValueError(f"not a percentage: {pct!r}")
+
+    fixed = {k: v for k, v in out.items() if k in locked and k != asset_class}
+    room = _HUNDRED - sum(fixed.values(), Decimal("0"))
+    if room < 0:                      # locked lines already over 100: nothing free
+        room = Decimal("0")
+    new = min(max(want, Decimal("0")), room).quantize(_PCT_Q, ROUND_HALF_UP)
+
+    others = [k for k in out if k != asset_class and k not in locked]
+    share = room - new
+    if not others:
+        # No one to absorb the change: the edited class IS the remainder.
+        new = room.quantize(_PCT_Q, ROUND_HALF_UP)
+        share = Decimal("0")
+    result = dict(fixed)
+    result[asset_class] = new
+    if others:
+        old_total = sum((out[k] for k in others), Decimal("0"))
+        if old_total > 0:
+            for k in others:
+                result[k] = (share * out[k] / old_total).quantize(
+                    _PCT_Q, ROUND_HALF_UP)
+        else:
+            even = (share / len(others)).quantize(_PCT_Q, ROUND_HALF_UP)
+            for k in others:
+                result[k] = even
+        # Rounding remainder lands on the largest unlocked recipient, the same
+        # convention target_from_current uses, so the column sums to 100 exactly.
+        drift_pp = _HUNDRED - sum(result.values(), Decimal("0"))
+        if drift_pp:
+            biggest = max(others, key=lambda k: (result[k], k))
+            result[biggest] = max(Decimal("0"), result[biggest] + drift_pp)
+    return result
+
+
+def set_line_balanced(conn, target_id: int, asset_class: str, pct) -> dict:
+    """Write one class's weight, rebalancing the unlocked rest to total 100.
+
+    The single write path for the Target & Drift editor; the UI never computes
+    a weight itself.
+    """
+    current = target_lines(conn, target_id)
+    updated = apply_target_edit(current, locked_classes(conn, target_id),
+                                asset_class, pct)
+    for cls, value in updated.items():
+        if current.get(cls) != value:
+            set_line(conn, target_id, cls, value)
+    return updated
 
 
 # ---------------------------------------------------------------------------

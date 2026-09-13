@@ -1150,10 +1150,24 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     difference is absorbed into an uncategorized split line so the split always
     reconciles; the register surfaces a leftover uncategorized amount with a
     warning triangle.
-    A plain whole-transaction transfer cannot itself be split, but a transfer
-    that ALREADY carries split lines CAN be re-split: an imported mortgage
-    payment is legitimately BOTH a transfer to ``[House]`` AND a
-    principal+interest split, and editing its legs must round-trip while the
+    A plain whole-transaction transfer CAN be split: the transfer stops being a
+    property of the ROW and becomes one LINE of the split. Selling crypto for
+    859.70 and receiving 843.09 in checking is one transaction whose money moved
+    two ways -- 843.09 to ``[Checking]`` and 16.61 to a fee category -- and the
+    old hard block ("a transfer cannot be split") left the user no way to record
+    it. Splitting a transfer therefore ADOPTS the existing mirror onto the
+    matching leg: the parent's own ``transfer_account_id``/``transfer_pair_id``
+    are cleared, the counter-account row is kept (same id, date, payee, register
+    position, cleared/reconciled status) and re-amounted to the negated LINE, and
+    the split row remembers it via ``splits.transfer_pair_id`` like any other
+    transfer leg. The invariant becomes: the mirror equals the transfer LINE, not
+    the row total. The split must therefore contain a line still targeting the
+    old transfer account -- otherwise it would orphan the counter-leg, and that
+    is rejected. :func:`clear_splits` with ``restore_transfer_to`` is the exact
+    inverse (what undo uses).
+    A transfer that ALREADY carries split lines is re-split the same way: an
+    imported mortgage payment is legitimately BOTH a transfer to ``[House]`` AND
+    a principal+interest split, and editing its legs must round-trip while the
     parent's ``transfer_account_id`` link is preserved. A split needs at least
     two lines (one line is just a plain category). Applying a split NULLs the
     transaction's own ``category_id`` so its Category field displays
@@ -1162,8 +1176,11 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     txn = get_transaction(conn, txn_id)
     if txn is None:
         raise KeyError(f"no transaction {txn_id}")
-    if txn["transfer_account_id"] is not None and not _has_splits(conn, txn_id):
-        raise ValueError("a transfer cannot be split")
+    parent_taid = txn["transfer_account_id"]
+    # Only a PLAIN transfer (no splits yet) moves its transfer off the row and
+    # onto a line. A transfer that already carries splits keeps the parent link
+    # exactly as before -- that is the imported-mortgage shape.
+    split_a_transfer = parent_taid is not None and not _has_splits(conn, txn_id)
     # Each normalized leg is (category_id, transfer_account_id, amount, memo,
     # tag_id). A leg may carry its own single tag (Quicken tags a split leg to
     # attribute part of a payment to a project) as ``tag_id`` (already resolved)
@@ -1211,12 +1228,46 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     # status must survive a rebuild triggered by an unrelated edit. Legs are
     # matched by target account, exact leg amount preferred, so an unchanged leg
     # AND an edited-amount leg (e.g. a loan principal paydown) both keep status.
+    # Splitting a plain transfer: which leg inherits the existing mirror? The
+    # first leg still pointing at the old transfer account. Without one the
+    # counter-account row would be orphaned (money that arrived in checking with
+    # nothing on this side claiming it), so refuse rather than silently delete
+    # the other half of the user's transfer.
+    adopt_idx = None
+    adopt_pair = None
+    if split_a_transfer:
+        adopt_idx = next((i for i, (_c, t, _a, _m, _tg) in enumerate(norm)
+                          if t == parent_taid), None)
+        if adopt_idx is None:
+            acct = get_account(conn, parent_taid)
+            name = acct["name"] if acct else str(parent_taid)
+            raise ValueError(
+                f"splitting this transfer needs one line that still transfers "
+                f"to [{name}] -- the other side of the transfer lives there")
+        adopt_pair = txn["transfer_pair_id"]
     preserved = _capture_split_mirror_flags(conn, txn_id)
     _delete_split_mirrors(conn, txn_id)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
-    for cat, taid, amt, memo, tg in norm:
+    if split_a_transfer:
+        # The transfer is a property of the LINE now, not the row.
+        conn.execute(
+            "UPDATE transactions SET transfer_account_id=NULL, "
+            "transfer_pair_id=NULL WHERE id=?", (txn_id,))
+    for i, (cat, taid, amt, memo, tg) in enumerate(norm):
         pair_id = None
-        if taid is not None:
+        if i == adopt_idx:
+            # Adopt, do not recreate: keeping the counter row's id preserves its
+            # reconcile status, its own edits and anything referencing it. A
+            # one-sided parent (transfer_pair_id NULL -- itself the mirror of
+            # someone else's leg) yields a one-sided leg: never fabricate a
+            # second counter row. The mirror drops its back-link because a split
+            # leg's mirror is one-sided by construction (_create_split_mirror).
+            pair_id = adopt_pair
+            if pair_id is not None:
+                conn.execute(
+                    "UPDATE transactions SET amount=?, transfer_pair_id=NULL "
+                    "WHERE id=?", (-int(amt), pair_id))
+        elif taid is not None:
             pair_id = _create_split_mirror(conn, txn, taid, amt)
             flag = _take_preserved_flag(preserved, taid, amt)
             if flag and (flag[0] or flag[1]):
@@ -1279,12 +1330,45 @@ def uncategorized_split_amount(conn: sqlite3.Connection, txn_id: int) -> int:
     return int(row["amt"]) if row else 0
 
 
-def clear_splits(conn: sqlite3.Connection, txn_id: int) -> None:
+def clear_splits(conn: sqlite3.Connection, txn_id: int,
+                 restore_transfer_to: int | None = None) -> None:
     """Remove all split lines, reverting the transaction to a plain one. Its
     ``category_id`` is left NULL for the caller to reassign. Any mirror
-    transactions the transfer legs created are removed too."""
-    _delete_split_mirrors(conn, txn_id)
+    transactions the transfer legs created are removed too.
+
+    ``restore_transfer_to`` is the exact inverse of :func:`set_splits`'s adoption
+    of a transfer into a split line: given the account the row used to transfer
+    to, the leg pointing there is handed BACK to the row -- its mirror survives
+    (same id, same reconcile status), gets re-amounted to the negated ROW total
+    and is cross-linked as a normal two-sided transfer again. Undo uses this to
+    put a split-a-transfer edit back; every other caller (loan payments, import
+    review, the split dialog's Remove) leaves it None and gets the old behavior,
+    because a loan payment's principal leg to ``[Mortgage]`` must NOT be promoted
+    into a whole-row transfer."""
+    keep = None
+    txn = get_transaction(conn, txn_id)
+    if (restore_transfer_to is not None and txn is not None
+            and txn["transfer_account_id"] is None):
+        restore_transfer_to = int(restore_transfer_to)
+        row = conn.execute(
+            "SELECT transfer_pair_id FROM splits WHERE transaction_id=? "
+            "AND transfer_account_id=? AND transfer_pair_id IS NOT NULL "
+            "ORDER BY id LIMIT 1", (txn_id, restore_transfer_to)).fetchone()
+        if row is not None:
+            keep = int(row["transfer_pair_id"])
+    else:
+        restore_transfer_to = None
+    _delete_split_mirrors(conn, txn_id, skip_id=keep)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
+    if restore_transfer_to is not None:
+        conn.execute(
+            "UPDATE transactions SET transfer_account_id=?, transfer_pair_id=? "
+            "WHERE id=?", (restore_transfer_to, keep, txn_id))
+        if keep is not None:
+            conn.execute(
+                "UPDATE transactions SET amount=?, transfer_account_id=?, "
+                "transfer_pair_id=? WHERE id=?",
+                (-int(txn["amount"]), txn["account_id"], txn_id, keep))
     conn.commit()
 
 
@@ -1344,14 +1428,19 @@ def _create_split_mirror(conn: sqlite3.Connection, txn: sqlite3.Row,
     ).lastrowid
 
 
-def _delete_split_mirrors(conn: sqlite3.Connection, txn_id: int) -> None:
+def _delete_split_mirrors(conn: sqlite3.Connection, txn_id: int,
+                          skip_id: int | None = None) -> None:
     """Delete the counter-account mirror transactions created by ``txn_id``'s
     transfer split legs (called before replacing or clearing its splits, and
-    when the parent transaction is deleted)."""
+    when the parent transaction is deleted). ``skip_id`` spares one mirror the
+    caller is about to re-use rather than recreate -- see
+    :func:`clear_splits`'s ``restore_transfer_to``."""
     for r in conn.execute(
         "SELECT transfer_pair_id FROM splits "
         "WHERE transaction_id=? AND transfer_pair_id IS NOT NULL", (txn_id,),
     ).fetchall():
+        if skip_id is not None and int(r["transfer_pair_id"]) == int(skip_id):
+            continue
         conn.execute("DELETE FROM transactions WHERE id=?", (r["transfer_pair_id"],))
 
 

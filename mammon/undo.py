@@ -76,10 +76,27 @@ def _splits_key(splits) -> tuple:
     )
 
 
+def _transfer_moved_into_splits(before: dict, after: dict) -> bool:
+    """True when ``before`` was a plain whole-row transfer and ``after`` is the
+    same transaction with that transfer moved onto one LINE of a split (ledger's
+    adoption -- selling crypto for 859.70 and receiving 843.09 plus a fee). The
+    row's transfer fields necessarily go NULL there, which LOOKS structural but
+    is exactly invertible: clear_splits(restore_transfer_to=...) hands the
+    surviving mirror back to the row."""
+    taid = before["transfer_account_id"]
+    return (taid is not None and not before["splits"]
+            and after["transfer_account_id"] is None
+            and any(s["transfer_account_id"] == taid for s in after["splits"]))
+
+
 def _structural(before: dict, after: dict) -> bool:
     """True when the edit changed a transaction's transfer LINKAGE -- a convert
     (plain <-> transfer) or a retarget (transfer to a different account). These
-    have no clean ledger inverse (see the module docstring)."""
+    have no clean ledger inverse (see the module docstring). Moving a transfer
+    into (or back out of) a split line is exempt: it has one."""
+    if (_transfer_moved_into_splits(before, after)
+            or _transfer_moved_into_splits(after, before)):
+        return False
     return (before["transfer_account_id"] != after["transfer_account_id"]
             or (before["transfer_pair_id"] is None)
             != (after["transfer_pair_id"] is None))
@@ -109,7 +126,13 @@ def _restore(mgr: "UndoManager", orig_id: int, snap: dict) -> None:
     if snap["splits"]:
         ledger.set_splits(conn, tid, snap["splits"])
     elif ledger.has_splits(conn, tid):
-        ledger.clear_splits(conn, tid)
+        # restore_transfer_to puts back a transfer the split had adopted onto one
+        # of its lines: the surviving mirror is re-linked to the row instead of
+        # being deleted, so undoing "split this transfer" leaves no orphan and no
+        # duplicate. It is None for a snapshot that was never a transfer, which
+        # is the plain old behavior.
+        ledger.clear_splits(conn, tid,
+                            restore_transfer_to=snap["transfer_account_id"])
 
 
 def _restore_leg_extras(conn, leg_id: int, snap: dict) -> None:

@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from .. import crypto, import_review
-from . import prefs
+from . import prefs, style
 from .models import fmt_date
 
 # Column layout of the review table. Category is intentionally absent:
@@ -63,12 +63,22 @@ I_STATUS, I_DATE, I_SECURITY, I_ACTION, I_SHARES, I_PRICE, I_AMOUNT = range(7)
 # FEE is coin-denominated (ETH gas), never USD, and only a send carries one.
 C_STATUS, C_DATE, C_PAYEE, C_MEMO, C_COIN, C_IN, C_OUT, C_FEE = range(8)
 
+# A crypto EXCHANGE gets a FOURTH set. It is a wallet's columns plus the fiat a
+# custodial account really does move: a trade's per-unit Price and the Amount
+# debited or credited to the cash sleeve. Giving it the wallet's set would hide
+# what a Buy cost; giving it the CASH set would hide the coin entirely, which is
+# what it did before -- a Coinbase history reviewed as cash showed a dollar
+# figure and no asset, for rows whose whole content is "0.099 ETH moved".
+X_STATUS, X_DATE, X_PAYEE, X_MEMO, X_ACTION, X_COIN, X_QTY, X_PRICE, X_AMOUNT = range(9)
+
 # Foreground for an already-accepted / discarded row: present but inert.
 _ACTIONED_FG = "#9a9a9a"
 _HEADERS = ["Status", "Date", "Num", "Payee", "Memo", "Amount"]
 _INV_HEADERS = ["Status", "Date", "Security", "Action", "Shares", "Price", "Amount"]
 _CRYPTO_HEADERS = ["Status", "Date", "Payee", "Memo", "Coin",
                    "Coin In", "Coin Out", "Fee"]
+_EXCHANGE_HEADERS = ["Status", "Date", "Payee", "Memo", "Action", "Coin",
+                     "Quantity", "Price", "Amount"]
 # Which side of the register a wallet row's quantity renders on. Read from the
 # domain layer's own vocabulary so the panel cannot drift from the writers.
 _COIN_OUT_ACTIONS = crypto.WALLET_DEBIT_ACTIONS
@@ -162,8 +172,11 @@ class ImportReviewPanel(QWidget):
         self._states: list[_RowState] = []
         self.is_investment = self._account_is_investment()
         self.is_crypto_wallet = self._account_is_crypto_wallet()
+        self.is_crypto_exchange = self._account_is_crypto_exchange()
         if self.is_crypto_wallet:
             self._headers = _CRYPTO_HEADERS
+        elif self.is_crypto_exchange:
+            self._headers = _EXCHANGE_HEADERS
         elif self.is_investment:
             self._headers = _INV_HEADERS
         else:
@@ -174,7 +187,8 @@ class ImportReviewPanel(QWidget):
         # belong in the register's editable PENDING row, which is where the same
         # correction happens for cash. Two editable surfaces onto one value could
         # disagree about what Accept would commit.
-        self._edit_col = None if (self.is_investment or self.is_crypto_wallet) else NUM
+        self._edit_col = (None if (self.is_investment or self.is_crypto_wallet
+                                   or self.is_crypto_exchange) else NUM)
         # Guards _on_num_edited against the setItem() calls in _render_row, which
         # would otherwise re-fire itemChanged while we are just re-drawing.
         self._suppress_num_edit = False
@@ -259,6 +273,16 @@ class ImportReviewPanel(QWidget):
             for col, w in ((C_COIN, max(56, fm.width("WBTC") + 16)),
                            (C_IN, coin_w), (C_OUT, coin_w),
                            (C_FEE, coin_w + 36)):        # + " ETH"
+                hh.setSectionResizeMode(col, QHeaderView.Fixed)
+                self.table.setColumnWidth(col, w)
+        elif self.is_crypto_exchange:
+            hh.setSectionResizeMode(X_PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(X_MEMO, QHeaderView.Stretch)
+            fm = QFontMetrics(self.table.font())
+            coin_w = max(110, min(200, fm.width("25.566401739928923937") + 16))
+            hh.setMinimumSectionSize(72)
+            for col, w in ((X_COIN, max(56, fm.width("WBTC") + 16)),
+                           (X_QTY, coin_w), (X_PRICE, coin_w)):
                 hh.setSectionResizeMode(col, QHeaderView.Fixed)
                 self.table.setColumnWidth(col, w)
         else:
@@ -470,6 +494,11 @@ class ImportReviewPanel(QWidget):
                 if actioned:
                     self._grey_row(i)
                 return
+            if self.is_crypto_exchange:
+                self._render_exchange_row(i, m, status, cell, actioned, merge_tip)
+                if actioned:
+                    self._grey_row(i)
+                return
             if self.is_investment:
                 self._render_investment_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
@@ -517,6 +546,53 @@ class ImportReviewPanel(QWidget):
         kinds are distinguished in exactly one place."""
         return crypto.is_wallet_account(
             crypto.get_account(self.conn, self.account_id))
+
+    def _account_is_crypto_exchange(self) -> bool:
+        """Whether this panel is reviewing a custodial crypto EXCHANGE -- coins
+        PLUS a fiat cash sleeve. Distinguished from a wallet in the one place the
+        two kinds are ever distinguished, :mod:`mammon.crypto`."""
+        return crypto.is_exchange_account(
+            crypto.get_account(self.conn, self.account_id))
+
+    def _render_exchange_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
+        """Draw one custodial-exchange review row: the coin AND the fiat.
+
+        The ACTION is shown because on this source it is the least certain field.
+        A Coinbase history states product names ("Pro Deposit", "Exchange
+        Withdrawal", "Advanced Trade Buy") that only approximate what happened,
+        and the same name means opposite directions on different rows. The mapped
+        action is the importer's reading of it; the register's pending row is
+        where the user corrects it."""
+        st = cell(status)
+        if merge_tip:
+            st.setToolTip(merge_tip)
+        self.table.setItem(i, X_STATUS, st)
+        self.table.setItem(i, X_DATE, cell(fmt_date(m.date)))
+        self.table.setItem(i, X_PAYEE, cell(m.payee))
+        self.table.setItem(i, X_MEMO, cell(m.memo))
+        act = cell(m.action)
+        source_type = (m.raw or {}).get("source_type")
+        if source_type and source_type.upper() != (m.action or "").upper():
+            # Show what the FILE called it, so a mapping the user disagrees with
+            # is visible rather than silently substituted.
+            act.setToolTip(f"The export called this {source_type!r}.")
+        self.table.setItem(i, X_ACTION, act)
+        self.table.setItem(i, X_COIN, cell(m.symbol))
+        for col, text in ((X_QTY, (m.quantity or "").strip()),
+                          (X_PRICE, (m.price or "").strip())):
+            it = cell(text)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if text:
+                it.setToolTip(text)
+            self.table.setItem(i, col, it)
+        # Fiat only moves on a trade or a bare cash deposit/withdrawal. A coin
+        # move carries a USD valuation in the source, but no money changed hands,
+        # so the cell stays EMPTY rather than showing a figure the sleeve never saw.
+        amt = cell(_fmt_amount(m.amount_cents) if m.amount_cents else "")
+        amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if m.amount_cents < 0:
+            amt.setForeground(QBrush(QColor(style.negative_color())))
+        self.table.setItem(i, X_AMOUNT, amt)
 
     def _render_crypto_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
         """Draw one coin-native wallet review row: the counterparty address, the

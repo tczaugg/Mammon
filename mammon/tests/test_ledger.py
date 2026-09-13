@@ -455,19 +455,27 @@ def test_set_splits_needs_two_lines(conn, accounts):
         ledger.set_splits(conn, t, [(None, -100_00, None)])
 
 
-def test_transfer_cannot_be_split(conn, accounts):
+def test_splitting_a_transfer_needs_a_leg_to_the_counter_account(conn, accounts):
+    """A transfer IS splittable now, but only into a split that still sends one
+    LINE to the counter-account: the row's mirror lives there, and a split with
+    no leg pointing at it would orphan the other half of the user's transfer."""
     checking, savings = accounts
-    from_id, _to = ledger.create_transfer(conn, checking, savings, "2026-01-05", 50_00)
+    from_id, to_id = ledger.create_transfer(conn, checking, savings, "2026-01-05", 50_00)
     with pytest.raises(ValueError):
         ledger.set_splits(conn, from_id, [(None, -25_00, None), (None, -25_00, None)])
+    # nothing was touched: the transfer is intact on both sides.
+    row = ledger.get_transaction(conn, from_id)
+    assert row["transfer_account_id"] == savings
+    assert row["transfer_pair_id"] == to_id
+    assert not ledger.has_splits(conn, from_id)
 
 
 def test_already_split_transfer_can_be_resplit(conn, accounts):
     """USER BUG (2026-08-16): a txn that is BOTH a transfer (transfer_account_id
     set) AND already split -- an imported Crossland Mortgage payment to [House]
     with a principal+interest split -- must let set_splits re-split it (edit the
-    legs) while preserving the parent transfer link. A PLAIN transfer (no splits)
-    is still rejected (see test_transfer_cannot_be_split)."""
+    legs) while preserving the parent transfer link. A PLAIN transfer instead
+    moves its transfer onto one split LINE (see test_transfer_split.py)."""
     checking, _ = accounts
     house = ledger.create_account(conn, "House", "asset")
     int_exp = ledger.resolve_category(conn, "Int Exp")

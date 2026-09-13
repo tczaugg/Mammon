@@ -24,16 +24,27 @@ from mammon import (categorize, category_tree, crypto, import_review,
 from mammon.ui import style
 
 
-_UNCAT_WARNING_ICON = None
+_WARNING_ICON = None
 
 
-def _uncategorized_warning_icon():
-    """A small yellow warning triangle (with an exclamation) shown before
-    '--Split--' when a split still holds an uncategorized remainder. Built lazily
-    and cached -- a QPixmap needs a live QApplication, so it cannot be a module
-    constant."""
-    global _UNCAT_WARNING_ICON
-    if _UNCAT_WARNING_ICON is None:
+def warning_triangle_icon():
+    """The app's ONE warning mark: a small amber triangle with an exclamation.
+
+    Drawn in exactly one place so every use is the same shape in the same colour.
+    Two callers, and they assert the same thing -- "this number is not the whole
+    story":
+
+      * the register's Category cell, before '--Split--', when a split still
+        holds an uncategorized remainder (money the user has yet to assign);
+      * the account bar's Net Worth strip, IN PLACE OF the total, when a foreign
+        balance has no FX rate and so cannot be folded in (SRD 5.4a).
+
+    Built lazily and cached -- a QPixmap needs a live QApplication, so it cannot
+    be a module constant. Named without a leading underscore because widgets.py
+    uses it too; it was ``_uncategorized_warning_icon`` while the register was its
+    only caller, and that name would now misdescribe half of its uses."""
+    global _WARNING_ICON
+    if _WARNING_ICON is None:
         from PyQt5.QtGui import QIcon, QPixmap, QPainter, QPolygonF, QPen
         from PyQt5.QtCore import QPointF
         pm = QPixmap(16, 16)
@@ -48,8 +59,8 @@ def _uncategorized_warning_icon():
         p.drawLine(QPointF(8, 6), QPointF(8, 10))   # exclamation stroke
         p.drawPoint(QPointF(8, 12))                 # exclamation dot
         p.end()
-        _UNCAT_WARNING_ICON = QIcon(pm)
-    return _UNCAT_WARNING_ICON
+        _WARNING_ICON = QIcon(pm)
+    return _WARNING_ICON
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +947,7 @@ class RegisterModel(QAbstractTableModel):
             # exactly in front of '--Split--'. Blank/pending rows have no split.
             if not blank and not pending and col == self.CATEGORY:
                 if self._view[row].get("uncat_split", 0):
-                    return _uncategorized_warning_icon()
+                    return warning_triangle_icon()
             return None
 
         if role == Qt.ToolTipRole:
@@ -1103,8 +1114,10 @@ class RegisterModel(QAbstractTableModel):
     def commit_blank_returning_id(self):
         """Commit the blank quick-entry row exactly like :meth:`commit_blank`,
         but return the id of the transaction it created -- or None when the row
-        is not ready (no date + amount) or when it produced a transfer, which
-        cannot be split. This lets the register's Split gesture treat a
+        is not ready (no date + amount). A transfer typed on the blank row
+        returns the leg in THIS account, which is splittable like any other
+        transfer (ledger.set_splits moves the transfer onto one split line).
+        This lets the register's Split gesture treat a
         half-typed NEW transaction the way it already treats a pending review
         row: persist it through the ledger first, then open the split editor on
         the row it created (Quicken splits the SAVED transaction). It reloads
@@ -1245,9 +1258,10 @@ class RegisterModel(QAbstractTableModel):
         the blank-row buffer synchronously -- a fresh connection and a racing
         Enter/closeEditor commit both see the finished row immediately, with no
         double insert -- and only the view refresh is pushed to _reload_timer."""
-        # Id of the plain transaction this creates, so the blank-row Split gesture
+        # Id of the transaction this creates, so the blank-row Split gesture
         # (commit_blank_returning_id) can open the split editor on it. A transfer
-        # leaves it None: a transfer cannot be split. reload() below does not
+        # records the leg in THIS account -- a transfer is splittable now, with
+        # the transfer becoming one LINE of the split. reload() below does not
         # touch it, so it survives to the caller.
         self._last_new_id = None
         net = abs(parse_amount(v.get("deposit"))) - abs(parse_amount(v.get("payment")))
@@ -1264,12 +1278,14 @@ class RegisterModel(QAbstractTableModel):
                         -net, memo=v.get("memo") or None,
                         num=v.get("num") or None, cleared=cleared,
                         payee=payee)
+                    self._last_new_id = from_id
                 else:        # money into this account
                     from_id, to_id = ledger.create_transfer(
                         self.conn, target, self.account_id, date,
                         net, memo=v.get("memo") or None,
                         num=v.get("num") or None, cleared=cleared,
                         payee=payee)
+                    self._last_new_id = to_id
                 self.undo_stack.record_add([from_id, to_id], transfer=True)
             else:
                 user_typed_cat = bool(category) and target is None
@@ -3387,6 +3403,18 @@ class AccountsModel(QAbstractTableModel):
         number. An all-USD ledger converts through the identity and is unchanged."""
         from mammon import fx
         return fx.net_worth_currencies(self.conn).total_cents
+
+    def unconverted_currencies(self) -> list:
+        """The currencies whose balances could NOT be folded into net worth for
+        want of an FX rate (base first, then A->Z, as ``fx`` reports them).
+
+        Empty means the total is complete. Non-empty means :meth:`net_worth` is a
+        partial figure, which is why the account bar shows a warning mark instead
+        of it: the per-currency subtotals are each complete, and only the roll-up
+        is impossible. ``mammon.fx`` decides this -- the UI layer holds no
+        conversion logic of its own."""
+        from mammon import fx
+        return list(fx.net_worth_currencies(self.conn).unconverted)
 
     def rows(self) -> list[dict]:
         """The account rows (id/name/type/balance) for the account bar."""

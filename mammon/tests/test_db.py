@@ -240,6 +240,123 @@ def test_share_quantity_is_decimal_text(tmp_path):
     assert isinstance(qty, str)
 
 
+def test_connection_uses_wal_and_strict_sync(tmp_path):
+    """WAL always, FULL durability at rest.
+
+    The two are independent and only one costs anything. WAL is the fix for
+    fsync-bound imports (per-row commits made one yearly QIF spend 79% of its
+    time inside commit()), and it cannot lose a commit -- so it is permanent, and
+    asserted here because falling back to the rollback journal is a 5-14x
+    slowdown with no other symptom. `synchronous=FULL` is the part that trades
+    safety for speed, so at rest it stays STRICT: nothing the user types can be
+    lost. Only a bulk import relaxes it (:func:`db.bulk_write`)."""
+    conn = db.init_db(tmp_path / "mammon.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert int(conn.execute("PRAGMA synchronous").fetchone()[0]) == 2   # FULL
+    finally:
+        conn.close()
+
+
+def test_bulk_write_relaxes_fsync_and_restores_it(tmp_path):
+    """The import scope drops to NORMAL and puts back what it found.
+
+    It restores the PRIOR value rather than assuming FULL, so nesting cannot leak
+    a relaxed setting: the inner scope's exit must leave the outer one still
+    relaxed, and only the outermost exit returns to FULL. A leak here would mean
+    hand-entered transactions silently running without durability afterwards --
+    invisible until a power cut."""
+    conn = db.init_db(tmp_path / "mammon.db")
+    try:
+        def sync():
+            return int(conn.execute("PRAGMA synchronous").fetchone()[0])
+
+        assert sync() == 2                      # FULL at rest
+        with db.bulk_write(conn):
+            assert sync() == 1                  # NORMAL inside
+            with db.bulk_write(conn):
+                assert sync() == 1
+            assert sync() == 1, "inner exit restored FULL inside the outer scope"
+        assert sync() == 2, "the import scope leaked a relaxed setting"
+    finally:
+        conn.close()
+
+
+def test_bulk_write_restores_fsync_even_when_the_body_raises(tmp_path):
+    """A failed import must not leave the connection relaxed for the rest of the
+    session -- the restore is in a finally for that reason."""
+    conn = db.init_db(tmp_path / "mammon.db")
+    try:
+        with pytest.raises(ValueError):
+            with db.bulk_write(conn):
+                raise ValueError("import blew up")
+        assert int(conn.execute("PRAGMA synchronous").fetchone()[0]) == 2
+    finally:
+        conn.close()
+
+
+def test_an_import_runs_relaxed_and_leaves_durability_restored(tmp_path):
+    """End to end: importing through the real entry point relaxes fsync for the
+    duration (that is the whole speed-up) and hands the connection back strict."""
+    from mammon import importers
+    conn = db.init_db(tmp_path / "mammon.db")
+    try:
+        seen = []
+        rec = importers.NormalizedTxn(
+            external_account="Checking", account_type="checking",
+            date="2026-01-05", amount_cents=-2_500, payee="Safeway")
+        real = db.bulk_write
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def spy(c):
+            with real(c):
+                seen.append(int(c.execute("PRAGMA synchronous").fetchone()[0]))
+                yield c
+
+        db.bulk_write = spy
+        try:
+            importers.import_records(conn, [rec], provider="t", source_format="qif")
+        finally:
+            db.bulk_write = real
+        assert seen == [1], "the import did not run inside the relaxed scope"
+        assert int(conn.execute("PRAGMA synchronous").fetchone()[0]) == 2
+    finally:
+        conn.close()
+
+
+def test_a_backup_taken_in_wal_mode_restores_a_complete_ledger(tmp_path):
+    """WAL holds recent commits in a `-wal` sidecar, so a backup that copied only
+    the .db file would produce a snapshot that opens cleanly and silently lacks
+    the newest transactions. `backup.create_backup` uses the online backup API,
+    which checkpoints into the copy -- pinned here because that failure mode is
+    invisible: the bad snapshot is a perfectly valid ledger, just an older one."""
+    from mammon import backup, ledger
+    src = tmp_path / "mammon.db"
+    conn = db.init_db(src)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        aid = ledger.create_account(conn, "Checking", "checking", opening_balance=0)
+        ledger.add_transaction(conn, aid, "2026-01-05", -2_500, payee="Safeway")
+        # Deliberately NOT checkpointed: that row lives in the -wal sidecar, which
+        # is exactly the state a naive file-copy backup would get wrong.
+        snapshot = backup.create_backup(
+            conn, db_path=src, tag="test", backup_dir=tmp_path / "backups")
+    finally:
+        conn.close()
+    # A NEW path, so restore_backup's foreign-snapshot guard does not apply
+    # (it only fires when the destination already exists).
+    restored = backup.restore_backup(snapshot, tmp_path / "restored.db")
+    out = db.connect(restored)
+    try:
+        rows = out.execute("SELECT payee, amount FROM transactions").fetchall()
+        assert len(rows) == 1, "the WAL-resident row did not reach the snapshot"
+        assert rows[0]["payee"] == "Safeway" and rows[0]["amount"] == -2_500
+    finally:
+        out.close()
+
+
 def test_claude_md_states_the_real_schema_version():
     """CLAUDE.md tells a contributor which migration number is next. That is a
     promise the prose makes about code it cannot see, and it goes stale silently:

@@ -57,7 +57,8 @@ from pathlib import Path
 from typing import Optional
 
 from mammon import crypto
-from mammon.importers.crypto_csv import CryptoRecord, parse_etherscan
+from mammon.importers.coinbase_csv import ExchangeRecord, looks_like_coinbase, parse_coinbase
+from mammon.importers.crypto_csv import CryptoRecord, looks_like_etherscan, parse_etherscan
 
 
 @dataclass
@@ -276,14 +277,44 @@ def _decode(raw: bytes) -> str:
     return raw.decode("latin-1", errors="replace")
 
 
-def parse_export_file(path) -> list[CryptoRecord]:
-    """Read an on-chain by-address export at ``path`` and return its records.
+def parse_export_file(path) -> tuple[str, list]:
+    """Read a crypto export at ``path``; return ``(shape, records)``.
 
     PURE with respect to the database -- it only reads a file -- so the UI can
     parse first and route the rows into the import-review queue instead of
-    writing them. Raises ``ValueError`` when the file is not such an export,
-    which is how a caller tells an Etherscan CSV from any other CSV."""
-    return parse_etherscan(_decode(Path(path).read_bytes()))
+    writing them.
+
+    Routed by the file's own CONTENT, never by the account it is being imported
+    into. The two shapes are genuinely different documents: a block-explorer
+    by-address export (``"wallet"``) states coin moving to and from an ADDRESS,
+    while a custodial exchange's transaction history (``"exchange"``) states
+    trades, cash deposits and per-venue transfers. Deciding by account kind
+    instead means a user who exports the wrong one -- or who keeps coin at an
+    exchange AND in a wallet -- gets a parser that cannot read their file and an
+    error blaming the file. Raises ``ValueError`` naming BOTH shapes when the
+    text is neither."""
+    text = _decode(Path(path).read_bytes())
+    if looks_like_coinbase(text):
+        return "exchange", parse_coinbase(text)
+    if looks_like_etherscan(text):
+        return "wallet", parse_etherscan(text)
+    # Neither known signature matched, so INFER the layout. A proven parser beats
+    # an inference, which is why the two above are tried first; but writing a
+    # parser per venue does not scale, and the generic reader handles the shapes
+    # neither of them knows -- a Coinbase Pro account statement, say, where one
+    # trade is three rows sharing a trade id.
+    from mammon.importers import crypto_tabular
+    try:
+        layout, records = crypto_tabular.read_records(text)
+    except ValueError as exc:
+        raise ValueError(
+            "could not read this as a crypto export. It is not a "
+            "block-explorer by-address export (no Transaction Hash column) nor "
+            "a Coinbase transaction history (no Transaction Type column), and "
+            "the columns could not be inferred: %s" % exc) from None
+    if not records:
+        return "exchange", []
+    return "exchange", records
 
 
 def import_etherscan_file(conn: sqlite3.Connection, path, account_id: int, *,

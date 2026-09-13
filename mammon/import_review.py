@@ -2902,7 +2902,7 @@ def set_manual_match(conn, entry: ReviewEntry, matched_txn_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Amazon invoice itemization (SRD 6.7 / requirements A6, A8)
+# Amazon invoice itemization (SRD 7.2a / requirements A6, A8)
 # ---------------------------------------------------------------------------
 # Loading a time-tagged Amazon invoice JSON turns each order into a review row
 # for the CARD register: the per-item split proposed by
@@ -2960,7 +2960,9 @@ def _find_amazon_match(conn, account_id, date_iso, amount_cents, window_days,
     payee gate requirement A8 asks for: the register line must already read as
     Amazon (``payee LIKE '%amazon%'``). A line already claimed by an earlier
     order in this same load is skipped, and a whole-transaction transfer is
-    excluded (a transfer cannot be split)."""
+    excluded (a transfer IS splittable since SRD 5.2a, but a card charge that
+    reads as a transfer is money moving between the user's own accounts, not an
+    Amazon order to itemize)."""
     if not date_iso:
         return None
     lo = record.iso_shift(date_iso, -window_days)

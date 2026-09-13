@@ -23,7 +23,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Optional
 
-from mammon import ledger
+from mammon import db, ledger
 from mammon.importers.record import (
     ImportResult,
     NormalizedTxn,
@@ -53,6 +53,7 @@ def import_records(
     positions=None,
     categories=None,
     tags=None,
+    set_cutover: bool = True,
 ) -> ImportResult:
     """Ingest ``records`` into the ledger, dedup, and record the run.
 
@@ -61,6 +62,37 @@ def import_records(
     recorded (keyed by the security NAME, which is what investment_transactions
     store), and holdings are rebuilt for every investment account touched, so the
     accounts can be valued at market."""
+    # An import is a bulk, re-runnable write, so it runs with fsync relaxed and
+    # strict durability restored on the way out (db.bulk_write). This is the one
+    # choke point every file import passes through, which is why the scope lives
+    # here rather than at each of the callers.
+    with db.bulk_write(conn):
+        return _import_records(
+            conn, records, provider=provider, source_format=source_format,
+            filename=filename, file_hash=file_hash,
+            default_account=default_account,
+            default_account_type=default_account_type,
+            securities=securities, prices=prices, positions=positions,
+            categories=categories, tags=tags, set_cutover=set_cutover)
+
+
+def _import_records(
+    conn: sqlite3.Connection,
+    records: list[NormalizedTxn],
+    provider: Optional[str] = None,
+    source_format: Optional[str] = None,
+    filename: Optional[str] = None,
+    file_hash: Optional[str] = None,
+    default_account: Optional[str] = None,
+    default_account_type: str = "checking",
+    securities=None,
+    prices=None,
+    positions=None,
+    categories=None,
+    tags=None,
+    set_cutover: bool = True,
+) -> ImportResult:
+    """The body of :func:`import_records`, which wraps it in db.bulk_write."""
     import_id = conn.execute(
         "INSERT INTO imports(provider, source_format, filename, file_hash, status) "
         "VALUES (?,?,?,?, 'pending')",
@@ -125,11 +157,23 @@ def import_records(
     for aid in ledger.account_max_dates_for_import(conn, import_id):
         ledger.rebuild_checkpoints(conn, aid)
 
-    if (source_format or "").lower() == "qif":
+    if set_cutover and (source_format or "").lower() == "qif":
         # This is the one-time full-history Quicken migration. Watermark every
         # account it touched with its newest imported date so the FIRST live
         # OFX/QFX pull skips the fitid-less overlap instead of double-importing it
         # (closes gap G4). Monotonic: never moves an existing watermark earlier.
+        #
+        # ``set_cutover=False`` DEFERS that to the caller, and exists for one
+        # reason: a full history exported as one file PER YEAR is imported as a
+        # SET, and the watermark is the migration's END, not a guard between its
+        # own files. Applied per file it would block the rest of the set -- the
+        # first file to land sets a watermark, and _before_cutover then skips
+        # every incoming row dated on or before it, so a set imported in any
+        # order but oldest-first would silently discard all but the first file
+        # and report the rows as duplicates. The caller importing a set passes
+        # False for every file and applies the watermarks once at the end
+        # (see MainWindow._import_qif_set), which is order-independent because
+        # ledger.set_account_cutover_date only ever moves a watermark later.
         for aid, d in ledger.account_max_dates_for_import(conn, import_id).items():
             ledger.set_account_cutover_date(conn, aid, d)
 
@@ -244,7 +288,8 @@ def _apply_positions(conn, positions, inv_account_ids, result) -> None:
 def _import_plain(conn, r, import_id, acct_cache, cat_cache, result, claimed,
                   covered=None) -> None:
     account_id = _resolve_account(
-        conn, r.external_account, r.account_type, acct_cache, authoritative=True
+        conn, r.external_account, r.account_type, acct_cache, authoritative=True,
+        currency=r.account_currency,
     )
     if _before_cutover(conn, account_id, r):
         result.duplicates += 1
@@ -449,7 +494,8 @@ def _covered_accounts(conn, records, acct_cache) -> set:
         name = (r.external_account or "").strip()
         if not name or not r.date:
             continue
-        out.add((_resolve_account(conn, name, r.account_type or "checking", acct_cache), r.date))
+        out.add((_resolve_account(conn, name, r.account_type or "checking", acct_cache,
+                                  currency=r.account_currency), r.date))
     return out
 
 
@@ -470,7 +516,8 @@ def _import_transfers(conn, transfers, import_id, acct_cache, result, claimed,
     groups: dict[tuple, list[NormalizedTxn]] = defaultdict(list)
     for r in transfers:
         a = _resolve_account(
-            conn, r.external_account, r.account_type, acct_cache, authoritative=True
+            conn, r.external_account, r.account_type, acct_cache, authoritative=True,
+            currency=r.account_currency,
         )
         b = _resolve_account(conn, r.transfer_account, "checking", acct_cache)
         if a == b:
@@ -620,7 +667,8 @@ def _import_transfer_pair(conn, r, import_id, acct_cache, result, claimed) -> No
     multi-way transfer -- a house purchase split across a mortgage and a cash
     down payment -- from double-counting."""
     account_id = _resolve_account(
-        conn, r.external_account, r.account_type, acct_cache, authoritative=True
+        conn, r.external_account, r.account_type, acct_cache, authoritative=True,
+        currency=r.account_currency,
     )
     counter_id = _resolve_account(conn, r.transfer_account, "checking", acct_cache)
     if r.amount_cents < 0:
@@ -658,7 +706,8 @@ def _import_transfer_leg(conn, r, import_id, acct_cache, result, claimed) -> Non
     pair. transfer_pair_id NULL is a safe, supported state -- update_transaction
     and delete_transaction only sync / cascade to a mirror when it is non-NULL."""
     account_id = _resolve_account(
-        conn, r.external_account, r.account_type, acct_cache, authoritative=True
+        conn, r.external_account, r.account_type, acct_cache, authoritative=True,
+        currency=r.account_currency,
     )
     counter_id = _resolve_account(conn, r.transfer_account, "checking", acct_cache)
     # Idempotent re-import: skip an identical leg already booked by another run.
@@ -730,7 +779,7 @@ def _import_investment(conn, r, import_id, acct_cache, result, claimed) -> Optio
     re-import still refreshes holdings)."""
     account_id = _resolve_account(
         conn, r.external_account, r.account_type or "investment", acct_cache,
-        authoritative=True,
+        authoritative=True, currency=r.account_currency,
     )
     if _before_cutover(conn, account_id, r):
         result.duplicates += 1
@@ -929,7 +978,8 @@ def _find_dup_investment(conn, account_id, r, import_id, claimed) -> Optional[in
 _PLACEHOLDER_TYPES = {"checking"}
 
 
-def _resolve_account(conn, name, default_type, cache, *, authoritative=False) -> int:
+def _resolve_account(conn, name, default_type, cache, *, authoritative=False,
+                     currency="") -> int:
     """Get-or-create an account by name.
 
     ``authoritative`` is True only when ``default_type`` comes from the account's
@@ -940,6 +990,13 @@ def _resolve_account(conn, name, default_type, cache, *, authoritative=False) ->
     upgraded to that type -- so an account first auto-created as a "checking"
     counter-account self-corrects when a later record declares its real type,
     while a non-authoritative default can never downgrade an already-specific type.
+
+    ``currency`` is the account's native ISO 4217 code when the SOURCE FILE states
+    one (today: an OFX statement's ``<CURDEF>``), and is applied ONLY when this
+    call creates the account. An existing account is never re-stamped -- currency
+    is immutable after creation (SRD 5.4a), because rewriting it would reinterpret
+    every amount already stored rather than convert it. Blank (every QIF import,
+    and any feed without CURDEF) lets create_account apply the USD default.
     """
     name = (name or "").strip()
     declared = (default_type or "checking").strip().lower()
@@ -949,7 +1006,8 @@ def _resolve_account(conn, name, default_type, cache, *, authoritative=False) ->
         if row is not None:
             aid = row["id"]
         else:
-            aid = ledger.create_account(conn, name, declared or "checking")
+            aid = ledger.create_account(conn, name, declared or "checking",
+                                        currency=currency or "USD")
             cache[name] = aid
             return aid
         cache[name] = aid

@@ -14,12 +14,13 @@ except ImportError:                        # older PyQt5 exposes a top-level mod
     import sip
 from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QKeySequence
 from PyQt5.QtWidgets import (
-    QAbstractItemDelegate, QAbstractItemView, QActionGroup, QApplication,
+    QAbstractItemDelegate, QAbstractItemView, QAction, QActionGroup, QApplication,
     QCheckBox, QColorDialog,
     QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout,
     QFrame, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton,
+    QScrollArea,
     QSpinBox, QSplitter, QStackedWidget, QStyle, QTableView, QTableWidget,
     QListWidget, QListWidgetItem,
     QTableWidgetItem, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
@@ -50,6 +51,7 @@ from mammon.ui.models import (
     InvestmentRegisterModel, NetWorthByAssetModel, RegisterFilter,
     RegisterModel, SearchResultsModel,
     fmt_amount_ccy, fmt_cents, fmt_date, fmt_money, fmt_qty, parse_amount,
+    warning_triangle_icon,
 )
 
 # classic account groupings (account type -> section box)
@@ -232,9 +234,102 @@ class TransactionDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# 'Go to [account]' -- shared by every register
+# ---------------------------------------------------------------------------
+class TransferGotoMixin:
+    """The context menu's 'Go to [account]' entry: from one side of a transfer,
+    get to the other side. Shared by ALL THREE registers -- cash/loan
+    (:class:`RegisterWidget`), investment and crypto -- because the user reads
+    them as one feature and noticed immediately where it was missing.
+
+    Only the question 'what does THIS row transfer to' differs between them, and
+    each register answers it in :meth:`_transfer_pairs` by calling its own domain
+    module (``ledger``/``investments``/``crypto``); everything downstream of that
+    -- naming the accounts, deduping, hiding the entry on non-transfer rows, and
+    the navigation itself -- lives here once. A row that transfers nowhere yields
+    no pairs and therefore no menu entry, which is the whole 'ordinary rows must
+    not offer it' rule.
+
+    Mixed in BEFORE QWidget so cooperative ``__init__`` is untouched: this class
+    holds no state and defines no ``__init__``."""
+
+    def _transfer_pairs(self, row) -> list:
+        """Per-register hook: ``(account_id, txn_id)`` pairs this row transfers
+        to, ``txn_id`` possibly None when the exact mirror row is unknown.
+        Default: nothing transfers, so nothing is offered."""
+        return []
+
+    def _transfer_targets(self, row) -> list:
+        """Jump targets for the menu: one dict ``{account_id, txn_id, name}`` per
+        DISTINCT target account, in first-seen order so the menu is stable. A leg
+        back to this same account is dropped ('Go to here' means nothing), as is
+        one to a deleted account (no live register to open). When two legs name
+        the same account and only one knows the mirror row, the known id wins so
+        the jump lands on the transaction rather than just the tab."""
+        pairs = self._transfer_pairs(row) if row is not None and row >= 0 else []
+        own_account = getattr(self.model, "account_id", None)
+        by_acct: dict = {}
+        order: list = []
+        for acct_id, pair_id in pairs:
+            if acct_id is None or acct_id == own_account:
+                continue
+            if acct_id not in by_acct:
+                acct = ledger.get_account(self.conn, acct_id)
+                if acct is None:
+                    continue          # deleted account -> no live jump target
+                by_acct[acct_id] = {
+                    "account_id": acct_id,
+                    "txn_id": pair_id,
+                    "name": acct["name"],
+                }
+                order.append(acct_id)
+            elif by_acct[acct_id]["txn_id"] is None and pair_id is not None:
+                by_acct[acct_id]["txn_id"] = pair_id
+        return [by_acct[a] for a in order]
+
+    def _add_goto_actions(self, menu, row) -> list:
+        """Append the 'Go to [account]' entries for ``row`` to ``menu`` (after a
+        separator, and only if there are any). Returns the
+        ``[(action, target)]`` list to hand back to :meth:`_dispatch_goto`."""
+        targets = self._transfer_targets(row)
+        actions = []
+        if targets:
+            menu.addSeparator()
+            for tgt in targets:
+                actions.append((menu.addAction(f"Go to [{tgt['name']}]"), tgt))
+        return actions
+
+    def _dispatch_goto(self, chosen, actions) -> bool:
+        """Navigate if ``chosen`` is one of the goto actions; report whether it
+        was, so the caller can stop dispatching."""
+        for act, tgt in actions:
+            if chosen == act:
+                self._go_to_transfer(tgt)
+                return True
+        return False
+
+    def _go_to_transfer(self, target) -> None:
+        """Navigate to the other side of a transfer: switch the main window to
+        the counterparty account's register and select the mirror transaction.
+        Reuses MainWindow.open_register + <register>.select_txn (the same pair the
+        global Find dialog uses to land on a result), which is why this works
+        unchanged when the counterparty is a cash, investment or crypto account --
+        all three register widgets expose ``select_txn``."""
+        win = self.window()
+        if win is None or not hasattr(win, "open_register"):
+            return
+        reg = win.open_register(target["account_id"])
+        # Landing on the target account is the win; selecting the mirror row is
+        # best-effort -- txn_id is None for legacy/import legs with no pair, and
+        # select_txn simply no-ops (returns False) when the id isn't shown.
+        if reg is not None and target.get("txn_id") is not None and hasattr(reg, "select_txn"):
+            reg.select_txn(target["txn_id"])
+
+
+# ---------------------------------------------------------------------------
 # register widget (table view + toolbar)
 # ---------------------------------------------------------------------------
-class RegisterWidget(QWidget):
+class RegisterWidget(TransferGotoMixin, QWidget):
     """A per-account register: the nine Quicken columns, inline editing, a
     blank quick-entry row, delegates, and a small toolbar."""
 
@@ -1465,12 +1560,8 @@ class RegisterWidget(QWidget):
             act_post = menu.addAction("Enter Pending Payment")
         # A transfer leg offers a jump to the mirror transaction in the other
         # account (user: "from one side of a transfer, get to the other side").
-        goto_actions = []
-        goto_targets = self._transfer_targets(index.row()) if index.isValid() else []
-        if goto_targets:
-            menu.addSeparator()
-            for tgt in goto_targets:
-                goto_actions.append((menu.addAction(f"Go to [{tgt['name']}]"), tgt))
+        goto_actions = self._add_goto_actions(
+            menu, index.row() if index.isValid() else -1)
         # A loan register also offers the projected principal-payoff chart.
         act_project = None
         if self.model.is_loan():
@@ -1498,10 +1589,8 @@ class RegisterWidget(QWidget):
             batch[menu.addAction(f"Void {n}…")] = lambda: self._void_rows(sel)
             batch[menu.addAction(f"Delete {n}…")] = lambda: self._delete_rows(sel)
         chosen = menu.exec_(self.view.viewport().mapToGlobal(pos))
-        for act, tgt in goto_actions:
-            if chosen == act:
-                self._go_to_transfer(tgt)
-                return
+        if self._dispatch_goto(chosen, goto_actions):
+            return
         if chosen in batch:
             batch[chosen]()
         elif chosen == act_new:
@@ -1521,12 +1610,12 @@ class RegisterWidget(QWidget):
         elif act_project is not None and chosen == act_project:
             self._chart_projection()
 
-    def _transfer_targets(self, row):
-        """Jump targets for the context menu's 'Go to [account]' entries: one
-        dict {account_id, txn_id (the row to select there), name} per DISTINCT
-        target account this transaction transfers to. Empty for non-transfer
-        rows, which hides the entries. Three sources feed it, all deduped by
-        target account:
+    def _transfer_pairs(self, row):
+        """The cash/loan register's answer to 'what does this row transfer to':
+        ``(account_id, txn_id)`` pairs, which
+        :meth:`TransferGotoMixin._transfer_targets` then names and dedupes into
+        the menu's 'Go to [account]' entries. Empty for non-transfer rows, which
+        hides the entries. Three sources feed it:
 
           1. a whole-transaction transfer leg -- top-level transfer_account_id
              + transfer_pair_id (Quicken's mirror model cross-links the pair);
@@ -1541,7 +1630,11 @@ class RegisterWidget(QWidget):
              whose principal line transfers into the loan, and the loan side is
              only a one-sided mirror leg, so its counterparty lives on the
              checking transaction that points back at this leg -- there is no
-             top-level or split transfer on the loan row itself to inspect."""
+             top-level or split transfer on the loan row itself to inspect.
+
+        Sources 1 and 2 pass their pair id through :meth:`_pair_id_in_targets_space`
+        first, because ``transfer_pair_id`` is a ``transactions`` id and the
+        crypto and investment registers are not built from that table."""
         if row < 0 or self.model.is_blank_row(row) or self.model.is_pending_row(row):
             return []
         txn = self.model.txn_at(row)
@@ -1550,7 +1643,9 @@ class RegisterWidget(QWidget):
         pairs = []  # (target_account_id, txn_id_to_select_there)
         # 1. whole-transaction transfer leg
         if txn.get("transfer_account_id") is not None and txn.get("transfer_pair_id") is not None:
-            pairs.append((txn["transfer_account_id"], txn["transfer_pair_id"]))
+            pairs.append((txn["transfer_account_id"],
+                          self._pair_id_in_targets_space(txn, txn["transfer_account_id"],
+                                                         txn["transfer_pair_id"])))
         # 2. transfer split lines this transaction itself carries. A split leg
         #    is a transfer whenever transfer_account_id is set; transfer_pair_id
         #    (the exact mirror row to land on) is often NULL for legacy/import
@@ -1558,12 +1653,21 @@ class RegisterWidget(QWidget):
         #    opening the target account when there is no specific mirror.
         if txn.get("is_split"):
             for s in self.conn.execute(
-                "SELECT transfer_account_id, transfer_pair_id FROM splits "
+                "SELECT transfer_account_id, transfer_pair_id, amount FROM splits "
                 "WHERE transaction_id=? AND transfer_account_id IS NOT NULL "
                 "ORDER BY id",
                 (txn["id"],),
             ).fetchall():
-                pairs.append((s["transfer_account_id"], s["transfer_pair_id"]))
+                # The split line, not the parent, states the amount that crossed
+                # into the other account -- and the amount is half the shape key
+                # a crypto/investment counterpart is relocated by.
+                leg = {"account_id": txn["account_id"], "date": txn["date"],
+                       "amount": s["amount"],
+                       "transfer_account_id": s["transfer_account_id"]}
+                pairs.append((s["transfer_account_id"],
+                              self._pair_id_in_targets_space(
+                                  leg, s["transfer_account_id"],
+                                  s["transfer_pair_id"])))
         # 3. reverse link: this row is a one-sided mirror leg referenced from
         #    another account (loan payments, one-sided import mirrors). Only when
         #    the row has no pair of its own -- a two-sided leg is already covered.
@@ -1581,44 +1685,46 @@ class RegisterWidget(QWidget):
                 (txn["id"],),
             ).fetchall():
                 pairs.append((t["acct"], t["txn"]))
-        own_account = getattr(self.model, "account_id", None)
-        by_acct = {}   # account_id -> target dict
-        order = []     # first-seen account order, so the menu is stable
-        for acct_id, pair_id in pairs:
-            # one link per DISTINCT target account; a self-referential leg (same
-            # account) is a meaningless 'Go to here'.
-            if acct_id == own_account:
-                continue
-            if acct_id not in by_acct:
-                acct = ledger.get_account(self.conn, acct_id)
-                if acct is None:
-                    continue          # deleted account -> no live jump target
-                by_acct[acct_id] = {
-                    "account_id": acct_id,
-                    "txn_id": pair_id,
-                    "name": acct["name"],
-                }
-                order.append(acct_id)
-            elif by_acct[acct_id]["txn_id"] is None and pair_id is not None:
-                # a later leg to the same account knows the exact mirror row --
-                # upgrade so the jump lands on the transaction, not just the tab.
-                by_acct[acct_id]["txn_id"] = pair_id
-        return [by_acct[a] for a in order]
+        return pairs
 
-    def _go_to_transfer(self, target):
-        """Navigate to the other side of a transfer: switch the main window to
-        the counterparty account's register and select the mirror transaction.
-        Reuses MainWindow.open_register + RegisterWidget.select_txn (the same
-        pair the global Find dialog uses to land on a result)."""
-        win = self.window()
-        if win is None or not hasattr(win, "open_register"):
-            return
-        reg = win.open_register(target["account_id"])
-        # Landing on the target account is the win; selecting the mirror row is
-        # best-effort -- txn_id is None for legacy/import legs with no pair, and
-        # select_txn simply no-ops (returns False) when the id isn't shown.
-        if reg is not None and target.get("txn_id") is not None and hasattr(reg, "select_txn"):
-            reg.select_txn(target["txn_id"])
+    def _pair_id_in_targets_space(self, leg, target_account_id, pair_id):
+        """Translate a cash leg's ``transfer_pair_id`` into the id space of the
+        register that will actually be opened, so ``select_txn`` can find the row.
+
+        A transfer is one movement seen twice, but the two sides do not always
+        live in the same TABLE, and ``transfer_pair_id`` only ever names a
+        ``transactions`` row:
+
+          * crypto target -- ``crypto.link_as_transfer`` routes through
+            ``ledger.create_transfer``, which writes a shadow ``transactions``
+            row on the crypto account purely to carry the mirror invariant. The
+            crypto register is built from ``crypto_transactions`` and never shows
+            that shadow row, so the raw pair id matched nothing, ``select_txn``
+            returned False, and the user landed at the BOTTOM of the crypto
+            register with no selection -- the reported bug. (The reverse
+            direction always worked: ``crypto.transfer_targets`` re-locates the
+            cash leg by shape and hands back a real ``transactions`` id.)
+          * investment target -- ``investment_transactions`` has no pair-id
+            column, and the investment register hides the mirror cash leg
+            whenever an XIn/XOut already represents the same movement, so the
+            pair id names an invisible row in exactly that case.
+
+        Both resolutions are read-only queries owned by the DOMAIN modules
+        (``crypto``/``investments``), not by this widget: the UI layer's raw-SQL
+        budget is spent, and relocating a counterpart is domain knowledge that
+        already lives beside the code which created the link. ``None`` from
+        either one means 'no better answer' -- for a crypto target that is
+        honest (the shadow row is never shown, so the jump opens the register
+        unselected rather than selecting a wrong row); for an investment target
+        the pair id is kept, because the backfilled cash leg is then genuinely
+        what the register displays."""
+        acct = ledger.get_account(self.conn, target_account_id)
+        kind = (acct["type"] or "") if acct is not None else ""
+        if kind == "crypto":
+            return crypto.crypto_txn_for_cash_leg(self.conn, leg)
+        if kind == "investment":
+            return investments.investment_txn_for_cash_leg(self.conn, leg) or pair_id
+        return pair_id
 
     def _chart_projection(self):
         """Chart the loan's projected outstanding principal declining into the
@@ -1676,13 +1782,14 @@ class RegisterWidget(QWidget):
         txn = self.model.txn_at(row)
         if txn is None:
             return
-        # A plain whole-transaction transfer cannot be split, but a transfer
-        # that ALREADY carries split lines (an imported mortgage payment that is
-        # a transfer to [House] AND a principal+interest split) is a legitimate
-        # split whose legs must stay editable -- open the split editor for it.
-        if txn["transfer_account_id"] is not None and not txn.get("is_split"):
-            QMessageBox.information(self, "Split", "A transfer cannot be split.")
-            return
+        # A transfer IS splittable: the dialog seeds line 1 with the [Account]
+        # leg at the full amount, so the user only has to correct that line down
+        # to what actually landed and categorize the remainder (a crypto sale of
+        # 859.70 that deposited 843.09 after a 16.61 fee). ledger.set_splits then
+        # moves the transfer from the row onto that line and re-amounts the
+        # existing mirror. A transfer that already carries split lines (an
+        # imported mortgage payment that is a transfer to [House] AND a
+        # principal+interest split) opens the same editor.
         undo_before = self.model.undo_stack.capture(txn["id"])
         dlg = SplitDialog(self.model, row, parent=self)
         if dlg.exec_() == QDialog.Accepted:
@@ -2350,7 +2457,7 @@ class SecurityRenameDialog(QDialog):
                 if self.list.item(i).checkState() == Qt.Checked]
 
 
-class InvestmentRegisterWidget(QWidget):
+class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
     """A per-account view for INVESTMENT accounts: their Buys/Sells/Divs from the
     ``investment_transactions`` table (which the cash RegisterWidget never shows),
     plus a header summarizing the account's market valuation (cash + securities).
@@ -2401,6 +2508,9 @@ class InvestmentRegisterWidget(QWidget):
         # is simply never shown.
         self.toolbar = AccountToolbar(account_id, self)
         self.toolbar.setVisible(False)
+        # Reconcile Shares is investment-only; hidden by default on the shared
+        # bar (cash/crypto registers keep it hidden), reveal it here.
+        self.toolbar.act_reconcile_shares.setVisible(True)
         self.gear_menu = _GearMenu(self)
         for act in self.toolbar.actions():
             self.gear_menu.addAction(act)
@@ -3077,7 +3187,8 @@ class InvestmentRegisterWidget(QWidget):
     def _on_cell_double_clicked(self, index):
         """Double-clicking a Security cell charts that security's price history."""
         if index.column() == InvestmentRegisterModel.SECURITY:
-            _chart_price_history(self, self.conn, self._symbol_at(index))
+            _chart_price_history(self, self.conn, self._symbol_at(index),
+                                 self.account_id)
 
     def _on_view_context_menu(self, pos):
         """Right-click: New / Edit the selected transaction, plus the existing
@@ -3128,8 +3239,14 @@ class InvestmentRegisterWidget(QWidget):
             a = ((row["action"] if row else "") or "").strip().lower().replace(" ", "")
             if a in investments._REMOVE_ACTIONS:
                 act_lots = menu.addAction("Specify Lots…")
+        # A transfer leg (an XIn/XOut, or a backfilled cash leg) offers the jump
+        # to the other side, exactly as the cash register does.
+        goto_actions = self._add_goto_actions(
+            menu, index.row() if index.isValid() else -1)
         chosen = menu.exec_(self.view.viewport().mapToGlobal(pos))
         if chosen is None:
+            return
+        if self._dispatch_goto(chosen, goto_actions):
             return
         if chosen is act_new:
             self.on_new()
@@ -3146,9 +3263,19 @@ class InvestmentRegisterWidget(QWidget):
         elif act_bdelete is not None and chosen is act_bdelete:
             self._delete_rows(sel)
         elif act_price is not None and chosen is act_price:
-            _chart_price_history(self, self.conn, symbol)
+            _chart_price_history(self, self.conn, symbol, self.account_id)
         elif act_lots is not None and chosen is act_lots:
             self._specify_lots(int(self.model.txn_at(index.row())["id"]))
+
+    def _transfer_pairs(self, row):
+        """The investment register's answer for the shared 'Go to [account]'
+        entry. A pending (not yet posted) row transfers nowhere yet, so it offers
+        nothing; everything else is decided by :func:`investments.transfer_targets`
+        over the register row, which knows the two leg shapes this register shows
+        (an XIn/XOut and a backfilled cash leg) -- the UI keeps no SQL."""
+        if row is None or row < 0 or self.model.is_pending_row(row):
+            return []
+        return investments.transfer_targets(self.conn, self.model.txn_at(row))
 
     def _portfolio_dialog(self, name: str) -> None:
         """Open one of the portfolio windows (Lots, Capital Gains, Performance,
@@ -3629,12 +3756,19 @@ class InvestmentRegisterWidget(QWidget):
 # ---------------------------------------------------------------------------
 # price-history chart (shared by the register + the holdings window)
 # ---------------------------------------------------------------------------
-def _chart_price_history(parent, conn, symbol):
+def _chart_price_history(parent, conn, symbol, account_id=None):
     """Open a line chart of ``symbol``'s recorded price history, or an info note
     when nothing is recorded (never an empty chart). Shared by HoldingsDialog
     (double/right-click a holding) and InvestmentRegisterWidget (double/right-click
     a Security cell) so both entry points behave identically; the matplotlib chart
-    classes are imported LAZILY here so base widgets stay matplotlib-free."""
+    classes are imported LAZILY here so base widgets stay matplotlib-free.
+
+    ``account_id`` is the account the holding lives in. Securities carry no
+    currency of their own -- the ACCOUNT does -- so the currency has to be
+    threaded in from the caller (every caller is a window scoped to one account)
+    and read through :mod:`mammon.fx`. Without it a CAD holding's prices were
+    drawn with a bare '$' and read as USD. It stays optional so a caller with no
+    account context still gets the plain (USD) chart."""
     if not symbol:
         return
     # Bounds included, so a derived price plots its uncertainty (PriceHistoryCanvas).
@@ -3644,9 +3778,15 @@ def _chart_price_history(parent, conn, symbol):
             parent, "Price History",
             f"No recorded price history for {symbol} yet.")
         return
+    currency = None
+    if account_id is not None:
+        currency = fx.get_account_currency(conn, int(account_id))
     from mammon.ui.charts import ChartDialog, PriceHistoryCanvas
-    canvas = PriceHistoryCanvas(symbol, points)
-    ChartDialog(f"Price History - {symbol}", canvas, parent=parent).exec_()
+    canvas = PriceHistoryCanvas(symbol, points, currency=currency)
+    title = f"Price History - {symbol}"
+    if currency:
+        title = f"{title} ({currency})"
+    ChartDialog(title, canvas, parent=parent).exec_()
 
 
 def _chart_loan_projection(parent, conn, account_id):
@@ -3905,8 +4045,10 @@ class HoldingsDialog(QDialog):
     def show_price_history(self, symbol):
         """Chart ``symbol``'s price history (or an info note when nothing is
         recorded). Delegates to the shared helper so this and the investment
-        register's Security-cell path never diverge."""
-        _chart_price_history(self, self.conn, symbol)
+        register's Security-cell path never diverge. The window is scoped to one
+        account, so it hands that account down and the chart is labelled in the
+        account's currency."""
+        _chart_price_history(self, self.conn, symbol, self.account_id)
 
 
 # ---------------------------------------------------------------------------
@@ -4036,7 +4178,7 @@ class CryptoHoldingsDialog(QDialog):
 # ---------------------------------------------------------------------------
 # crypto register (crypto_transactions activity: buys, swaps, transfers, gas)
 # ---------------------------------------------------------------------------
-class CryptoRegisterWidget(QWidget):
+class CryptoRegisterWidget(TransferGotoMixin, QWidget):
     """A per-account view for CRYPTO wallets: their Buys/Sells, coin-for-coin
     Swaps (the paired SWAP_OUT/SWAP_IN legs), same-coin wallet Transfers (the
     mirror model), income and gas Fees from the ``crypto_transactions`` table --
@@ -4673,7 +4815,10 @@ class CryptoRegisterWidget(QWidget):
     def _context_menu(self, pos) -> None:
         """Right-click a row for New / Edit / Delete -- the crypto twin of the
         cash register's context menu, restricted to what a crypto row supports
-        (there is no split or transfer-mirror jump to offer here)."""
+        (there is no split to offer here), plus the same 'Go to [account]' jump
+        on a transfer leg: a coin or cash move linked to another account of the
+        user's is one movement seen twice, and the register has to let you walk
+        to the other side of it."""
         index = self.view.indexAt(pos)
         menu = QMenu(self)
         act_new = menu.addAction("New…")
@@ -4684,13 +4829,33 @@ class CryptoRegisterWidget(QWidget):
                         and not self.model.is_pending_row(index.row()))
         act_edit.setEnabled(editable_row)
         act_delete.setEnabled(editable_row)
+        goto_actions = self._add_goto_actions(
+            menu, index.row() if index.isValid() else -1)
         chosen = menu.exec_(self.view.viewport().mapToGlobal(pos))
+        if self._dispatch_goto(chosen, goto_actions):
+            return
         if chosen == act_new:
             self._start_new_row()
         elif chosen == act_edit and editable_row:
             self._edit_row(index.row())
         elif chosen == act_delete and editable_row:
             self._delete_row(index.row())
+
+    def _transfer_pairs(self, row):
+        """The crypto register's answer for the shared 'Go to [account]' entry.
+        The blank quick-entry row and a pending (not yet posted) row transfer
+        nowhere, so they offer nothing; for everything else
+        :func:`crypto.transfer_targets` decides, because it knows the two shapes a
+        crypto link takes (a crypto<->crypto pair, and a cash leg living in
+        ``transactions``) -- the UI keeps no SQL of its own."""
+        if (row is None or row < 0
+                or self.model.is_blank_row(row)
+                or self.model.is_pending_row(row)):
+            return []
+        txn = self.model.txn_at(row)
+        if txn is None:
+            return []
+        return crypto.transfer_targets(self.conn, int(txn["id"]))
 
     def _edit_row(self, row) -> None:
         """Open the full edit dialog for a posted crypto event and apply the
@@ -5024,7 +5189,7 @@ def create_account_from_values(conn, v):
 
 
 # ---------------------------------------------------------------------------
-# edit-account-details dialog (Settings > Edit Account Details)
+# edit-account-details dialog (reached from a register's gear menu)
 # ---------------------------------------------------------------------------
 class EditAccountDialog(QDialog):
     """Edit an existing account's name, type, institution, note, and open/closed
@@ -5530,6 +5695,10 @@ class AccountToolbar(QToolBar):
     hideRequested = pyqtSignal(int)
     loanSetupRequested = pyqtSignal(int)
     enterPaymentRequested = pyqtSignal(int)
+    printRequested = pyqtSignal(int)
+    # Investment-only (SRD 5.11b); hidden by default (see below), unhidden by
+    # InvestmentRegisterWidget the same way act_load_invoices is cash-only.
+    reconcileSharesRequested = pyqtSignal(int)
 
     def __init__(self, account_id, parent=None):
         super().__init__(parent)
@@ -5549,6 +5718,12 @@ class AccountToolbar(QToolBar):
         self.act_enter_payment.setVisible(False)
         self.act_details = self._add("Account Details…", self.detailsRequested)
         self.act_reconcile = self._add("Reconcile…", self.reconcileRequested)
+        # Reconcile Shares only makes sense for a holdings register; hidden by
+        # default so it never shows on cash/crypto registers, which share this
+        # bar -- InvestmentRegisterWidget reveals it (mirrors act_load_invoices).
+        self.act_reconcile_shares = self._add(
+            "Reconcile Shares…", self.reconcileSharesRequested)
+        self.act_reconcile_shares.setVisible(False)
         # Import (from a downloaded FILE) and Download (pull via webSlinger) are
         # DISTINCT actions. Download stays ALWAYS enabled/clickable so its click
         # handler always runs a preflight and reports exactly what setup is
@@ -5573,10 +5748,14 @@ class AccountToolbar(QToolBar):
             "Load a time-tagged Amazon invoice file (from Downloads) and review "
             "each order as an itemized split against this account.")
         self.act_load_invoices.setVisible(False)
+        # Print Register applies to any account type (it just shows "No
+        # transactions" for investment/crypto, whose activity lives in a
+        # different table -- see MainWindow._print_register).
+        self.act_print = self._add("Print Register…", self.printRequested)
         self.addSeparator()
         self.act_hide = self._add("Hide Account", self.hideRequested)
-        # NB: the Accounts… roster lives on the Tools menu (classic), not
-        # on this per-account bar.
+        # NB: the account roster lives on the Accounts menu (Accounts > Account
+        # List…), not on this per-account bar.
 
     def _add(self, text, signal):
         act = self.addAction(text)
@@ -6025,7 +6204,8 @@ class SplitDialog(QDialog):
         difference between the total and the line sum into an uncategorized line,
         so an unbalanced split is never rejected. Returns True on success; shows a
         warning and returns False on a rule violation (e.g. fewer than two lines,
-        or splitting a plain unsplit transfer)."""
+        or splitting a transfer without leaving a line that still transfers to
+        the counter-account, which would orphan the other side)."""
         try:
             new_total = int(round(self.total_spin.value() * 100))
             if new_total != int(self.txn["amount"]):
@@ -6048,7 +6228,7 @@ class SplitDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# reconcile-to-statement dialogs (Settings > Reconcile to Statement)
+# reconcile-to-statement dialogs (reached from a register's gear menu)
 # ---------------------------------------------------------------------------
 def _set_date_edit(edit, iso) -> None:
     """Seed a date editor from a stored ISO date, leaving today's date when the
@@ -6953,10 +7133,36 @@ class AccountBar(QWidget):
             self._body_layout.addWidget(self._build_group(title, group_rows))
         self._body_layout.addStretch(1)
 
-        nw = self.model.net_worth()
-        self.net_amount.setText(fmt_money(nw))
-        self.net_amount.setStyleSheet(
-            f"color:{style.negative_color() if nw < 0 else style.accent_color()}; font-weight:bold;")
+        missing = self.model.unconverted_currencies()
+        if missing:
+            # The roll-up is IMPOSSIBLE, not zero. Every per-currency subtotal
+            # above this strip is complete and correct; what cannot be produced is
+            # a single number, because one currency has no rate to convert
+            # through. Printing a figure that silently omits that balance is the
+            # one dishonest option available here (SRD 5.4a), so the total is
+            # replaced by the app's warning mark -- the same triangle the register
+            # shows for an unassigned split remainder -- and the tooltip says both
+            # WHAT is missing and HOW to supply it.
+            tip = (
+                "No FX rate for %s, so the total cannot be computed.\n"
+                "The per-currency subtotals above are complete.\n\n"
+                "Fix it in Tools > Exchange Rates...:  \"Add...\" enters a dated "
+                "rate by hand, or \"Refresh Rates\" fetches the latest close."
+                % ", ".join(missing)
+            )
+            # QLabel.setPixmap clears the text and setText clears the pixmap, so
+            # the two branches cannot leave each other's content behind.
+            self.net_amount.setPixmap(warning_triangle_icon().pixmap(16, 16))
+            self.net_amount.setStyleSheet("")
+            self.net_amount.setToolTip(tip)
+            self.net_row.setToolTip(tip)
+        else:
+            nw = self.model.net_worth()
+            self.net_amount.setText(fmt_money(nw))
+            self.net_amount.setStyleSheet(
+                f"color:{style.negative_color() if nw < 0 else style.accent_color()}; font-weight:bold;")
+            self.net_amount.setToolTip("")
+            self.net_row.setToolTip("")
 
         self._apply_min_width()
 
@@ -7301,7 +7507,14 @@ class DisplayPreferencesDialog(QDialog):
     negative-amount color, and the default one/two-line view. Values persist via
     mammon.ui.prefs (QSettings; no DB write) and apply live to open registers.
     Defaults reproduce the current look exactly, so nothing changes unless the
-    user opts in; Restore Defaults resets every field to that look."""
+    user opts in; Restore Defaults resets every field to that look.
+
+    Sound and date-format used to live here too; they moved out to their own
+    Settings > Sound Preferences / Format Preferences submenus (built by
+    MainWindow._build_sound_preferences_menu / _build_format_preferences_menu)
+    so each can grow its own set of choices -- more sounds and more
+    sound-worthy events, more date formats -- without this dialog's single
+    on/off checkbox and one combo box standing in the way."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -7329,17 +7542,6 @@ class DisplayPreferencesDialog(QDialog):
 
         self.two_line = QCheckBox("Open registers in two-line view")
         self.two_line.setChecked(prefs.two_line_default())
-        self.sound = QCheckBox("Play a sound when a transaction is saved")
-        self.sound.setChecked(prefs.sound_enabled())
-
-        # Date DISPLAY format (parsing/storage stay ISO). Every shown date -- the
-        # register, the import-review list, report/plot axis labels -- renders
-        # through fmt_date, which reads this preference.
-        self.date_format = QComboBox()
-        for f in prefs.DATE_FORMATS:
-            self.date_format.addItem(f, f)
-        di = self.date_format.findData(prefs.date_format())
-        self.date_format.setCurrentIndex(di if di >= 0 else 0)
 
         form.addRow("Theme", self.theme)
         form.addRow("Font", self.font_family)
@@ -7347,9 +7549,7 @@ class DisplayPreferencesDialog(QDialog):
         form.addRow("", self.row_shading)
         form.addRow("Alternate-row color", self.alt_row_btn)
         form.addRow("Negative-amount color", self.negative_btn)
-        form.addRow("Date format", self.date_format)
         form.addRow("", self.two_line)
-        form.addRow("", self.sound)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -7379,9 +7579,6 @@ class DisplayPreferencesDialog(QDialog):
         self.alt_row_btn.set_color(prefs.DEFAULT_ALT_ROW_COLOR)
         self.negative_btn.set_color(prefs.DEFAULT_NEGATIVE_COLOR)
         self.two_line.setChecked(prefs.DEFAULT_TWO_LINE)
-        self.sound.setChecked(prefs.DEFAULT_SOUND)
-        dd = self.date_format.findData(prefs.DEFAULT_DATE_FORMAT)
-        self.date_format.setCurrentIndex(dd if dd >= 0 else 0)
 
     def values(self) -> dict:
         return {
@@ -7392,8 +7589,6 @@ class DisplayPreferencesDialog(QDialog):
             "alt_row_color": self.alt_row_btn.color(),
             "negative_color": self.negative_btn.color(),
             "two_line": self.two_line.isChecked(),
-            "sound": self.sound.isChecked(),
-            "date_format": self.date_format.currentData(),
         }
 
 
@@ -7522,8 +7717,6 @@ class MainWindow(QMainWindow):
     # ---- construction -----------------------------------------------------
     def _build_menu(self):
         menu = self.menuBar().addMenu("&File")
-        menu.addAction("New Account…", lambda: self.accounts.on_new_account())
-        menu.addSeparator()
         menu.addAction("New Database…", self._new_database_dialog)
         menu.addAction("Open Database…", self._open_database_dialog)
         menu.addAction("Save Database As…", self._save_db_as_dialog)
@@ -7538,6 +7731,12 @@ class MainWindow(QMainWindow):
         menu.addAction("Restore from Backup…", self._restore_backup_dialog)
         menu.addSeparator()
         menu.addAction("Quit", self.close)
+
+        accounts_menu = self.menuBar().addMenu("&Accounts")
+        accounts_menu.addAction("New Account…", lambda: self.accounts.on_new_account())
+        # Renamed from Tools > Accounts… -- the roster of every account is an
+        # Accounts-menu concern now that one exists, not a Tools one.
+        accounts_menu.addAction("Account List…", self._accounts_list_dialog)
 
         edit = self.menuBar().addMenu("&Edit")
         self.act_undo = edit.addAction("Undo", self._undo_current)
@@ -7556,19 +7755,33 @@ class MainWindow(QMainWindow):
         self._sync_edit_actions()
 
         view = self.menuBar().addMenu("&View")
-        self._one_line_act = view.addAction(
-            "One Line", lambda: self._set_register_view_mode("one"))
-        self._two_line_act = view.addAction(
-            "Two Lines", lambda: self._set_register_view_mode("two"))
+        # One Line / Two Lines already lives in every register's gear menu, so
+        # it no longer needs a second home here. The two actions themselves
+        # still exist as plain (unparented-to-any-menu) QActions: they are the
+        # one contract _set_register_view_mode and apply_display_prefs use to
+        # track/report the current choice, and removing them outright would
+        # mean rebuilding that bookkeeping just to drop a menu entry.
+        self._one_line_act = QAction("One Line", self)
+        self._two_line_act = QAction("Two Lines", self)
+        self._one_line_act.triggered.connect(
+            lambda: self._set_register_view_mode("one"))
+        self._two_line_act.triggered.connect(
+            lambda: self._set_register_view_mode("two"))
         group = QActionGroup(self)
         group.setExclusive(True)
         for act, mode in ((self._one_line_act, "one"), (self._two_line_act, "two")):
             act.setCheckable(True)
             act.setChecked(self.register_view_mode == mode)
             group.addAction(act)
+        view.addAction("Financial Calendar", self.show_calendar)
+        # Investment Center is a future landing page for holdings/allocation
+        # across every investment account; disabled until it exists so the
+        # end-state menu shape is visible without a dead click.
+        investment_center_act = view.addAction("Investment Center…")
+        investment_center_act.setEnabled(False)
+        investment_center_act.setToolTip("Coming soon.")
 
         tools = self.menuBar().addMenu("&Tools")
-        tools.addAction("Accounts…", self._accounts_list_dialog)
         tools.addAction("Download Log…", self._download_log_dialog)
         tools.addAction("Category Manager…", self._manage_categories_dialog)
         tools.addAction("Tag Manager…", self._manage_tags_dialog)
@@ -7587,16 +7800,17 @@ class MainWindow(QMainWindow):
         self.act_scheduled = tools.addAction("Scheduled Payments…",
                                              self._scheduled_payments_dialog)
         tools.addAction("Projected Balances…", self._projected_balances_dialog)
-        tools.addAction("Financial Calendar", self.show_calendar)
 
         settings = self.menuBar().addMenu("&Settings")
-        settings.addAction("Edit Account Details…", self._edit_account_details_dialog)
         # Loan Setup now lives at the TOP of the loan register (a toolbar button
         # shown only for loan/liability accounts), not here in Settings.
-        settings.addAction("Reconcile to Statement…", self._reconcile_dialog)
-        settings.addAction("Print Register…", self._print_register)
-        settings.addSeparator()
+        # Edit Account Details, Reconcile to Statement, Reconcile Shares and
+        # Print Register all moved to each register's gear menu -- they act on
+        # "the account currently open in a register", which the gear already
+        # is, so Settings no longer duplicates them.
         settings.addAction("Display Preferences…", self._display_preferences_dialog)
+        self._build_sound_preferences_menu(settings)
+        self._build_format_preferences_menu(settings)
 
         reports = self.menuBar().addMenu("&Reports")
         reports.addAction("Spending by Category…", self._spending_report_dialog)
@@ -8078,12 +8292,242 @@ class MainWindow(QMainWindow):
             msg += chr(10) + chr(10) + "Could not delete:" + chr(10) + chr(10).join(failed)
         QMessageBox.information(self, "Unencrypted backups", msg)
 
-    def _import_qif_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Quicken file", "",
+    def _choose_qif_files(self):
+        """Ask for one or MORE Quicken files, newest-style multi-select.
+
+        A full Quicken history does not come out as one file: Quicken could not
+        write this ledger as a single QIF and the export had to be taken a year
+        at a time, so the migration is a SET of files. The caption says so --
+        a file dialog that accepts a multi-selection while its title says
+        "file" singular does not tell the user they may shift-click the lot.
+
+        Split out as the seam headless tests override (the same convention as
+        :meth:`_choose_import_files`)."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import Quicken files - select one or more", "",
             "Quicken files (*.qif *.QIF);;All files (*)")
-        if not path:
+        return [p.strip() for p in (paths or []) if p and p.strip()]
+
+    @staticmethod
+    def _qif_import_order(paths):
+        """The order a multi-file QIF set is imported in: alphanumeric by FILE
+        NAME, case-insensitively (ties broken by the raw name so the order is
+        total and stable).
+
+        Import order is not cosmetic. A yearly export carries each account's
+        opening balance in the FIRST file only, and the oldest file must land
+        first for that to be adopted as an opening balance rather than read as a
+        mid-history row. So the files must be NAMED such that sorting them
+        alphanumerically puts them in chronological order (``Mammon_1997.QIF``,
+        ``Mammon_1998.QIF``, ... sorts correctly; a four-digit year is what makes
+        it work). The chosen order is echoed in the completion report so it can
+        be checked against what was intended."""
+        from pathlib import Path as _Path
+        return sorted(paths, key=lambda p: (_Path(p).name.lower(), _Path(p).name))
+
+    def _import_qif_dialog(self):
+        """File > Import Quicken File(s). One file keeps its existing routing;
+        several are a migration SET, imported in :meth:`_qif_import_order`."""
+        paths = self._choose_qif_files()
+        if not paths:
             return
+        paths = self._qif_import_order(paths)
+        if len(paths) > 1:
+            self._import_qif_set(paths)
+            return
+        self._import_one_qif(paths[0])
+
+    def _qif_progress(self, total):
+        """A live progress dialog for a multi-file import, or None.
+
+        A migration set is the one operation in this app long enough to look
+        hung: the import runs on the GUI thread, so Qt cannot repaint and the
+        window greys out with nothing to say for itself (the reported complaint).
+        This is shown non-modally and driven by hand between files --
+        ``show()``/``setValue()``, never ``exec_()``, which under the offscreen
+        platform would block forever (CLAUDE.md, headless-modal hazard).
+
+        Split out as the seam headless tests override, the same convention as
+        :meth:`_choose_import_files` and :meth:`_choose_qif_files`; a test
+        returning None exercises the loop with no dialog at all."""
+        dlg = QProgressDialog("Preparing to import...", "Cancel", 0, total, self)
+        dlg.setWindowTitle("Importing Quicken files")
+        # Show at once: the default 4-second delay is most of the window in which
+        # the user is wondering whether anything is happening.
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+        return dlg
+
+    def _import_qif_set(self, paths):
+        """Import SEVERAL Quicken files as ONE migration, in ``paths`` order.
+
+        Each file is routed by its own content, exactly as a lone file is: a
+        multi-account file (or one bearing a securities / price master) imports
+        in bulk, while a single-account file still goes through the import review
+        queue -- several files of the SAME account forming one review batch,
+        because a batch is the unit the review panel and retention count.
+
+        The cutover watermark is DEFERRED for every file and applied once at the
+        end. Applied per file it would block the rest of the set: the first
+        file's watermark makes _before_cutover skip every later-imported row
+        dated on or before it, so any order but oldest-first would discard most
+        of the set and call the rows duplicates. Deferring is also what makes a
+        mis-sorted selection merely out of order rather than silently empty.
+
+        Reports ONCE, naming the order used, so a set whose names did not sort
+        the way the user expected is visible rather than silent."""
+        from pathlib import Path as _Path
+        from mammon import importers
+        from mammon.importers.qif import QifExtras, parse_qif
+
+        direct_results = []            # ImportResult per bulk-imported file
+        review_files = {}              # account name -> [path, ...], in order
+        failed = []
+        per_file = []                  # one report line per file, in order
+        cancelled = False
+        progress = self._qif_progress(len(paths))
+        try:
+            for index, path in enumerate(paths, start=1):
+                name = _Path(path).name
+                if progress is not None:
+                    if progress.wasCanceled():
+                        # Cancel takes effect BETWEEN files: the file already
+                        # importing is left to finish rather than abandoned
+                        # half-written, and everything imported so far stays (each
+                        # file commits its own rows).
+                        cancelled = True
+                        break
+                    progress.setLabelText(
+                        f"Importing {name}  ({index} of {len(paths)})")
+                    progress.setValue(index - 1)
+                    # The import occupies this thread, so Qt only gets to repaint
+                    # when we hand it back explicitly.
+                    QApplication.processEvents()
+                try:
+                    with open(path, "rb") as fh:
+                        text = importers._decode(fh.read())
+                    extras = QifExtras()
+                    records = parse_qif(text, collector=extras)
+                except Exception as exc:
+                    failed.append(f"{name} - {exc}")
+                    continue
+                names = importers.distinct_account_names(records)
+                direct = (len(names) != 1) or bool(extras.securities or extras.prices)
+                if direct:
+                    try:
+                        res = importers.import_file(
+                            self.conn, path, set_cutover=False)
+                    except Exception as exc:
+                        failed.append(f"{name} - {exc}")
+                        continue
+                    direct_results.append(res)
+                    per_file.append(
+                        f"  {name}: +{res.added} added, {res.duplicates} dup"
+                        + (f", {res.errors} errors" if res.errors else ""))
+                    continue
+                review_files.setdefault(next(iter(names)), []).append(path)
+                per_file.append(f"  {name}: queued for review")
+            if progress is not None:
+                progress.setValue(len(paths))
+                QApplication.processEvents()
+        finally:
+            if progress is not None:
+                progress.close()
+
+        # The deferred watermarks, now that every file of the set has landed.
+        for res in direct_results:
+            if res.import_id is None:
+                continue
+            for aid, d in ledger.account_max_dates_for_import(
+                    self.conn, res.import_id).items():
+                ledger.set_account_cutover_date(self.conn, aid, d)
+
+        review_lines = []
+        for account_name, group in review_files.items():
+            line = self._import_qif_review_group(account_name, group)
+            if line:
+                review_lines.append(line)
+
+        self._refresh_all()
+        added = sum(r.added for r in direct_results)
+        dups = sum(r.duplicates for r in direct_results)
+        errors = sum(r.errors for r in direct_results)
+        transfers = sum(r.transfers for r in direct_results)
+        invs = sum(r.investments for r in direct_results)
+        order = ", ".join(_Path(p).name for p in paths)
+        done = len(direct_results) + sum(len(g) for g in review_files.values())
+        header = (f"Cancelled after {done} of {len(paths)} file(s). "
+                  f"What had already been imported was kept."
+                  if cancelled else
+                  f"{len(paths)} file(s) imported in this order:")
+        msg = [header, order, ""]
+        if per_file:
+            msg.extend(per_file)
+            msg.append("")
+        if direct_results:
+            msg.append(f"Added {added} transactions ({transfers} transfers, "
+                       f"{invs} investments) from {len(direct_results)} file(s) "
+                       f"imported directly.")
+            msg.append(f"{dups} duplicates skipped, {errors} errors.")
+        msg.extend(review_lines)
+        if failed:
+            msg.append("")
+            msg.append("Could not read: " + ", ".join(failed))
+        QMessageBox.information(self, "Import complete", chr(10).join(msg))
+
+    def _import_qif_review_group(self, account_name, paths):
+        """Queue one account's single-account QIF files as ONE review batch.
+
+        Returns a line for the caller's single report, or "" when nothing could
+        be read. Nothing enters the register here: the rows are classified and
+        persisted, and the user accepts them in the review panel."""
+        from mammon import importers
+        account_id = None
+        for acct in ledger.list_accounts(self.conn, include_closed=True):
+            if str(acct["name"]).strip().lower() == account_name.strip().lower():
+                account_id = int(acct["id"])
+                break
+        batch_id = None
+        parsed = inserted = 0
+        for path in paths:
+            try:
+                entries = importers.import_single_account(
+                    self.conn, records=None, account=account_name, path=path,
+                    finalize=False)
+            except Exception:
+                continue
+            if account_id is None:
+                # import_single_account get-or-creates the account, so its id is
+                # only knowable after the first file of the group.
+                for acct in ledger.list_accounts(self.conn, include_closed=True):
+                    if str(acct["name"]).strip().lower() == account_name.strip().lower():
+                        account_id = int(acct["id"])
+                        break
+            if account_id is None:
+                continue
+            if batch_id is None:
+                batch_id = import_review.start_batch(
+                    self.conn, account_id, source="import",
+                    file_count=len(paths), note=account_name)
+            parsed += len(entries)
+            inserted += import_review.persist_entries(
+                self.conn, account_id, entries, batch_id=batch_id)
+        if account_id is None:
+            return ""
+        import_review.purge_old_batches(self.conn, account_id)
+        entries = self._load_review_entries(account_id)
+        self.open_register(account_id)
+        reg = self._registers.get(account_id)
+        if reg is not None and hasattr(reg, "show_review"):
+            reg.show_review(entries)
+        return (f"{account_name}: {parsed} row(s) read from {len(paths)} file(s), "
+                f"{inserted} newly queued for review (nothing posted yet).")
+
+    def _import_one_qif(self, path):
         from mammon import importers
         from mammon.importers.qif import QifExtras, parse_qif
         # Parse once to decide the route. A QIF that carries BOTH accounts of a
@@ -8247,6 +8691,8 @@ class MainWindow(QMainWindow):
                 tb.hideRequested.connect(self._hide_account)
                 tb.loanSetupRequested.connect(self._loan_setup_for_account)
                 tb.enterPaymentRequested.connect(self._enter_loan_payment)
+                tb.printRequested.connect(self._print_account)
+                tb.reconcileSharesRequested.connect(self._reconcile_shares_account)
                 # Surface the Loan Setup button at the top of loan registers.
                 is_liability = acct is not None and acct["type"] == "liability"
                 is_loan = False
@@ -8310,6 +8756,45 @@ class MainWindow(QMainWindow):
         if dlg.exec_() != QDialog.Accepted:
             return
         self.apply_display_prefs(dlg.values())
+
+    # ---- sound preferences -------------------------------------------------
+    def _build_sound_preferences_menu(self, settings_menu) -> None:
+        """Settings > Sound Preferences: a submenu (not a single toggle) so more
+        sounds and more sound-worthy events (import complete, download complete,
+        ...) can be added here later without another menu reshuffle. Today it
+        holds exactly one checkable action, wired straight to prefs -- no
+        dialog, no OK/Cancel, since a single on/off switch doesn't need one."""
+        menu = settings_menu.addMenu("Sound Preferences")
+        self._sound_on_save_act = menu.addAction(
+            "Play Sound on Transaction Save")
+        self._sound_on_save_act.setCheckable(True)
+        self._sound_on_save_act.setChecked(prefs.sound_enabled())
+        self._sound_on_save_act.toggled.connect(prefs.set_sound_enabled)
+
+    # ---- format preferences -------------------------------------------------
+    def _build_format_preferences_menu(self, settings_menu) -> None:
+        """Settings > Format Preferences: date DISPLAY format only (parsing and
+        storage stay ISO). A submenu rather than a dialog field, mirroring Sound
+        Preferences, so a future format choice (e.g. amount formatting) has
+        somewhere to go beside this one."""
+        menu = settings_menu.addMenu("Format Preferences")
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        current = prefs.date_format()
+        for fmt in prefs.DATE_FORMATS:
+            act = menu.addAction(fmt)
+            act.setCheckable(True)
+            act.setChecked(fmt == current)
+            act.triggered.connect(
+                lambda _checked=False, f=fmt: self._set_date_format(f))
+            group.addAction(act)
+
+    def _set_date_format(self, fmt: str) -> None:
+        """Format Preferences > <format>: persist the chosen date DISPLAY format
+        and re-stamp every open date editor to match (see apply_display_prefs's
+        equivalent call for why refresh_date_format is needed at all)."""
+        prefs.set_date_format(fmt)
+        refresh_date_format(self)
 
     def apply_display_prefs(self, values):
         """PERSIST a Display-Preferences dict and apply it live: re-theme the app
@@ -8390,18 +8875,12 @@ class MainWindow(QMainWindow):
         reg.select_txn(txn_id)
 
     # ---- settings / reports ----------------------------------------------
-    def _edit_account_details_dialog(self):
-        """Settings menu entry: edit the currently-selected account's details."""
-        aid = getattr(self, "_current_account", None)
-        if aid is None:
-            QMessageBox.information(self, "Account Details",
-                                    "Select an account on the left first.")
-            return
-        self._account_details_dialog(aid)
-
     def _account_details_dialog(self, account_id):
-        """Open the account-details dialog for ``account_id`` (the toolbar's
-        Account Details… action and the Settings menu both land here)."""
+        """Open the account-details dialog for ``account_id``, reached from a
+        register's gear menu (Account Details…; formerly also a Settings menu
+        entry that acted on whatever account was "current" -- the gear menu
+        already knows which account it belongs to, so that indirection is
+        gone)."""
         acct = ledger.get_account(self.conn, account_id)
         if acct is None:
             return
@@ -8449,6 +8928,20 @@ class MainWindow(QMainWindow):
         """Toolbar Reconcile… -> the existing reconcile flow for this account."""
         self._current_account = account_id
         self._reconcile_dialog()
+
+    def _reconcile_shares_account(self, account_id):
+        """Toolbar Reconcile Shares… (investment-only) -> the existing share
+        reconcile flow for this account."""
+        self._current_account = account_id
+        self._share_reconcile_dialog()
+
+    def _print_account(self, account_id):
+        """Toolbar Print Register… -> the existing print flow for this
+        account. Formerly a Settings-menu item; each register's gear now
+        reaches it directly rather than requiring that register be the
+        "current" one via a separate menu click."""
+        self._current_account = account_id
+        self._print_register()
 
     def _import_account(self, account_id):
         """Toolbar Import… -> a per-account import from a downloaded FILE.
@@ -9308,6 +9801,34 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Reconcile to Statement",
                                     "Reconciliation complete - cleared items are now marked R.")
 
+    def _share_reconcile_dialog(self):
+        """Reconcile SHARE balances (SRD 5.11b). Unlike the cash reconcile there
+        is no 'enter the statement figures first' prompt: an investment statement
+        states a number for every fund, so the figures are edited in the
+        workspace itself -- or imported wholesale from a holdings snapshot, which
+        is the point of the dialog's Import button."""
+        aid = getattr(self, "_current_account", None)
+        if aid is None:
+            QMessageBox.information(self, "Reconcile Shares",
+                                    "Select an investment account on the left first.")
+            return
+        acct = ledger.get_account(self.conn, aid)
+        if acct is None or (acct["type"] or "").strip().lower() != "investment":
+            QMessageBox.information(self, "Reconcile Shares",
+                                    "Share reconciliation applies to investment accounts.")
+            return
+        from mammon.ui.share_reconcile_dialog import ShareReconcileDialog
+        dlg = ShareReconcileDialog(self.conn, aid, parent=self)
+        dlg.exec_()
+        # Cleared/reconciled marks and (on an adjustment) a new row may have
+        # changed however the window closed.
+        self._refresh_all()
+        if dlg.finished_ok:
+            QMessageBox.information(
+                self, "Reconcile Shares",
+                "Reconciled: " + ", ".join(dlg.finished_symbols)
+                + "\n\nCleared items in those periods are now marked R.")
+
     def _print_register(self):
         aid = getattr(self, "_current_account", None)
         if aid is None:
@@ -9333,16 +9854,21 @@ class MainWindow(QMainWindow):
             return
         printing.render_html_to_printer(html_str, printer)
 
-    def _report_categories(self, start, end):
-        """Top-level category names for the customization checklist, taken from
-        the full-range report so the list is stable as the user narrows dates."""
-        from mammon import reports
-        return [r.name for r in
-                reports.spending_by_category(self.conn, start, end).rows]
+    # ``_report_categories`` / ``_income_report_categories`` used to build the
+    # chart dialogs' checklists here, each from a report AGGREGATION
+    # (``spending_by_category`` / ``income_category_rows``). Both are gone. A
+    # picker sourced from an aggregation can only ever offer what that
+    # aggregation returns -- money OUT, in the spending case -- which is how the
+    # Itemize picker came to render an income section nobody could tick, and it
+    # also made a category with no activity in the shown range disappear from the
+    # list when the dates moved. Every dialog now declares a SCOPE instead
+    # (``category_kind=``) and ``report_filters.category_picker_names`` answers
+    # from the ledger's own category tree. Do not reintroduce a picker whose
+    # names come from a report.
 
     def _report_period_header(self, lay, dlg, customize, refresh,
                               default_key=None):
-        """Report header row: the shared Period dropdown (§5.8d, default
+        """Report header row: the shared Period dropdown (§5.9c, default
         'Year-to-Date') to the LEFT of the Customize gear -- the SAME dropdown
         the reusable report windows use. Selecting a preset re-filters
         immediately; 'Custom' opens the existing customize dialog, defaulting its
@@ -9357,7 +9883,8 @@ class MainWindow(QMainWindow):
         import datetime as _dt
         from PyQt5.QtWidgets import QHBoxLayout, QLabel
         from mammon.ui.report_filters import (customize_button, resolve_period,
-                                             make_period_combo, PERIOD_DEFAULT)
+                                             make_period_combo, PERIOD_DEFAULT,
+                                             sync_period_combo)
         if default_key is None:
             default_key = PERIOD_DEFAULT
 
@@ -9373,6 +9900,14 @@ class MainWindow(QMainWindow):
         def _remember():
             self._last_custom_range = (customize.filters.start_iso(),
                                        customize.filters.end_iso())
+            # The dropdown is a LABEL as well as an input: a range the user typed
+            # in the gear dialog must not leave it advertising a preset it no
+            # longer matches (§5.9b). Signals are blocked inside
+            # sync_period_combo, so this cannot re-enter _on_period -- on
+            # "custom" that would reopen this very dialog.
+            sync_period_combo(combo, customize.filters.start_iso(),
+                              customize.filters.end_iso(), self.conn,
+                              _dt.date.today())
         customize.applied.connect(_remember)
 
         def _on_period(idx):
@@ -9449,20 +9984,24 @@ class MainWindow(QMainWindow):
     def _spending_report_dialog(self):
         import datetime as _dt
         from mammon import reports
-        from mammon.ui.report_filters import CustomizeDialog, filter_spending_report
-        bstart, bend = ledger.transaction_date_bounds(self.conn)
+        from mammon.ui.report_filters import (CATEGORY_KIND_EXPENSE,
+                                              CustomizeDialog,
+                                              filter_spending_report)
+        bstart, _bend = ledger.transaction_date_bounds(self.conn)
         if not bstart:
             QMessageBox.information(self, "Spending by Category",
                                     "No transactions to report yet.")
             return
         # Default period is Year-to-Date; the category checklist covers the full
-        # ledger so it stays complete when the period changes.
+        # ledger so it stays complete when the period changes. This report shows
+        # money OUT only, so its scope is EXPENSE -- offering income names here
+        # would tick rows that can never appear.
         start, end = reports.preset_range("ytd", _dt.date.today())
         dlg = QDialog(self)
         dlg.setWindowTitle("Spending by Category")
         lay = QVBoxLayout(dlg)
         customize = CustomizeDialog(self.conn, start, end, show_accounts=True,
-                                    categories=self._report_categories(bstart, bend),
+                                    category_kind=CATEGORY_KIND_EXPENSE,
                                     parent=dlg)
         view = QPlainTextEdit()
         view.setReadOnly(True)
@@ -9514,12 +10053,13 @@ class MainWindow(QMainWindow):
         (the smallest categories that together make up 10% of the total), and
         clicking ``Other`` drills into its components -- the same rollup + drill
         the Income and Asset-Allocation pies use, all three reusing
-        ``SlicesPieCanvas`` / ``group_small_slices`` (SRD 5.8d) so the logic
+        ``SlicesPieCanvas`` / ``group_small_slices`` (SRD 5.9c) so the logic
         lives in one place. Wedge percentages read against the whole period
         total even inside the drill. The Back button (or a click off the pie)
         returns."""
         from mammon import reports
-        from mammon.ui.report_filters import CustomizeDialog
+        from mammon.ui.report_filters import (CATEGORY_KIND_EXPENSE,
+                                              CustomizeDialog)
         from mammon.ui.charts import SlicesPieCanvas
         from mammon.ui.models import fmt_date
         start, end = ledger.transaction_date_bounds(self.conn)
@@ -9530,8 +10070,9 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Spending by Category")
         lay = QVBoxLayout(dlg)
+        # A spending pie can only draw money OUT, so its picker is EXPENSE-scoped.
         customize = CustomizeDialog(self.conn, start, end, show_accounts=True,
-                                    categories=self._report_categories(start, end),
+                                    category_kind=CATEGORY_KIND_EXPENSE,
                                     parent=dlg)
         back_btn = QPushButton("← Back to all categories")
         back_btn.setVisible(False)
@@ -9588,10 +10129,11 @@ class MainWindow(QMainWindow):
         slice (everything under 10% of the total), and clicking ``Other`` drills
         into its component categories -- the same rollup + drill-down the
         asset-allocation pie uses. Both reuse ``SlicesPieCanvas`` /
-        ``group_small_slices`` (SRD 5.8d), so the threshold/rollup logic lives in
+        ``group_small_slices`` (SRD 5.9c), so the threshold/rollup logic lives in
         exactly one place. The Back button (or a click off the pie) returns."""
         from mammon import reports
-        from mammon.ui.report_filters import CustomizeDialog
+        from mammon.ui.report_filters import (CATEGORY_KIND_INCOME,
+                                              CustomizeDialog)
         from mammon.ui.charts import SlicesPieCanvas
         from mammon.ui.models import fmt_date
         start, end = ledger.transaction_date_bounds(self.conn)
@@ -9602,8 +10144,11 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Income by Category")
         lay = QVBoxLayout(dlg)
+        # The income twin of the spending pie: INCOME-scoped picker, so an expense
+        # name can never be offered to a chart that cannot draw it.
         customize = CustomizeDialog(self.conn, start, end, show_accounts=True,
-                                    categories=None, parent=dlg)
+                                    category_kind=CATEGORY_KIND_INCOME,
+                                    parent=dlg)
         back_btn = QPushButton("← Back to all categories")
         back_btn.setVisible(False)
         lay.addWidget(back_btn)
@@ -9628,6 +10173,9 @@ class MainWindow(QMainWindow):
             f = customize.filters
             rows = reports.income_category_rows(
                 self.conn, f.start_iso(), f.end_iso(), f.selected_account_ids())
+            sel = f.selected_categories()
+            if sel is not None:                 # honor the category filter by name
+                rows = [(n, c) for n, c in rows if n in sel]
             if state["canvas"] is not None:
                 holder.removeWidget(state["canvas"])
                 state["canvas"].setParent(None)
@@ -9662,7 +10210,8 @@ class MainWindow(QMainWindow):
         never happened, which is a different question from net worth and is
         titled as such so a saved image cannot be mistaken for the real curve."""
         from mammon import reports
-        from mammon.ui.report_filters import (CustomizeDialog,
+        from mammon.ui.report_filters import (CATEGORY_KIND_EXPENSE,
+                                              CustomizeDialog,
                                               NET_WORTH_PERIOD_DEFAULT)
         from mammon.ui.charts import NetWorthCanvas
         start, end = ledger.transaction_date_bounds(self.conn)
@@ -9673,9 +10222,14 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Net Worth Over Time")
         lay = QVBoxLayout(dlg)
-        all_categories = self._report_categories(start, end)
+        # The what-if is "as if this SPENDING had never happened", so the picker is
+        # expense-scoped. The bar remembers what it offered (``category_names``),
+        # which is what ``refresh`` subtracts the ticks from -- the dialog no
+        # longer keeps a second copy of the list that could drift from the widget.
         customize = CustomizeDialog(self.conn, start, end, show_accounts=True,
-                                    categories=all_categories, parent=dlg)
+                                    category_kind=CATEGORY_KIND_EXPENSE,
+                                    parent=dlg)
+        all_categories = customize.filters.category_names
         holder = QVBoxLayout()
         lay.addLayout(holder)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
@@ -9714,7 +10268,7 @@ class MainWindow(QMainWindow):
 
         customize.applied.connect(refresh)
         # Net Worth keeps the whole-ledger default; a cumulative curve is
-        # meaningless over a partial-year YTD slice (SRD §5.8d).
+        # meaningless over a partial-year YTD slice (SRD §5.9c).
         self._report_period_header(lay, dlg, customize, refresh,
                                    default_key=NET_WORTH_PERIOD_DEFAULT)
         refresh()

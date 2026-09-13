@@ -16,7 +16,7 @@ from typing import Iterable, Optional
 
 from mammon import ledger
 from mammon.reports._lines import (category_subtree, resolve_accounts,
-                                   validate_date)
+                                   top_level_ids_for_names, validate_date)
 
 CLR_STATES = ("any", "uncleared", "cleared", "reconciled")
 
@@ -36,6 +36,8 @@ def transactions(conn, start: str, end: str, *,
                  account_ids: Optional[Iterable[int]] = None,
                  include_hidden: bool = False,
                  category_ids: Optional[Iterable[int]] = None,
+                 expand_subtree: bool = True,
+                 top_level_names: Optional[Iterable[str]] = None,
                  payee_contains: Optional[str] = None,
                  memo_contains: Optional[str] = None,
                  tag: Optional[str] = None,
@@ -51,7 +53,22 @@ def transactions(conn, start: str, end: str, *,
     ``cleared`` (the ``c`` state alone) or ``reconciled``. A row carries the
     account name, the register's category label (``Parent:Child``,
     ``[Account]`` or ``--Split--``), and ``transfer_account`` when it is a
-    transfer leg."""
+    transfer leg.
+
+    ``category_ids`` and ``top_level_names`` are two spellings of the same
+    filter and INTERSECT when both are given: ids are what a tool caller has,
+    top-level names are what the report window's category check-list offers
+    (SRD 5.9c). By default the named/given categories bring their whole subtree
+    (:func:`top_level_ids_for_names`), so "just Church" still lists the
+    transactions posted to its sub-categories. A row with no category -- an
+    uncategorized entry or a transfer leg -- matches no category filter, so
+    narrowing the check-list drops transfers from the listing.
+
+    ``expand_subtree=False`` turns ``category_ids`` into an EXACT set: only the
+    ids given may match, descendants included only where they are listed. That
+    is what the report window's category tree passes, because there a parent can
+    be ticked while one of its children is deliberately not -- expanding the
+    parent would silently re-admit the child the user just excluded."""
     validate_date(start)
     validate_date(end)
     if cleared not in CLR_STATES:
@@ -69,7 +86,13 @@ def transactions(conn, start: str, end: str, *,
         "SELECT * FROM transactions WHERE " + " AND ".join(where) + f" ORDER BY {order}",
         params).fetchall()
 
-    cats = category_subtree(conn, category_ids) if category_ids is not None else None
+    cats = None
+    if category_ids is not None:
+        cats = (category_subtree(conn, category_ids) if expand_subtree
+                else {int(c) for c in category_ids})
+    named = top_level_ids_for_names(conn, top_level_names)
+    if named is not None:
+        cats = named if cats is None else (cats & named)
     payee_q = (payee_contains or "").strip().lower()
     memo_q = (memo_contains or "").strip().lower()
     tag_q = (tag or "").strip().lower()

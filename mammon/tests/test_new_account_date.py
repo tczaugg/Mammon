@@ -35,11 +35,21 @@ def date_pref():
     prefs.set_date_format(saved)
 
 
-def test_new_account_date_defaults_to_blank_none(qapp, date_pref):
+def test_new_account_date_defaults_to_today_but_can_clear(qapp, date_pref):
+    """The unbound opening date must OPEN on today and be typeable, never the Qt
+    sentinel minimum (which rendered blank and refused keystrokes). blank_ok is
+    kept, so a user who wants no opening date can still clear it back to None."""
+    from PyQt5.QtCore import QDate
     from mammon.ui.widgets import NewAccountDialog
     dlg = NewAccountDialog()
     try:
-        # Optional field left untouched -> None, NOT today's date.
+        edit = dlg.opening_date
+        # Visible default is today, a real date -- not the 1752/1772 sentinel.
+        assert edit.date() == QDate.currentDate()
+        assert edit.date() != edit.minimumDate()
+        assert dlg.values()["opening_date"] == QDate.currentDate().toString("yyyy-MM-dd")
+        # Clearing to the sentinel still yields None (blank_ok preserved).
+        edit.setDate(edit.minimumDate())
         assert dlg.values()["opening_date"] is None
     finally:
         dlg.deleteLater()

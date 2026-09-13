@@ -26,9 +26,10 @@ from typing import Optional
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from mammon import rebalance
@@ -73,9 +74,10 @@ def _signed_pct(value: Decimal) -> str:
 class RebalanceDialog(QDialog):
     """Set a target mix and see the drift from it."""
 
-    HEADERS = ["Asset class", "Target %", "Current %", "Drift (pts)",
+    HEADERS = ["Asset class", "Lock", "Target %", "Current %", "Drift (pts)",
                "Drift (rel)", "Current", "Target", "Rebalance"]
-    CLASS, TARGET, CURRENT, DRIFT, DRIFT_REL, CUR_VAL, TGT_VAL, MOVE = range(8)
+    (CLASS, LOCK, TARGET, CURRENT, DRIFT, DRIFT_REL, CUR_VAL, TGT_VAL,
+     MOVE) = range(9)
 
     def __init__(self, conn, parent=None, as_of: Optional[str] = None):
         super().__init__(parent)
@@ -83,6 +85,7 @@ class RebalanceDialog(QDialog):
         self.as_of = as_of
         self.report = None
         self._loading = False
+        self._locked: set = set()
         self.setWindowTitle("Target & Drift")
         self.resize(920, 620)
 
@@ -281,9 +284,28 @@ class RebalanceDialog(QDialog):
         and a class with no holding then loses its row entirely.
         """
         tid = self.current_target_id()
-        if tid is None:
+        if tid is None or self._loading:
             return
-        rebalance.set_line(self.conn, int(tid), asset_class, Decimal(str(pct)))
+        # The domain owns the arithmetic: it moves the OTHER unlocked classes so
+        # the column still totals 100, and clamps an edit nothing can absorb.
+        rebalance.set_line_balanced(self.conn, int(tid), asset_class,
+                                    Decimal(str(pct)))
+        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of)
+        self._fill_status(self.report)
+        QTimer.singleShot(0, self._redraw_rows)
+
+    def set_locked(self, asset_class: str, locked: bool) -> None:
+        """Pin or release one class's weight (the lock checkboxes call this).
+
+        Same deferral as ``set_target_pct`` and for the same reason: this runs
+        inside the checkbox's own ``toggled``, and the redraw calls
+        ``setCellWidget``, which would delete that checkbox under its live
+        signal frame.
+        """
+        tid = self.current_target_id()
+        if tid is None or self._loading:
+            return
+        rebalance.set_locked(self.conn, int(tid), asset_class, bool(locked))
         self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of)
         self._fill_status(self.report)
         QTimer.singleShot(0, self._redraw_rows)
@@ -326,17 +348,41 @@ class RebalanceDialog(QDialog):
 
     def _fill_rows(self, r) -> None:
         idx = 1 if _dark() else 0
+        tid = self.current_target_id()
+        self._locked = (rebalance.locked_classes(self.conn, int(tid))
+                        if tid is not None else set())
         self.table.setRowCount(len(r.rows))
         for row, d in enumerate(r.rows):
             color = None
             if d.out_of_band:
                 color = _OVER[idx] if d.drift_pct > 0 else _UNDER[idx]
             self.table.setItem(row, self.CLASS, _item(d.label, bold=d.out_of_band))
+            # The lock sits LEFT of the weight it protects: reading across the
+            # row, "this one is settled" comes before the number it settles.
+            lock = QCheckBox()
+            lock.setToolTip(
+                "Lock this weight. Locked classes are never moved when another "
+                "class is edited -- the unlocked ones absorb the change so the "
+                "column always totals 100%.")
+            locked = d.asset_class in self._locked
+            lock.setChecked(locked)
+            lock.toggled.connect(
+                lambda on, cls=d.asset_class: self.set_locked(cls, on))
+            holder = QWidget()
+            box = QHBoxLayout(holder)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.addStretch(1)
+            box.addWidget(lock)
+            box.addStretch(1)
+            self.table.setCellWidget(row, self.LOCK, holder)
             spin = QDoubleSpinBox()
             spin.setRange(0.0, 100.0)
             spin.setSingleStep(1.0)
             spin.setSuffix(" %")
             spin.setValue(float(d.target_pct))
+            # A locked weight is not editable in place; unlock it first. Leaving
+            # it live would invite an edit whose own lock forbids the answer.
+            spin.setEnabled(not locked)
             spin.valueChanged.connect(
                 lambda v, cls=d.asset_class: self.set_target_pct(cls, v))
             self.table.setCellWidget(row, self.TARGET, spin)

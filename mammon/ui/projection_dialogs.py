@@ -42,7 +42,7 @@ import html
 from typing import Optional
 
 from PyQt5.QtCore import QDate, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu, QPushButton,
@@ -516,6 +516,15 @@ class CalendarPanel(QWidget):
         font.setBold(True)
         font.setPointSizeF(font.pointSizeF() + 2)
         self.title.setFont(font)
+        # Pin the month title to the width of the widest "%B %Y" of the year.
+        # The arrows sit either side of it after a stretch, so a title that
+        # sized itself to the current month ("May 2026" vs "September 2026")
+        # dragged prev_btn sideways every time the month changed - the user
+        # had to look up to find the back arrow instead of clicking the same
+        # spot repeatedly. Measured, never hardcoded to September, so a
+        # different font, locale or a wider year string stays correct.
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setFixedWidth(self._title_width(font))
         top.addWidget(self.prev_btn)
         top.addWidget(self.title, 0, Qt.AlignCenter)
         top.addWidget(self.next_btn)
@@ -595,6 +604,23 @@ class CalendarPanel(QWidget):
         return self.slots.account_ids() or [int(a["id"]) for a in spending_accounts(self.conn)]
 
     # -- navigation --------------------------------------------------------
+    TITLE_PADDING = 12  # so no month is ever one pixel short of eliding
+
+    @staticmethod
+    def _title_width(font: QFont) -> int:
+        """Widest rendered '%B %Y' over all twelve months, in `font`.
+
+        Computed rather than hardcoded ("September" is only the longest name
+        in this font and locale) and deliberately independent of the current
+        date: the year is measured as four copies of the widest digit, so the
+        width never changes when the calendar steps into another year.
+        """
+        fm = QFontMetrics(font)
+        widest_digit = max("0123456789", key=fm.width)
+        year = widest_digit * 4
+        return max(fm.width(_dt.date(2000, m, 1).strftime("%B ") + year)
+                   for m in range(1, 13)) + CalendarPanel.TITLE_PADDING
+
     def prev_month(self) -> None:
         self.year, self.month = (self.year - 1, 12) if self.month == 1 else (self.year, self.month - 1)
         self.refresh()

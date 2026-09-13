@@ -48,7 +48,9 @@ def test_crypto_transactions_columns(tmp_path):
         "id", "account_id", "date", "action", "symbol", "quantity", "price",
         "amount", "basis", "fee_symbol", "fee_quantity", "fee_amount",
         "transfer_account_id", "transfer_pair_id", "swap_group_id", "tx_hash",
-        "memo", "import_id", "fitid", "created_at",
+        # ``payee`` (migration 61): the on-chain From/To counterparty that IS the
+        # row's payee on a coin-native wallet -- no separate "counterparty" concept.
+        "memo", "payee", "import_id", "fitid", "created_at",
     }
 
 

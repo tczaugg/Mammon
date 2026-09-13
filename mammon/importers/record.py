@@ -38,6 +38,15 @@ class NormalizedTxn:
     cleared: int = 0
     reconciled: int = 0
     account_type: str = "checking"      # used only when auto-creating the account
+    # The owning account's native currency (ISO 4217), used ONLY when
+    # auto-creating the account -- exactly like account_type above. OFX states it
+    # per statement as <CURDEF>; QIF cannot express a currency at all (its
+    # !Account block is N/T/D/L//$ in every version of the spec), so a
+    # QIF-sourced record leaves this blank and the account takes the schema's USD
+    # default. Never applied to an account that already exists: currency is
+    # immutable after creation (SRD 5.4a), and re-stamping it would silently
+    # reinterpret every amount already stored.
+    account_currency: str = ""
 
     # transfer
     transfer_account: str = ""          # counter-account name -> mirror transfer

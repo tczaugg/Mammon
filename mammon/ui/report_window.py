@@ -91,14 +91,16 @@ from PyQt5.QtWidgets import (
 )
 
 from mammon import ledger, reports
-from mammon.ui.models import fmt_cents
+from mammon.ui.models import fmt_cents, fmt_date
 from mammon.ui.swatch import color_square_icon
 from mammon.ui.report_filters import (
+    CATEGORY_KIND_BOTH,
     PERIOD_DEFAULT,
     CustomizeDialog,
     customize_button,
     make_period_combo,
     resolve_period,
+    sync_period_combo,
 )
 from mammon.ui.report_saved_filters import (
     apply_filter_state,
@@ -712,7 +714,17 @@ class ReportSpec:
     flattens it into ``ReportRow``\\s. ``show_accounts`` hides the account
     checklist for reports that do not take an account filter (e.g. balances);
     ``show_hidden_toggle`` likewise hides the include-hidden checkbox for a report
-    whose pure function takes no such flag. ``columns`` is the report's own header
+    whose pure function takes no such flag. ``category_kind`` turns on the
+    top-level category check-list AND says which categories belong in it --
+    ``expense``, ``income`` or ``both`` (``report_filters.CATEGORY_KIND_*``) --
+    and defaults to None, meaning no list, because a visible control that
+    filters nothing is worse than no control: only a report whose ``run``
+    actually consumes ``filters.selected_categories()`` may set it (today
+    Itemize, Cash Flow, Income vs Expense and Transactions, all of which show
+    both sides and so ask for ``both`` -- By Payee, By Tag, Account Balances and
+    Investment Performance do not group by category at all). ``show_categories``
+    is the older boolean and is kept in step with it by ``__post_init__``, so a
+    True with no kind means ``both``. ``columns`` is the report's own header
     set — ``None`` means the shared three-column default, and a report like Itemize
     overrides it (``["Category", "Amount"]``); :func:`_row_cells` maps a
     ``ReportRow`` onto whichever set is in force.
@@ -723,6 +735,11 @@ class ReportSpec:
     project: Callable
     show_accounts: bool = True
     show_hidden_toggle: bool = True
+    show_categories: bool = False
+    # Which categories the check-list offers: ``expense``, ``income`` or ``both``
+    # (``report_filters.CATEGORY_KIND_*``). None means no list. Kept in step with
+    # ``show_categories`` by ``__post_init__`` so neither can contradict the other.
+    category_kind: str = None
     columns: list = None
     is_tree: bool = False
     # Size the first (text) column to its contents so long values are not clipped
@@ -734,27 +751,66 @@ class ReportSpec:
     # ``sort_key``/``sort_desc`` (as ``investment_performance_rows`` does); this
     # reuses the same instance-level sort seam the Itemize tree uses.
     sortable: dict = None
+    # Income vs Expense is read by the user as "where do I stand as of ___",
+    # so it alone shows the selected range's END date in the header, centered
+    # between the Period selector and the gear button. False for every other
+    # report -- a label naming nothing meaningful is worse than no label (same
+    # reasoning as ``category_kind`` above).
+    show_end_date: bool = False
 
     def __post_init__(self):
         if self.columns is None:
             self.columns = list(COLUMNS)
+        # One switch, two names: a spec may say "I filter by category" either way
+        # round, and they must agree or the bar and the spec would disagree about
+        # whether a control exists. A bare ``show_categories=True`` means the
+        # widest scope; a kind implies the control is on.
+        if self.category_kind is None and self.show_categories:
+            self.category_kind = CATEGORY_KIND_BOTH
+        self.show_categories = self.category_kind is not None
+
+
+# Every category-filtered report reads the picker the same way, in one place:
+# all-ticked (or, deliberately, none-ticked) means "no filter". The getter answers
+# None for all-checked and an empty selection for none-checked, and an empty
+# report is never what Clear-all was for -- it reads as broken, whereas the
+# account list at least names the accounts you unticked.
+#
+# The IDS the picker's tree has ticked, which is what the reports filter on:
+# every checked row at any depth, so a sub-category can be chosen on its own
+# (`Taxes:Federal` without `Taxes:Property`). Ids rather than names because
+# `ledger.rename_category` keeps the id -- a name-keyed filter silently drops a
+# category the moment it is renamed (SRD 5.9c). The set is already EXACT: the
+# tree pushed each tick down its subtree, so no report should re-expand it.
+def _category_ids(f):
+    return f.selected_category_ids() or None
 
 
 def _run_cash_flow(conn, f):
+    # The category pick narrows the Income and Expense sections only: transfers
+    # carry no category, so Cash Flow's third section (and the transfers inside
+    # its Net) stays whole -- see reports.cash_flow.
     return reports.cash_flow(conn, f.start_iso(), f.end_iso(),
                              account_ids=f.selected_account_ids(),
+                             category_ids=_category_ids(f),
                              include_hidden=f.include_hidden())
 
 
 def _run_income_expense(conn, f):
     return reports.income_expense(conn, f.start_iso(), f.end_iso(),
                                   account_ids=f.selected_account_ids(),
+                                  category_ids=_category_ids(f),
                                   include_hidden=f.include_hidden())
 
 
 def _run_account_balances(conn, f):
-    # account_balances takes no account filter; the "To" date is its as-of.
+    # The "To" date is this report's as-of; the account check-list subsets which
+    # accounts are valued. account_balances used to take no account filter at
+    # all, which is why ACCOUNT_BALANCES_SPEC hid the picker -- "what are these
+    # three accounts worth" is a real question, and its ``total`` is net worth
+    # over exactly the rows shown.
     return reports.account_balances(conn, f.end_iso(),
+                                    account_ids=f.selected_account_ids(),
                                     include_hidden=f.include_hidden())
 
 
@@ -779,8 +835,16 @@ def _run_by_tag(conn, f):
 
 
 def _run_transactions(conn, f):
+    # A category pick lists only the rows posted to the TICKED categories; a split
+    # matches on any of its lines. ``expand_subtree=False`` because the tree has
+    # already expanded the pick -- letting the listing re-expand a ticked parent
+    # would put back the one child the user deliberately unticked. Rows carrying
+    # no category at all -- uncategorized entries and transfer legs -- match no
+    # category filter, so a narrowed listing drops them (reports.transactions).
     return reports.transactions(conn, f.start_iso(), f.end_iso(),
                                 account_ids=f.selected_account_ids(),
+                                category_ids=_category_ids(f),
+                                expand_subtree=False,
                                 include_hidden=f.include_hidden())
 
 
@@ -800,12 +864,17 @@ def _run_itemize(conn, f):
     # category expanding into its sub-categories and finally its transactions, with
     # every amount rolled up (income first, then expense, then transfer
     # counterparties). itemize_tree takes no include-hidden flag, so ITEMIZE_SPEC
-    # sets show_hidden_toggle=False rather than show a dead control. The category
-    # checklist's picks (selected_categories) restrict which top-level categories
-    # appear; None means all.
+    # sets show_hidden_toggle=False rather than show a dead control. The picker's
+    # ticked IDS restrict which categories appear, at any depth --
+    # ITEMIZE_SPEC.show_categories is what makes that tree exist -- so an unticked
+    # sub-category drops out of the body AND out of its parent's rolled-up total.
+    # The filter applies BEFORE income/expense classification, so picking one
+    # income and one expense category keeps both sections, each still expanding to
+    # its sub-categories and transactions. ``_category_ids`` normalizes an EMPTY
+    # selection back to "all" -- see there.
     return reports.itemize_tree(conn, f.start_iso(), f.end_iso(),
                                 account_ids=f.selected_account_ids(),
-                                top_level_names=f.selected_categories())
+                                category_ids=_category_ids(f))
 
 
 # Cash Flow and Income vs Expense are deliberately BOTH kept -- they are not the
@@ -816,17 +885,21 @@ def _run_itemize(conn, f):
 # therefore "Direction" (Income / Expense / Transfers / Net), not the shared
 # "Section", to name what that column actually distinguishes.
 CASH_FLOW_SPEC = ReportSpec("Cash Flow", _run_cash_flow, cash_flow_rows,
+                            category_kind=CATEGORY_KIND_BOTH,
                             columns=["Direction", "Category / Account", "Amount"])
 INCOME_EXPENSE_SPEC = ReportSpec("Income vs Expense", _run_income_expense,
-                                 income_expense_rows)
+                                 income_expense_rows,
+                                 category_kind=CATEGORY_KIND_BOTH,
+                                 show_end_date=True)
 ACCOUNT_BALANCES_SPEC = ReportSpec("Account Balances", _run_account_balances,
-                                   account_balances_rows, show_accounts=False,
+                                   account_balances_rows,
                                    columns=["Account Type", "Category / Account",
                                             "Amount"])
 BY_PAYEE_SPEC = ReportSpec("By Payee", _run_by_payee, payee_rows,
                            columns=["Payee", "Net Amount"], fit_first_column=True)
 BY_TAG_SPEC = ReportSpec("By Tag", _run_by_tag, payee_rows)
 TRANSACTIONS_SPEC = ReportSpec("Transactions", _run_transactions, listing_rows,
+                               category_kind=CATEGORY_KIND_BOTH,
                                columns=TRANSACTIONS_COLUMNS)
 # Sortable by the four orders the user asked for: Account (col 0) -> account then
 # ticker, Ticker (col 1) -> ticker alphabetical, Gain/Loss $ (col 3) -> period
@@ -838,8 +911,9 @@ INVESTMENT_PERFORMANCE_SPEC = ReportSpec("Investment Performance",
                                          sortable={0: "account", 1: "ticker",
                                                    3: "gain", 4: "pct"})
 ITEMIZE_SPEC = ReportSpec("Itemize by Category", _run_itemize, itemize_tree_rows,
-                          show_hidden_toggle=False, columns=TREE_COLUMNS,
-                          is_tree=True)
+                          show_hidden_toggle=False,
+                          category_kind=CATEGORY_KIND_BOTH,
+                          columns=TREE_COLUMNS, is_tree=True)
 
 
 class ReportWindow(QDialog):
@@ -879,13 +953,22 @@ class ReportWindow(QDialog):
         # include-hidden toggle) live behind a gear button, not inline — the same
         # gear-and-CustomizeDialog idiom the app's other report windows use (see
         # report_filters.customize_button / CustomizeDialog, and MainWindow's
-        # _report_customize_header). These reports carry no category filter, so the
-        # category checklist stays hidden; the spec decides whether the account
-        # checklist is meaningful.
+        # _report_customize_header). The spec decides which check-lists are
+        # meaningful: ``show_accounts`` for the account list, ``category_kind``
+        # for the top-level category list. The latter used to be hardcoded off on
+        # the grounds that "these reports carry no category filter" — untrue since
+        # Itemize gained ``top_level_names``, which left its category picker dead:
+        # _run_itemize threaded selected_categories() through to itemize_tree, but
+        # the list was never built so the getter always answered None. A report
+        # whose ``run`` ignores selected_categories() must still leave the kind
+        # None, or the user gets a control that silently does nothing. The window
+        # no longer builds the list itself: it names a SCOPE and the shared picker
+        # (report_filters.category_picker_names) answers with the categories of
+        # that kind, so Itemize's income section is tickable like its expenses.
         self.customize_dialog = CustomizeDialog(
             conn, start, end,
             show_accounts=self.spec.show_accounts,
-            categories=None,
+            category_kind=self.spec.category_kind,
             show_hidden_toggle=self.spec.show_hidden_toggle,
             parent=self)
         # The live bar inside the popup. Every getter (start_iso / end_iso /
@@ -903,10 +986,21 @@ class ReportWindow(QDialog):
         # matches the chart windows'; the currentIndexChanged connect below runs
         # AFTER this, so seeding the default here fires no refresh.
         self.period_combo = make_period_combo()
-        period_row = QHBoxLayout()
+        # Kept as an attribute (not a local) so a test can inspect the row's
+        # layout items directly -- e.g. confirming the end-date label sits
+        # between two stretches rather than just checking its text.
+        self.period_row = period_row = QHBoxLayout()
         period_row.addWidget(QLabel("Period:"))
         period_row.addWidget(self.period_combo)
         period_row.addStretch(1)
+        # Income vs Expense only: the range's end date, centered between the
+        # combo and the gear via a stretch on each side. ``refresh`` keeps the
+        # text in step with the active range; every other spec leaves this None
+        # and the row is unchanged from before this control existed.
+        self.end_date_label = QLabel() if self.spec.show_end_date else None
+        if self.end_date_label is not None:
+            period_row.addWidget(self.end_date_label)
+            period_row.addStretch(1)
         period_row.addWidget(self.gear_button)
 
         # -- named saved filter sets (persist to QSettings, never the DB) ------
@@ -992,7 +1086,10 @@ class ReportWindow(QDialog):
         layout.addLayout(buttons)
 
         # Apply in the popup re-runs the report, then the dialog dismisses itself
-        # (CustomizeDialog re-emits `applied` and calls accept on Apply).
+        # (CustomizeDialog re-emits `applied` and calls accept on Apply). The
+        # combo sync runs FIRST so the Period label already agrees with the range
+        # the refreshed report was built from.
+        self.customize_dialog.applied.connect(self.sync_period_combo)
         self.customize_dialog.applied.connect(self.refresh)
         # Connect AFTER the initial setCurrentIndex above so building the combo
         # fires no refresh; a later user pick does.
@@ -1009,6 +1106,13 @@ class ReportWindow(QDialog):
         self.resize(620, 640)
         self.refresh()
 
+    # The window used to build its own category name list here
+    # (``_top_level_categories``). It is gone: the list is now built once, for
+    # every report, by ``report_filters.category_picker_names`` over
+    # ``category_types.top_level_categories``, and this window's only say in it
+    # is ``spec.category_kind``. Four ad-hoc lists is how the picker ended up
+    # expense-only in the first place.
+
     # -- data ----------------------------------------------------------------
     def refresh(self):
         """Re-run the report against the current filter selection and repaint.
@@ -1018,6 +1122,8 @@ class ReportWindow(QDialog):
         """
         report = self.spec.run(self.conn, self.filters)
         self._report = report
+        if self.end_date_label is not None:
+            self.end_date_label.setText(fmt_date(self.filters.end_iso()))
         if self.spec.is_tree:
             # The tree projector takes the active column sort; flat projectors do
             # not, so only this branch threads it (spec.project is itemize_tree_rows).
@@ -1173,6 +1279,21 @@ class ReportWindow(QDialog):
             self.filters.set_range(*rng)
             self.refresh()
 
+    def sync_period_combo(self) -> str:
+        """Make the Period dropdown describe the range the report actually uses.
+
+        The dropdown is an input AND a label. A range typed into the customize
+        (gear) dialog, or recalled from a saved filter set, used to leave it
+        advertising the stale preset it no longer matched; now it re-reads the
+        live From/To dates and shows the preset they equal, or ``Custom`` when
+        they equal none (§5.9b). Signals stay blocked inside
+        :func:`sync_period_combo`, so this never re-enters :meth:`_on_period` --
+        on ``"custom"`` that would reopen the very dialog that triggered it.
+        """
+        return sync_period_combo(self.period_combo, self.filters.start_iso(),
+                                 self.filters.end_iso(), self.conn,
+                                 _dt.date.today())
+
     def _open_customize(self) -> None:
         """Open the customize (gear) popup. Overridable seam so a headless test
         can select 'Custom' without blocking on the modal ``exec_()``."""
@@ -1201,6 +1322,9 @@ class ReportWindow(QDialog):
         if state is None:
             return False
         apply_filter_state(self.filters, state)
+        # A saved set carries its own date range, so the Period label has to
+        # follow it too -- same reason as the gear dialog's Apply.
+        self.sync_period_combo()
         self.refresh()
         return True
 

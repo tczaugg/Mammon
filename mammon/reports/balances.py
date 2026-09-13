@@ -42,13 +42,27 @@ class BalanceReport:
 
 
 def account_balances(conn, as_of: Optional[str] = None, *,
+                     account_ids: Optional[Iterable[int]] = None,
                      include_hidden: bool = False,
                      include_closed: bool = True) -> BalanceReport:
     """Every account's balance as of a date (default: latest), with the total
-    -- net worth over the accounts listed."""
+    -- net worth over the accounts listed.
+
+    ``account_ids`` restricts the report to those accounts; ``None`` (the
+    default) means every account and is what every existing caller gets. This is
+    the customization bar's account check-list (SRD 5.9c): "what are these three
+    accounts worth" is a real question, and the answer's ``total`` is net worth
+    over exactly the accounts listed, not the whole ledger's -- the total is
+    summed from the surviving rows, so the table and its total can never
+    disagree. Filtering here rather than in the projector keeps the UI free of
+    money math.
+    """
+    wanted = None if account_ids is None else {int(a) for a in account_ids}
     rows: list[AccountBalance] = []
     for a in ledger.list_accounts(conn, include_closed=include_closed,
                                   include_hidden=include_hidden):
+        if wanted is not None and int(a["id"]) not in wanted:
+            continue
         rows.append(AccountBalance(
             account_id=int(a["id"]), name=a["name"], type=a["type"] or "",
             hidden=_flag(a, "hidden"), closed=_flag(a, "closed_flag"),

@@ -200,25 +200,52 @@ def convert_cents(conn: sqlite3.Connection, amount_cents: int, from_ccy, to_ccy,
 # Net worth by currency (and an optional FX total)
 # ---------------------------------------------------------------------------
 def net_worth_by_currency(conn: sqlite3.Connection, as_of: Optional[str] = None,
-                          *, include_hidden: bool = False) -> dict[str, int]:
+                          *, include_hidden: bool = False,
+                          account_ids=None) -> dict[str, int]:
     """Net worth grouped by each account's native currency: ``{currency: cents}``.
 
     Mirrors :func:`mammon.investments.net_worth` account selection (closed
-    accounts included, hidden excluded unless asked) and uses the same
-    market-valued ``display_balance`` so investment holdings count. NO currency
-    conversion happens here -- each account's cents land under its own currency,
-    the honest per-currency view. Use :func:`total_in_currency` to fold the
-    buckets into one presentation currency through FX.
+    accounts included, hidden excluded unless asked, ``account_ids`` restricting
+    to a chosen subset) and uses the same market-valued ``display_balance`` so
+    investment holdings count. NO currency conversion happens here -- each
+    account's cents land under its own currency, the honest per-currency view.
+    Use :func:`net_worth_currencies` to lay those buckets out with their FX
+    conversions, or :func:`total_in_currency` to fold them into one number.
     """
     from mammon import investments, ledger  # local import avoids an import cycle
 
+    wanted = None if account_ids is None else {int(a) for a in account_ids}
     totals: dict[str, int] = {}
     for a in ledger.list_accounts(conn, include_closed=True,
                                   include_hidden=include_hidden):
+        if wanted is not None and int(a["id"]) not in wanted:
+            continue
         ccy = _norm_ccy(a["currency"])
         bal = investments.display_balance(conn, a["id"], as_of)
         totals[ccy] = totals.get(ccy, 0) + bal
     return totals
+
+
+def account_currencies(conn: sqlite3.Connection, *, include_hidden: bool = False,
+                       account_ids=None) -> set:
+    """The distinct native currencies among the accounts that would count toward
+    net worth -- the same account selection as :func:`net_worth_by_currency`, but
+    reading only ``accounts.currency`` and never a balance.
+
+    Cheap on purpose: :func:`mammon.ledger.net_worth` calls this per as-of sample
+    to decide whether the currency-aware fold is needed at all, so a single- (or
+    all-base-) currency ledger keeps its original fast path untouched.
+    """
+    from mammon import ledger  # local import avoids an import cycle
+
+    wanted = None if account_ids is None else {int(a) for a in account_ids}
+    out: set = set()
+    for a in ledger.list_accounts(conn, include_closed=True,
+                                  include_hidden=include_hidden):
+        if wanted is not None and int(a["id"]) not in wanted:
+            continue
+        out.add(_norm_ccy(a["currency"]))
+    return out
 
 
 def total_in_currency(conn: sqlite3.Connection, target_ccy, as_of: Optional[str] = None,
@@ -237,6 +264,85 @@ def total_in_currency(conn: sqlite3.Connection, target_ccy, as_of: Optional[str]
             continue  # a zero bucket needs no rate; convert_cents guards this too
         total += convert_cents(conn, cents, ccy, target, as_of)
     return total
+
+
+@dataclass
+class CurrencyLine:
+    """One currency's contribution to net worth: its NATIVE subtotal (signed
+    cents in that currency) and its value CONVERTED into the presentation
+    currency. ``converted_cents`` is ``None`` when a non-zero native balance has
+    no usable FX rate -- the row is then surfaced UNCONVERTED and left OUT of the
+    grand total, never folded in at a dishonest 1:1 (which would overstate net
+    worth by the whole foreign balance)."""
+
+    currency: str
+    native_cents: int
+    converted_cents: Optional[int]      # None => rate missing (non-zero balance)
+
+    @property
+    def rate_missing(self) -> bool:
+        return self.converted_cents is None
+
+
+@dataclass
+class NetWorthCurrencies:
+    """Net worth laid out for the multi-currency presentation the user asked for:
+    each currency listed with its native subtotal, then its conversion, then the
+    grand total in one currency. ``lines`` is one :class:`CurrencyLine` per
+    currency (the ``target`` currency first, then the rest A->Z); ``total_cents``
+    is the grand total in ``target`` and equals the SUM of the convertible lines'
+    ``converted_cents`` and nothing else.
+
+    ``unconverted`` names the currencies whose rate was missing so a caller can
+    say the total is honestly INCOMPLETE rather than silently wrong. An all-
+    ``target`` ledger yields a single line whose conversion is the identity, so
+    ``total_cents`` equals today's naive base sum exactly (byte for byte)."""
+
+    target: str
+    lines: list                         # list[CurrencyLine]
+    total_cents: int
+
+    @property
+    def unconverted(self) -> list:
+        return [ln.currency for ln in self.lines if ln.rate_missing]
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.unconverted
+
+
+def net_worth_currencies(conn: sqlite3.Connection, as_of: Optional[str] = None,
+                         *, target_ccy=BASE_CURRENCY, include_hidden: bool = False,
+                         account_ids=None) -> "NetWorthCurrencies":
+    """Net worth as a per-currency presentation: each currency's native subtotal,
+    its value converted into ``target_ccy``, and a grand total that is the sum of
+    ONLY the convertible lines.
+
+    This is the honest multi-currency view the account bar and reports render. A
+    foreign balance with no recorded FX rate becomes an UNCONVERTED line
+    (``converted_cents is None``) and is excluded from ``total_cents`` -- it is
+    NEVER added at 1:1, which would overstate net worth by the raw foreign
+    number. A zero foreign balance converts free (:func:`convert_cents` guards
+    it) and needs no rate. An all-``target`` ledger yields one line whose
+    conversion is the identity, so ``total_cents`` matches today's naive base
+    sum exactly.
+    """
+    target = _norm_ccy(target_ccy)
+    buckets = net_worth_by_currency(conn, as_of, include_hidden=include_hidden,
+                                    account_ids=account_ids)
+    total = 0
+    lines: list = []
+    # Presentation order: the user's own (target) currency leads, then the rest
+    # alphabetically, so the layout is stable across reloads.
+    for ccy in sorted(buckets, key=lambda c: (c != target, c)):
+        native = buckets[ccy]
+        try:
+            conv = convert_cents(conn, native, ccy, target, as_of)
+            total += conv
+        except FxRateUnavailable:
+            conv = None                 # non-zero balance, no rate: leave it out
+        lines.append(CurrencyLine(ccy, native, conv))
+    return NetWorthCurrencies(target, lines, total)
 
 
 # ---------------------------------------------------------------------------
@@ -369,11 +475,22 @@ class YFinanceFxSource:
 
 
 def default_fx_source() -> "YFinanceFxSource":
-    """The best available FX backend, or raise if none is installed."""
+    """The best available FX backend, or raise if none is installed.
+
+    ``yfinance`` is a REQUIRED dependency -- it is the default source for FX
+    rates, investment quotes, crypto prices and the asset-mix split -- so
+    reaching this error means a broken or partial install, not a feature the user
+    declined. The message used to name a ``quotes`` extra, which no longer
+    exists; pointing at an install target that is not there is worse than saying
+    nothing. The find_spec check itself stays, because a caller may always inject
+    its own source: that is how the tests, and an offline session, avoid the
+    network entirely."""
     if importlib.util.find_spec("yfinance") is None:
         raise FxRateUnavailable(
-            "yfinance is not installed; pass an FxSource explicitly (install the "
-            "'quotes' extra to enable network fetch)."
+            "yfinance is not installed, but it is a required dependency -- "
+            "reinstall with 'pip install -r requirements.txt'. To record a rate "
+            "without it, enter one by hand in Tools > Exchange Rates, or pass an "
+            "FxSource explicitly."
         )
     return YFinanceFxSource()
 

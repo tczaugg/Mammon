@@ -123,10 +123,16 @@ def import_file(
     source_format: Optional[str] = None,
     account: Optional[str] = None,
     account_type: Optional[str] = None,
+    set_cutover: bool = True,
 ) -> ImportResult:
     """Import a file on disk. ``account`` names the account for single-account
     formats (OFX/CSV/JSON) and is the fallback for a QIF without ``!Account``
-    blocks; multi-account QIF files carry their own account names."""
+    blocks; multi-account QIF files carry their own account names.
+
+    ``set_cutover=False`` defers the QIF migration watermark to the caller, for
+    importing a yearly SET as one migration (see
+    :meth:`mammon.ui.widgets.MainWindow._import_qif_set` and
+    :func:`mammon.importers.core.import_records`)."""
     p = Path(path)
     fmt = (source_format or _EXT_FORMAT.get(p.suffix.lower()))
     if fmt is None:
@@ -165,6 +171,7 @@ def import_file(
         positions=positions,
         categories=extras.categories if extras else None,
         tags=extras.tags if extras else None,
+        set_cutover=set_cutover,
     )
     # Post-import AUDIT: surface any OFX investment action types the parser could
     # not map (they were dropped, not silently defaulted into cash-in).
@@ -233,7 +240,13 @@ def import_single_account(
             account_id = int(acct["id"])
             break
     if account_id is None:
-        account_id = ledger.create_account(conn, account.strip(), account_type)
+        # A parser that states the account's own currency (OFX <CURDEF>) creates it
+        # in that currency instead of the USD default. Every row of a
+        # single-account file carries the same one, so the first stated wins. On
+        # CREATION only -- an existing account's currency is immutable (SRD 5.4a).
+        currency = next((r.account_currency for r in records if r.account_currency), "")
+        account_id = ledger.create_account(conn, account.strip(), account_type,
+                                           currency=currency or "USD")
 
     if finalize:
         return import_review.import_records_via_review(conn, account_id, records)

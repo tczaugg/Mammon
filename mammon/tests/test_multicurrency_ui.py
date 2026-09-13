@@ -12,8 +12,8 @@ cover the UI:
   ledger; the Account Details dialog shows it READ-ONLY (immutable property).
 * per-account amounts render in the account's own currency (bare for the base
   currency, tagged for a foreign one), and net worth folds foreign accounts to
-  the base currency through `mammon.fx` (falling back to the naive base sum when
-  a rate is missing, so it never breaks).
+  the base currency through `mammon.fx`; a non-zero foreign balance with no rate
+  is surfaced UNCONVERTED and left out of the total, never folded in at 1:1.
 
 Synthetic data only -- no real account names, numbers, or amounts.
 """
@@ -202,11 +202,51 @@ def test_net_worth_folds_foreign_through_fx(conn, qapp):
     assert model.net_worth() == 155_00
 
 
-def test_net_worth_falls_back_to_naive_sum_without_rate(conn, qapp):
+def test_net_worth_excludes_foreign_without_rate(conn, qapp):
     ledger.create_account(conn, "US Checking", "checking", opening_balance=100_00)
     ledger.create_account(conn, "Euro Cash", "cash",
                           opening_balance=50_00, currency="EUR")
     model = AccountsModel(conn)
-    # no EUR->USD rate: never raise/blank -- fall back to the naive base sum,
-    # exactly the figure shown before any foreign account existed.
-    assert model.net_worth() == ledger.net_worth(conn) == 150_00
+    # no EUR->USD rate: the non-zero EUR balance is NEVER folded in at 1:1 (which
+    # would overstate net worth by the whole 50.00). It is surfaced as an
+    # unconverted line and left out, so the total is the honest USD-only figure.
+    assert model.net_worth() == ledger.net_worth(conn) == 100_00
+    nwc = fx.net_worth_currencies(conn)
+    assert nwc.unconverted == ["EUR"]
+    assert not nwc.is_complete
+    # ...and the model names them, which is what the account bar renders.
+    assert model.unconverted_currencies() == ["EUR"]
+
+
+def test_net_worth_strip_warns_instead_of_printing_a_partial_total(conn, qapp):
+    """A total that CANNOT be computed is shown as the warning triangle, never as
+    a number.
+
+    The per-currency subtotals are complete; only the roll-up is impossible. A
+    number here would silently omit the EUR 50 -- the total would read as though
+    the foreign balance did not exist -- so the strip shows the same warning mark
+    the register uses for an unassigned split remainder, and the tooltip names
+    both the missing currency and the two ways to supply a rate."""
+    from mammon.ui.models import fmt_money
+    from mammon.ui.widgets import AccountBar
+    ledger.create_account(conn, "US Checking", "checking", opening_balance=100_00)
+    ledger.create_account(conn, "Euro Cash", "cash",
+                          opening_balance=50_00, currency="EUR")
+    bar = AccountBar(conn)
+    try:
+        assert bar.net_amount.text() == "", "a partial total was printed anyway"
+        pm = bar.net_amount.pixmap()
+        assert pm is not None and not pm.isNull(), "no warning mark was shown"
+        tip = bar.net_amount.toolTip()
+        assert "EUR" in tip                      # WHAT is missing
+        assert "Exchange Rates" in tip           # WHERE to fix it
+        assert "Add" in tip and "Refresh Rates" in tip   # BOTH ways to fix it
+        assert bar.net_row.toolTip() == tip      # hovering the label works too
+
+        # Once a rate exists the strip is a number again, with no stale tooltip.
+        fx.set_rate(conn, "2026-01-01", "EUR", "USD", "1.10")
+        bar.refresh()
+        assert bar.net_amount.text() == fmt_money(155_00)
+        assert bar.net_amount.toolTip() == "" and bar.net_row.toolTip() == ""
+    finally:
+        bar.deleteLater()
