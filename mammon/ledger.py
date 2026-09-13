@@ -15,6 +15,7 @@ both. The "category" of a transfer is virtual -- it renders as "[Other Account]"
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import sqlite3
 from typing import Any, Optional
 
@@ -34,6 +35,22 @@ _UNSET = object()
 
 # Quicken's marker in the Category field for a split transaction.
 SPLIT_LABEL = "--Split--"
+
+# Fields whose change on an ALREADY-reconciled transaction is worth auditing
+# (migration 63, table ``reconciled_change_log``). ``amount`` and ``date`` are
+# the ones that actually move a reconcile balance; the rest identify the row.
+# ``cleared``/``reconciled`` are here because flipping them on a reconciled row
+# (un-reconciling, un-clearing) is precisely the kind of quiet change this log
+# exists to catch. Internal ids (``fitid``, ``import_id``, ``scheduled``,
+# transfer links) are deliberately excluded -- they never affect a reconcile.
+_AUDIT_FIELDS = (
+    "date", "num", "payee", "category_id", "memo", "amount",
+    "cleared", "reconciled",
+)
+# On a DELETE the whole row goes, so its surviving VALUE fields are what a later
+# reconcile lost. The status flags are omitted: a 'delete' entry logged at all
+# already means the row was reconciled, so recording reconciled=1 -> None is noise.
+_DELETE_AUDIT_FIELDS = ("date", "num", "payee", "category_id", "memo", "amount")
 
 
 # --------------------------------------------------------------------------
@@ -58,11 +75,19 @@ def create_account(
     opening_date: Optional[str] = None,
     institution: Optional[str] = None,
     note: Optional[str] = None,
+    currency: str = "USD",
 ) -> int:
+    """Create an account. ``currency`` is its native ISO 4217 code, chosen at
+    creation (the New Account dialog offers it) and treated as an immutable
+    account property thereafter -- it is not edited on the account-details dialog.
+    A blank/None currency normalises to the base ``'USD'`` (the schema default),
+    so a caller passing an empty field never writes an invalid code. This is the
+    ONLY insert path for accounts, so it is where currency is set."""
+    ccy = (currency or "USD").strip().upper() or "USD"
     cur = conn.execute(
-        "INSERT INTO accounts(name, type, opening_balance, opening_date, institution, note) "
-        "VALUES (?,?,?,?,?,?)",
-        (name, type, opening_balance, opening_date, institution, note),
+        "INSERT INTO accounts(name, type, opening_balance, opening_date, institution, note, currency) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (name, type, opening_balance, opening_date, institution, note, ccy),
     )
     conn.commit()
     return cur.lastrowid
@@ -416,6 +441,150 @@ def transactions_with_tag(
     return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
 
 
+# --------------------------------------------------------------------------
+# Tag colors and tag management (the Tag Manager's domain verbs)
+# --------------------------------------------------------------------------
+# A tag carries an optional display color -- a '#RRGGBB' hex string, NULL when
+# unchosen (the ``tags.color`` column, added in migration 54). Color is per-tag
+# IDENTITY: the register cell, the split dialog and the By Tag report all read it
+# through the accessors here, so a tag keeps ONE color everywhere instead of
+# color following a chart slice's rank and changing as the ranking moves. This
+# module stays the SOLE writer of the tags table -- its ``name``, its ``color``
+# and the ``transactions.tag`` cache -- so the Tag Manager holds no SQL and can
+# never let the relational store and the cache diverge.
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def normalize_tag_color(color) -> Optional[str]:
+    """Validate a tag color to canonical lowercase ``#rrggbb``, or ``None`` to
+    clear it. ``None``/``""`` -> ``None``; anything that is not a 6-digit
+    ``#RRGGBB`` hex string raises ``ValueError`` (money and colors are both
+    validated at the domain boundary, never trusted from the UI)."""
+    if color is None:
+        return None
+    c = str(color).strip()
+    if not c:
+        return None
+    if not _HEX_COLOR_RE.match(c):
+        raise ValueError(f"tag color must be '#RRGGBB' hex, got {color!r}")
+    return c.lower()
+
+
+def _refresh_tag_cache(conn: sqlite3.Connection, txn_id: int) -> None:
+    """Recompute the ``transactions.tag`` comma-joined cache from the junction
+    after a rename/delete changed a name or dropped a link. The junction is
+    authoritative; the cache is only its projection (see :func:`_apply_tags`)."""
+    cache = format_tags(get_tags(conn, txn_id)) or None
+    conn.execute("UPDATE transactions SET tag = ? WHERE id = ?", (cache, txn_id))
+
+
+def list_tags(conn: sqlite3.Connection) -> list[dict]:
+    """Every tag, whether or not it is currently attached, as dicts with ``id``,
+    ``name``, ``color`` and a ``usage`` count (transactions carrying it plus
+    split legs tagged with it). Sorted by name NOCASE. Powers the Tag Manager,
+    which -- unlike :func:`all_tags` -- must show even an unused tag so its color
+    can be set before it is applied."""
+    rows = conn.execute(
+        "SELECT g.id AS id, g.name AS name, g.color AS color, "
+        "(SELECT COUNT(*) FROM transaction_tags j WHERE j.tag_id = g.id) "
+        "+ (SELECT COUNT(*) FROM splits s WHERE s.tag_id = g.id) AS usage "
+        "FROM tags g ORDER BY g.name COLLATE NOCASE"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_tag(conn: sqlite3.Connection, tag_id: int) -> Optional[dict]:
+    """One tag as ``{'id', 'name', 'color'}``, or ``None`` when it is gone."""
+    row = conn.execute(
+        "SELECT id, name, color FROM tags WHERE id = ?", (tag_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def tag_colors(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map CASEFOLDED tag name -> its ``#rrggbb`` color, for the tags that have
+    one. Keyed casefolded because ``tags.name`` collates NOCASE, so a renderer
+    resolves a parsed tag name straight through ``.get(name.casefold())``. This is
+    the single accessor the register cell, split dialog and By Tag report read to
+    color a tag, keeping money/colour logic out of ``ui/``."""
+    rows = conn.execute(
+        "SELECT name, color FROM tags WHERE color IS NOT NULL AND color <> ''"
+    ).fetchall()
+    return {r["name"].casefold(): r["color"] for r in rows}
+
+
+def set_tag_color(conn: sqlite3.Connection, tag_id: int, color) -> None:
+    """Set (or clear, with ``color=None``) a tag's display color; validated and
+    committed. Sole writer of ``tags.color``."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    conn.execute("UPDATE tags SET color = ? WHERE id = ?",
+                 (normalize_tag_color(color), tag_id))
+    conn.commit()
+
+
+def rename_tag(conn: sqlite3.Connection, tag_id: int, new_name: str) -> None:
+    """Rename a tag IN PLACE -- keeping its id, so every junction link, split-leg
+    reference and its color survive. Refuses a blank name, a comma (the tag
+    separator would split it into two) and a case-insensitive collision with a
+    DIFFERENT existing tag. Rebuilds the ``transactions.tag`` cache of every
+    transaction carrying it so the register cell shows the new spelling."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    name = (new_name or "").strip()
+    if not name:
+        raise ValueError("a tag needs a name")
+    if "," in name:
+        raise ValueError("a tag name cannot contain a comma")
+    clash = conn.execute(
+        "SELECT id FROM tags WHERE name = ? AND id <> ?", (name, tag_id)).fetchone()
+    if clash is not None:
+        raise ValueError(f"a tag named {name!r} already exists")
+    affected = [r["transaction_id"] for r in conn.execute(
+        "SELECT transaction_id FROM transaction_tags WHERE tag_id = ?", (tag_id,))]
+    conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag_id))
+    for tid in affected:
+        _refresh_tag_cache(conn, tid)
+    conn.commit()
+
+
+def delete_tag(conn: sqlite3.Connection, tag_id: int) -> None:
+    """Delete a tag. Its junction links cascade away and any split legs pointing
+    at it are set NULL (``foreign_keys`` is ON -- see :func:`db.connect`); the
+    ``transactions.tag`` cache of every affected transaction is then rebuilt so
+    the register cell drops the name."""
+    if get_tag(conn, tag_id) is None:
+        raise KeyError(f"no tag {tag_id}")
+    affected = [r["transaction_id"] for r in conn.execute(
+        "SELECT transaction_id FROM transaction_tags WHERE tag_id = ?", (tag_id,))]
+    conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+    for tid in affected:
+        _refresh_tag_cache(conn, tid)
+    conn.commit()
+
+
+def split_leg_tags_by_txn(conn: sqlite3.Connection,
+                          account_id: int) -> dict[int, list[str]]:
+    """For one account, the tag names carried by SPLIT LEGS, grouped by their
+    parent transaction id: ``{txn_id: [name, ...]}`` in leg order. The register
+    cell unions these into the parent row's own tags so a split's per-leg tags
+    surface on the collapsed row (matching :func:`reports._lines._line_tags`)
+    without a per-row query and without double-counting. Only legs that actually
+    carry a tag appear."""
+    rows = conn.execute(
+        "SELECT s.transaction_id AS tid, g.name AS name "
+        "FROM splits s JOIN tags g ON g.id = s.tag_id "
+        "JOIN transactions t ON t.id = s.transaction_id "
+        "WHERE t.account_id = ? AND s.tag_id IS NOT NULL "
+        "ORDER BY s.transaction_id, s.id",
+        (account_id,),
+    ).fetchall()
+    out: dict[int, list[str]] = {}
+    for r in rows:
+        out.setdefault(r["tid"], []).append(r["name"])
+    return out
+
+
 def set_scheduled(conn: sqlite3.Connection, txn_id: int, scheduled: bool) -> None:
     """Flip a transaction between PENDING (``scheduled=1``: a pre-entry the
     reminder generator placed, not yet real) and POSTED, together with every
@@ -450,6 +619,12 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
     _delete_split_mirrors(conn, txn_id)
     pair_id = row["transfer_pair_id"]
     pair_row = get_transaction(conn, pair_id) if pair_id is not None else None
+    # Audit the deletion of a reconciled row (migration 63) BEFORE it is gone --
+    # both legs, each scoped to its own account, since deleting one transfer leg
+    # deletes the other and either may have been reconciled.
+    _log_reconciled_delete(conn, row)
+    if pair_row is not None:
+        _log_reconciled_delete(conn, pair_row)
     # Deleting this row NULLs the pair's transfer_pair_id via ON DELETE SET NULL,
     # so the second delete is a clean, unlinked delete.
     conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
@@ -461,6 +636,21 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
     if pair_row is not None:
         edits.append((pair_row["account_id"], int(pair_row["date"][:4])))
     _touch_checkpoints(conn, *edits)
+
+
+def reconciled_change_log(conn: sqlite3.Connection,
+                          account_id: int) -> list[sqlite3.Row]:
+    """Read-only: the audit trail of edits and deletions applied to RECONCILED
+    transactions in ``account_id``, oldest first (migration 63).
+
+    Each row has ``transaction_id``, ``changed_at`` (ISO), ``operation``
+    ('edit'/'delete'), ``field``, ``old_value`` and ``new_value`` (both TEXT;
+    amounts are signed cents rendered verbatim -- no money logic here). Written
+    only by the edit/delete paths above; nothing else touches the table."""
+    return conn.execute(
+        "SELECT * FROM reconciled_change_log WHERE account_id=? ORDER BY id",
+        (account_id,),
+    ).fetchall()
 
 
 # --------------------------------------------------------------------------
@@ -704,8 +894,21 @@ def net_worth(conn: sqlite3.Connection, as_of: Optional[str] = None, *,
     Hidden accounts are EXCLUDED -- hiding is how the user marks an account whose
     records are incomplete (see :func:`investments.net_worth`). Pass
     ``include_hidden=True`` for the fuller historical picture, which is what the
-    report bar's checkbox does. ``account_ids`` restricts to a chosen subset."""
-    from mammon import investments
+    report bar's checkbox does. ``account_ids`` restricts to a chosen subset.
+
+    Multi-currency: when accounts span more than one native currency the total is
+    each currency's subtotal converted into the base currency and summed, with a
+    non-zero foreign balance that has no FX rate left OUT rather than folded in at
+    1:1 (see :func:`fx.net_worth_currencies`). A single-currency ledger -- the
+    common case -- takes a fast path that delegates straight to
+    :func:`investments.net_worth`, so an all-USD file is byte-for-byte unchanged
+    and never pays for the currency machinery."""
+    from mammon import fx, investments
+    if len(fx.account_currencies(conn, include_hidden=include_hidden,
+                                 account_ids=account_ids)) > 1:
+        return fx.net_worth_currencies(
+            conn, as_of, include_hidden=include_hidden,
+            account_ids=account_ids).total_cents
     return investments.net_worth(conn, as_of, account_ids=account_ids,
                                  include_hidden=include_hidden)
 
@@ -755,7 +958,7 @@ def update_account(conn: sqlite3.Connection, account_id: int, **fields: Any) -> 
     allowed = {"name", "type", "currency", "institution", "note", "closed_flag",
                "sort_order", "url", "account_number", "hidden", "download_script",
                "lot_method", "download_config", "cutover_date", "asset_class",
-               "property_address", "secured_by_account_id"}
+               "property_address", "secured_by_account_id", "crypto_kind"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     bad = set(fields) - allowed
     if bad:
@@ -947,10 +1150,24 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     difference is absorbed into an uncategorized split line so the split always
     reconciles; the register surfaces a leftover uncategorized amount with a
     warning triangle.
-    A plain whole-transaction transfer cannot itself be split, but a transfer
-    that ALREADY carries split lines CAN be re-split: an imported mortgage
-    payment is legitimately BOTH a transfer to ``[House]`` AND a
-    principal+interest split, and editing its legs must round-trip while the
+    A plain whole-transaction transfer CAN be split: the transfer stops being a
+    property of the ROW and becomes one LINE of the split. Selling crypto for
+    859.70 and receiving 843.09 in checking is one transaction whose money moved
+    two ways -- 843.09 to ``[Checking]`` and 16.61 to a fee category -- and the
+    old hard block ("a transfer cannot be split") left the user no way to record
+    it. Splitting a transfer therefore ADOPTS the existing mirror onto the
+    matching leg: the parent's own ``transfer_account_id``/``transfer_pair_id``
+    are cleared, the counter-account row is kept (same id, date, payee, register
+    position, cleared/reconciled status) and re-amounted to the negated LINE, and
+    the split row remembers it via ``splits.transfer_pair_id`` like any other
+    transfer leg. The invariant becomes: the mirror equals the transfer LINE, not
+    the row total. The split must therefore contain a line still targeting the
+    old transfer account -- otherwise it would orphan the counter-leg, and that
+    is rejected. :func:`clear_splits` with ``restore_transfer_to`` is the exact
+    inverse (what undo uses).
+    A transfer that ALREADY carries split lines is re-split the same way: an
+    imported mortgage payment is legitimately BOTH a transfer to ``[House]`` AND
+    a principal+interest split, and editing its legs must round-trip while the
     parent's ``transfer_account_id`` link is preserved. A split needs at least
     two lines (one line is just a plain category). Applying a split NULLs the
     transaction's own ``category_id`` so its Category field displays
@@ -959,10 +1176,28 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     txn = get_transaction(conn, txn_id)
     if txn is None:
         raise KeyError(f"no transaction {txn_id}")
-    if txn["transfer_account_id"] is not None and not _has_splits(conn, txn_id):
-        raise ValueError("a transfer cannot be split")
-    norm = [_split_line(ln) for ln in lines]
-    total = sum(amt for _cat, _taid, amt, _memo in norm)
+    parent_taid = txn["transfer_account_id"]
+    # Only a PLAIN transfer (no splits yet) moves its transfer off the row and
+    # onto a line. A transfer that already carries splits keeps the parent link
+    # exactly as before -- that is the imported-mortgage shape.
+    split_a_transfer = parent_taid is not None and not _has_splits(conn, txn_id)
+    # Each normalized leg is (category_id, transfer_account_id, amount, memo,
+    # tag_id). A leg may carry its own single tag (Quicken tags a split leg to
+    # attribute part of a payment to a project) as ``tag_id`` (already resolved)
+    # or ``tag`` (a name, get-or-created here). Threading it through set_splits is
+    # what lets an edited/re-saved split KEEP a per-leg tag an import wrote,
+    # instead of silently dropping it on the delete+recreate rebuild below.
+    norm = []
+    for ln in lines:
+        cat, taid, amt, memo = _split_line(ln)
+        tg = None
+        if isinstance(ln, dict):
+            if ln.get("tag_id") not in (None, ""):
+                tg = int(ln["tag_id"])
+            elif ln.get("tag"):
+                tg = tag_id(conn, ln["tag"])
+        norm.append((cat, taid, amt, memo, tg))
+    total = sum(amt for _cat, _taid, amt, _memo, _tg in norm)
     target = int(txn["amount"])
     diff = target - total
     if diff != 0:
@@ -974,13 +1209,13 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
         # A transfer leg (transfer_account_id set) is NEVER touched -- only a
         # true uncategorized line absorbs the difference. Fold into an existing
         # uncategorized line if there is one; otherwise append a fresh one.
-        idx = next((i for i, (c, t, _a, _m) in enumerate(norm)
+        idx = next((i for i, (c, t, _a, _m, _tg) in enumerate(norm)
                     if c is None and t is None), None)
         if idx is None:
-            norm.append((None, None, diff, None))
+            norm.append((None, None, diff, None, None))
         else:
-            c, t, a, m = norm[idx]
-            norm[idx] = (c, t, a + diff, m)
+            c, t, a, m, tg = norm[idx]
+            norm[idx] = (c, t, a + diff, m, tg)
     if len(norm) < 2:
         raise ValueError("a split needs at least two lines")
     # Snapshot each existing transfer-split mirror's own per-account
@@ -993,12 +1228,46 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
     # status must survive a rebuild triggered by an unrelated edit. Legs are
     # matched by target account, exact leg amount preferred, so an unchanged leg
     # AND an edited-amount leg (e.g. a loan principal paydown) both keep status.
+    # Splitting a plain transfer: which leg inherits the existing mirror? The
+    # first leg still pointing at the old transfer account. Without one the
+    # counter-account row would be orphaned (money that arrived in checking with
+    # nothing on this side claiming it), so refuse rather than silently delete
+    # the other half of the user's transfer.
+    adopt_idx = None
+    adopt_pair = None
+    if split_a_transfer:
+        adopt_idx = next((i for i, (_c, t, _a, _m, _tg) in enumerate(norm)
+                          if t == parent_taid), None)
+        if adopt_idx is None:
+            acct = get_account(conn, parent_taid)
+            name = acct["name"] if acct else str(parent_taid)
+            raise ValueError(
+                f"splitting this transfer needs one line that still transfers "
+                f"to [{name}] -- the other side of the transfer lives there")
+        adopt_pair = txn["transfer_pair_id"]
     preserved = _capture_split_mirror_flags(conn, txn_id)
     _delete_split_mirrors(conn, txn_id)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
-    for cat, taid, amt, memo in norm:
+    if split_a_transfer:
+        # The transfer is a property of the LINE now, not the row.
+        conn.execute(
+            "UPDATE transactions SET transfer_account_id=NULL, "
+            "transfer_pair_id=NULL WHERE id=?", (txn_id,))
+    for i, (cat, taid, amt, memo, tg) in enumerate(norm):
         pair_id = None
-        if taid is not None:
+        if i == adopt_idx:
+            # Adopt, do not recreate: keeping the counter row's id preserves its
+            # reconcile status, its own edits and anything referencing it. A
+            # one-sided parent (transfer_pair_id NULL -- itself the mirror of
+            # someone else's leg) yields a one-sided leg: never fabricate a
+            # second counter row. The mirror drops its back-link because a split
+            # leg's mirror is one-sided by construction (_create_split_mirror).
+            pair_id = adopt_pair
+            if pair_id is not None:
+                conn.execute(
+                    "UPDATE transactions SET amount=?, transfer_pair_id=NULL "
+                    "WHERE id=?", (-int(amt), pair_id))
+        elif taid is not None:
             pair_id = _create_split_mirror(conn, txn, taid, amt)
             flag = _take_preserved_flag(preserved, taid, amt)
             if flag and (flag[0] or flag[1]):
@@ -1008,8 +1277,8 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
                 )
         conn.execute(
             "INSERT INTO splits(transaction_id, category_id, transfer_account_id, "
-            "transfer_pair_id, amount, memo) VALUES (?,?,?,?,?,?)",
-            (txn_id, cat, taid, pair_id, amt, memo),
+            "transfer_pair_id, amount, memo, tag_id) VALUES (?,?,?,?,?,?,?)",
+            (txn_id, cat, taid, pair_id, amt, memo, tg),
         )
     conn.execute("UPDATE transactions SET category_id=NULL WHERE id=?", (txn_id,))
     conn.commit()
@@ -1028,7 +1297,7 @@ def rebalance_splits(conn: sqlite3.Connection, txn_id: int) -> None:
     lines = [
         {"category_id": s["category_id"],
          "transfer_account_id": s["transfer_account_id"],
-         "amount": s["amount"], "memo": s["memo"]}
+         "amount": s["amount"], "memo": s["memo"], "tag_id": s["tag_id"]}
         for s in get_splits(conn, txn_id)
     ]
     set_splits(conn, txn_id, lines)
@@ -1061,12 +1330,45 @@ def uncategorized_split_amount(conn: sqlite3.Connection, txn_id: int) -> int:
     return int(row["amt"]) if row else 0
 
 
-def clear_splits(conn: sqlite3.Connection, txn_id: int) -> None:
+def clear_splits(conn: sqlite3.Connection, txn_id: int,
+                 restore_transfer_to: int | None = None) -> None:
     """Remove all split lines, reverting the transaction to a plain one. Its
     ``category_id`` is left NULL for the caller to reassign. Any mirror
-    transactions the transfer legs created are removed too."""
-    _delete_split_mirrors(conn, txn_id)
+    transactions the transfer legs created are removed too.
+
+    ``restore_transfer_to`` is the exact inverse of :func:`set_splits`'s adoption
+    of a transfer into a split line: given the account the row used to transfer
+    to, the leg pointing there is handed BACK to the row -- its mirror survives
+    (same id, same reconcile status), gets re-amounted to the negated ROW total
+    and is cross-linked as a normal two-sided transfer again. Undo uses this to
+    put a split-a-transfer edit back; every other caller (loan payments, import
+    review, the split dialog's Remove) leaves it None and gets the old behavior,
+    because a loan payment's principal leg to ``[Mortgage]`` must NOT be promoted
+    into a whole-row transfer."""
+    keep = None
+    txn = get_transaction(conn, txn_id)
+    if (restore_transfer_to is not None and txn is not None
+            and txn["transfer_account_id"] is None):
+        restore_transfer_to = int(restore_transfer_to)
+        row = conn.execute(
+            "SELECT transfer_pair_id FROM splits WHERE transaction_id=? "
+            "AND transfer_account_id=? AND transfer_pair_id IS NOT NULL "
+            "ORDER BY id LIMIT 1", (txn_id, restore_transfer_to)).fetchone()
+        if row is not None:
+            keep = int(row["transfer_pair_id"])
+    else:
+        restore_transfer_to = None
+    _delete_split_mirrors(conn, txn_id, skip_id=keep)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
+    if restore_transfer_to is not None:
+        conn.execute(
+            "UPDATE transactions SET transfer_account_id=?, transfer_pair_id=? "
+            "WHERE id=?", (restore_transfer_to, keep, txn_id))
+        if keep is not None:
+            conn.execute(
+                "UPDATE transactions SET amount=?, transfer_account_id=?, "
+                "transfer_pair_id=? WHERE id=?",
+                (-int(txn["amount"]), txn["account_id"], txn_id, keep))
     conn.commit()
 
 
@@ -1126,14 +1428,19 @@ def _create_split_mirror(conn: sqlite3.Connection, txn: sqlite3.Row,
     ).lastrowid
 
 
-def _delete_split_mirrors(conn: sqlite3.Connection, txn_id: int) -> None:
+def _delete_split_mirrors(conn: sqlite3.Connection, txn_id: int,
+                          skip_id: int | None = None) -> None:
     """Delete the counter-account mirror transactions created by ``txn_id``'s
     transfer split legs (called before replacing or clearing its splits, and
-    when the parent transaction is deleted)."""
+    when the parent transaction is deleted). ``skip_id`` spares one mirror the
+    caller is about to re-use rather than recreate -- see
+    :func:`clear_splits`'s ``restore_transfer_to``."""
     for r in conn.execute(
         "SELECT transfer_pair_id FROM splits "
         "WHERE transaction_id=? AND transfer_pair_id IS NOT NULL", (txn_id,),
     ).fetchall():
+        if skip_id is not None and int(r["transfer_pair_id"]) == int(skip_id):
+            continue
         conn.execute("DELETE FROM transactions WHERE id=?", (r["transfer_pair_id"],))
 
 
@@ -2094,11 +2401,61 @@ def _touch_checkpoints(conn: sqlite3.Connection, *account_years) -> None:
 # internals
 # --------------------------------------------------------------------------
 def _apply_update(conn: sqlite3.Connection, txn_id: int, updates: dict) -> None:
+    # Snapshot BEFORE the write so a change to a reconciled row can be audited
+    # (migration 63). This is the single choke point every column edit passes
+    # through -- primary and mirror legs, void, replace_field -- so auditing here
+    # catches them all in one place. The read is skipped-free of side effects and
+    # only matters when the row turns out to have been reconciled.
+    before = get_transaction(conn, txn_id)
     assignments = ",".join(f"{k}=?" for k in updates)
     conn.execute(
         f"UPDATE transactions SET {assignments} WHERE id=?",
         (*updates.values(), txn_id),
     )
+    if before is not None and before["reconciled"]:
+        for field, new_value in updates.items():
+            if field in _AUDIT_FIELDS and before[field] != new_value:
+                _log_reconciled_change(
+                    conn, before["account_id"], txn_id, "edit",
+                    field, before[field], new_value,
+                )
+
+
+def _audit_value(v: Any) -> Optional[str]:
+    """Render an old/new field value for the audit log as TEXT, preserving NULL.
+
+    Amounts are signed cents (e.g. ``'-5000'``); the log stays money-logic-free
+    and any presentation layer formats them, so the value is stored verbatim."""
+    return None if v is None else str(v)
+
+
+def _log_reconciled_change(conn: sqlite3.Connection, account_id: int,
+                           txn_id: Optional[int], operation: str,
+                           field: Optional[str], old: Any, new: Any) -> None:
+    """Append one row to ``reconciled_change_log`` (migration 63). Called only
+    from the edit/delete paths and only for transactions that were reconciled at
+    the time -- the caller has already checked that."""
+    conn.execute(
+        "INSERT INTO reconciled_change_log"
+        " (account_id, transaction_id, operation, field, old_value, new_value)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (account_id, txn_id, operation, field,
+         _audit_value(old), _audit_value(new)),
+    )
+
+
+def _log_reconciled_delete(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Audit the deletion of a RECONCILED transaction: one 'delete' entry per
+    surviving value field (migration 63). No-op for an unreconciled row."""
+    if not row["reconciled"]:
+        return
+    for field in _DELETE_AUDIT_FIELDS:
+        value = row[field]
+        if value is not None:
+            _log_reconciled_change(
+                conn, row["account_id"], row["id"], "delete",
+                field, value, None,
+            )
 
 
 def _category_path(conn: sqlite3.Connection, category_id: int) -> str:

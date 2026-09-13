@@ -367,10 +367,21 @@ def set_review_visibility(account_id, mode: str,
 _HIDDEN_COLS_KEY = "register/hidden_columns"
 
 
-def hidden_columns(settings: QSettings | None = None) -> list[str]:
-    """Names of the register columns the user chose to hide (may be empty)."""
+def _hidden_cols_key(scope: str) -> str:
+    # ``scope`` names WHICH register's chooser. The cash register keeps the
+    # historical "register/..." key so an existing install's hidden columns
+    # survive; the investment register (parity item) uses its own scope so its
+    # different column set never collides with the cash names.
+    return _HIDDEN_COLS_KEY if scope == "register" else f"{scope}/hidden_columns"
+
+
+def hidden_columns(settings: QSettings | None = None, *,
+                   scope: str = "register") -> list[str]:
+    """Names of the register columns the user chose to hide (may be empty).
+    ``scope`` selects the register ("register" for cash, "investment_register"
+    for the investment register)."""
     s = _settings(settings)
-    raw = s.value(_HIDDEN_COLS_KEY, "")
+    raw = s.value(_hidden_cols_key(scope), "")
     if isinstance(raw, (list, tuple)):
         names = [str(x) for x in raw]
     else:
@@ -378,11 +389,13 @@ def hidden_columns(settings: QSettings | None = None) -> list[str]:
     return [n.strip() for n in names if n and n.strip()]
 
 
-def set_hidden_columns(names, settings: QSettings | None = None) -> None:
-    """Persist the hidden register columns (deduplicated, order kept)."""
+def set_hidden_columns(names, settings: QSettings | None = None, *,
+                       scope: str = "register") -> None:
+    """Persist the hidden register columns for ``scope`` (deduplicated, order
+    kept)."""
     s = _settings(settings)
     clean = [str(n).strip() for n in names if str(n).strip()]
-    s.setValue(_HIDDEN_COLS_KEY, ",".join(dict.fromkeys(clean)))
+    s.setValue(_hidden_cols_key(scope), ",".join(dict.fromkeys(clean)))
     s.sync()
 
 

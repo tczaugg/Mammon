@@ -10,6 +10,41 @@ Money is signed integer cents; share quantities and prices are Decimal-precision
 TEXT so no float error creeps into share math. All arithmetic here goes through
 Decimal and rounds money HALF_UP at the cents boundary.
 
+A security's SYMBOL is its whole-history identity (``price_history`` and holdings
+key on it), so a ticker rename would otherwise split one security in two. The
+``security_aliases`` table maps an old ticker to its surviving canonical symbol;
+:func:`resolve_symbol` follows it, every price/holdings/valuation lookup routes
+through :func:`resolve_symbol` / :func:`_identity_symbols`, and the position
+replay folds aliased tickers onto the canonical symbol (:func:`_fold_aliases`).
+Continuity is entirely read-time -- no historical row is rewritten -- so both
+spellings value as one holding across the rename date. This module is the SOLE
+writer of ``security_aliases`` (:func:`add_alias` / :func:`remove_alias`).
+
+``security_aliases`` MEANS RENAME AND ONLY RENAME. It is not a place to record
+that one instrument derives from another, and specifically an option contract is
+never an alias of its underlying -- it has its own terms, its own price series
+and its own expiry. The pull towards that mistake is real, because
+:func:`ticker_of` reads the first token of "XYZ 260117C00150000 XYZ 17JAN26 150
+C" as "XYZ" and a QIF option block states the root ticker outright, so every
+derivation path in this codebase is one step from proposing the collapse.
+:func:`looks_like_option` is the interim shape test that refuses it, here and in
+``mammon.securities``, until a real instrument classifier exists.
+
+Stock splits are absorbed the same way -- at READ time, nothing rewritten. A
+``price_history`` row is stored RAW, in the units that were trading the day it
+was recorded, and :func:`price_history` / :func:`price_history_bounds` divide
+each as-traded price by the exact cumulative factor of every ``StkSplit`` dated
+after it, so the plotted series reads in today's units end to end. The
+alternative -- restating the stored prices when a split lands -- is a one-way
+door: a mistyped ratio could not be undone, deleting a split entered by accident
+could not put the old numbers back, and a second pass over the same history
+would divide twice. Recomputing from the split rows means editing or deleting
+one self-corrects the whole series. Prices that came from a quote provider are
+already on the current scale (Yahoo restates OHLC for splits regardless of
+``auto_adjust``) and are passed through untouched -- see
+:data:`SPLIT_ADJUSTED_SOURCES`. That mixture of scales in one table is exactly
+what made a pre-split purchase spike above the downloaded curve.
+
 Auto-quotes: :func:`fetch_quotes` pulls the latest close for a set of symbols and
 writes ``price_history`` rows; :func:`fetch_quote_history` backfills a monthly
 series over a date range, which is what keeps a net-worth curve from stepping
@@ -189,6 +224,41 @@ def ticker_of(symbol) -> str:
     if not head or not (1 <= len(head) <= 5) or not head.isalpha():
         return ""
     return head
+
+
+# The body of an OSI option symbol: YYMMDD, C or P, then the strike x 1000 in 8
+# zero-padded digits. "XYZ260117C00150000" and the padded fixed-width form
+# "XYZ   260117C00150000" both contain it; so does the QIF name that follows the
+# symbol with a human rendering. Nothing that is not an option contract looks
+# like this, which is the point -- see :func:`looks_like_option`.
+_OSI_BODY_RE = re.compile(r"\d{6}[CP]\d{8}")
+
+
+def looks_like_option(*texts) -> bool:
+    """True when any of ``texts`` carries an OSI option-contract symbol.
+
+    DELIBERATELY CONSERVATIVE, and a placeholder. This is a shape test, not a
+    classifier: it recognises only the unambiguous OSI body (``260117C00150000``)
+    anywhere in the string, so it says "yes" to the 21-character symbol in every
+    spelling seen in this ledger -- padded, unpadded, and followed by a human
+    rendering -- and "no" to everything else, including pre-2010 OPRA symbols
+    (``IBMAF``) and broker prose (``XYZ 01/17/2026 150.00 C``). Those are false
+    NEGATIVES on purpose: every caller uses this to REFUSE an action, so a miss
+    leaves today's behaviour and a false positive would block a legitimate
+    rename.
+
+    It exists because :func:`ticker_of` cannot tell a contract from its
+    underlying -- the first token of "XYZ 260117C00150000 XYZ 17JAN26 150 C" is
+    "XYZ", so every ticker-derivation path in this codebase quietly proposes
+    collapsing the contract onto the stock. An option is a distinct instrument,
+    never a spelling of its underlying. A real ``instruments.classify`` (a
+    closed Kind enumeration plus a full OSI/legacy/human parser) is the intended
+    replacement; when it lands, this function and its call sites go with it."""
+    for text in texts:
+        s = str(text or "").strip().upper()
+        if s and _OSI_BODY_RE.search(s):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +520,71 @@ def update_investment(
         earliest = min(d for d in (prior["date"], date) if d)
         _invalidate_holdings_checkpoints_from(conn, prior["account_id"], earliest)
     conn.commit()
+
+
+def update_investment_fields(conn, txn_id: int, **changes) -> bool:
+    """Change a SUBSET of an investment transaction's editable columns, keeping
+    the rest as they are, then write through :func:`update_investment` (the
+    full-row writer). A single-field correction or a batch edit stays on the ONE
+    investment write path instead of minting a second UPDATE. Returns False if
+    the row is gone. ``changes`` keys are :func:`update_investment`'s parameter
+    names (date, action, symbol, quantity, price, amount, commission, memo,
+    transfer_account_id, split_num, split_den)."""
+    prior = get_investment_txn(conn, txn_id)
+    if prior is None:
+        return False
+
+    def pick(name):
+        return changes[name] if name in changes else prior[name]
+
+    update_investment(
+        conn, txn_id, pick("date"), pick("action"),
+        symbol=pick("symbol"), quantity=pick("quantity"), price=pick("price"),
+        amount=pick("amount"), commission=pick("commission"), memo=pick("memo"),
+        transfer_account_id=pick("transfer_account_id"),
+        split_num=pick("split_num"), split_den=pick("split_den"))
+    return True
+
+
+def is_void_investment(txn) -> bool:
+    """True when the investment row carries Quicken's void mark.
+
+    The cash register stamps ``**VOID**`` on the (visible) payee; an
+    ``investment_transactions`` row has no payee, so the mark lives on the memo --
+    the only free text such a row carries -- and the register renders it on the
+    Action cell (see :class:`mammon.ui.models.InvestmentRegisterModel`)."""
+    return str((_row_value(txn, "memo")) or "").startswith(ledger.VOID_PREFIX)
+
+
+def void_investment(conn, txn_id: int) -> bool:
+    """Quicken's Void for an investment transaction: keep the row as a record but
+    take it out of the money AND out of the share math.
+
+    The mirror of :func:`ledger.void_transaction`, on the
+    ``investment_transactions`` schema (which has no payee to stamp and no split
+    lines to drop). ``amount``/``commission``/``quantity``/``price`` all go to
+    zero, so :func:`register_rows`'s running cash and share balances -- and
+    :func:`rebuild_holdings` -- treat the row as inert, and the memo gains the
+    ``**VOID**`` prefix the register shows, with the original amount noted so
+    nothing is lost. Idempotent: returns False (changing nothing) when the row is
+    already void. Does NOT rebuild holdings -- the caller does, exactly as
+    update/delete do. Raises ``KeyError`` if the id is unknown."""
+    prior = get_investment_txn(conn, txn_id)
+    if prior is None:
+        raise KeyError(f"no investment transaction {txn_id}")
+    if is_void_investment(prior):
+        return False
+    was = abs(int(prior["amount"] or 0))
+    note = f"voided; was {was // 100:,}.{was % 100:02d}"
+    memo = (prior["memo"] or "").strip()
+    new_memo = f"{ledger.VOID_PREFIX} {memo}".strip() + f" ({note})"
+    conn.execute(
+        "UPDATE investment_transactions SET amount=0, commission=0,"
+        " quantity=NULL, price=NULL, memo=? WHERE id=?",
+        (new_memo, txn_id))
+    _invalidate_holdings_checkpoints_from(conn, prior["account_id"], prior["date"])
+    conn.commit()
+    return True
 
 
 def symbols_used(conn, account_id: int) -> list:
@@ -789,6 +924,100 @@ def _unrepresented_transfer_legs(conn, account_id: int, inv_rows) -> list[dict]:
     return legs
 
 
+def transfer_targets(conn, row) -> list:
+    """The other side of an investment register row's transfer, as
+    ``(account_id, txn_id)`` pairs -- what the register's 'Go to [account]' menu
+    entry needs to navigate. Empty for a row that is not a transfer leg, which is
+    how the menu knows to hide the entry; ``txn_id`` may be ``None``, and the jump
+    then lands on the target register without selecting a row.
+
+    ``row`` is a register row (see :func:`register_rows`), because the register
+    shows two different kinds of transfer leg:
+
+      1. a backfilled CASH leg (``cash_leg``) -- an ordinary ``transactions`` row
+         sitting in this account, cross-linked to its mirror by
+         ``transfer_pair_id`` exactly like the cash register's legs, so the mirror
+         id is simply read back;
+      2. an ``XIn``/``XOut`` ``investment_transactions`` row -- which carries
+         ``transfer_account_id`` but has NO pair-id column at all, so its
+         counterpart is found the only way this module ever matches the two
+         tables: same ``(date, counter-account, |amount|)``, the identical key
+         :func:`_unrepresented_transfer_legs` and the valuation double-count
+         guard use. Requiring the counterpart to point BACK at this account keeps
+         a same-day, same-amount stranger from being offered as the mirror.
+
+    Reads only; kept out of :mod:`mammon.ui` so the register stays a thin
+    projection with no SQL of its own."""
+    if not row:
+        return []
+    if _row_value(row, "cash_leg"):
+        r = conn.execute(
+            "SELECT transfer_account_id, transfer_pair_id FROM transactions "
+            "WHERE id=?", (int(row["id"]),)).fetchone()
+        if r is None or r["transfer_account_id"] is None:
+            return []
+        pair = r["transfer_pair_id"]
+        return [(int(r["transfer_account_id"]),
+                 int(pair) if pair is not None else None)]
+    acct = _row_value(row, "transfer_account_id")
+    own = _row_value(row, "account_id")
+    if acct is None or own is None:
+        return []
+    hit = conn.execute(
+        "SELECT id FROM transactions WHERE account_id=? AND date=? "
+        "AND ABS(amount)=? AND transfer_account_id=? ORDER BY id LIMIT 1",
+        (int(acct), row["date"], abs(int(_row_value(row, "amount") or 0)),
+         int(own)),
+    ).fetchone()
+    return [(int(acct), int(hit[0]) if hit is not None else None)]
+
+
+def investment_txn_for_cash_leg(conn, txn):
+    """The ``investment_transactions.id`` that REPRESENTS a cash register row's
+    transfer into this investment account, or ``None`` -- the mirror image of
+    :func:`transfer_targets`, walked from the ordinary side.
+
+    The cash register knows its counterpart only as ``transfer_pair_id``, a
+    ``transactions`` id: the mirror leg ``ledger.create_transfer`` wrote on the
+    investment account. But the investment register shows that leg ONLY when no
+    investment row already represents the same movement --
+    :func:`_unrepresented_transfer_legs` dedupes it away against the XIn/XOut on
+    the identical ``(date, counter-account, |amount|)`` key. When it IS deduped
+    away, forwarding the pair id sends ``select_txn`` an id that names no visible
+    row, and the jump lands on the register with nothing selected. So the cash
+    side has to ask, in that same key, 'is there an investment row standing in
+    for my mirror?' and select that instead.
+
+    Returns ``None`` when there is none, which is the signal to keep using the
+    pair id -- the backfilled cash leg is then genuinely what the register shows.
+
+    ``txn`` is a cash-side row (sqlite3.Row or dict) with ``account_id``,
+    ``date``, ``amount`` and ``transfer_account_id``. Ambiguity (two same-day,
+    same-size rows) is resolved toward a matching memo, then the lowest id, so
+    the jump is deterministic rather than absent."""
+    if not txn:
+        return None
+    acct = _row_value(txn, "transfer_account_id")
+    own = _row_value(txn, "account_id")
+    if acct is None or own is None:
+        return None
+    rows = conn.execute(
+        "SELECT id, memo FROM investment_transactions WHERE account_id=? "
+        "AND date=? AND ABS(amount)=? AND transfer_account_id=? ORDER BY id",
+        (int(acct), _row_value(txn, "date"),
+         abs(int(_row_value(txn, "amount") or 0)), int(own)),
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        memo = (_row_value(txn, "memo") or "").strip()
+        if memo:
+            for r in rows:
+                if (r["memo"] or "").strip() == memo:
+                    return int(r["id"])
+    return int(rows[0]["id"])
+
+
 def _register_sequence(conn, account_id: int) -> list:
     """The account's rows for the register in application order -- the real
     ``investment_transactions`` rows merged with any cash-only transfer legs that
@@ -1056,6 +1285,50 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
     # was already added to pos.dividends above).
 
 
+def _merge_position(dst, src) -> None:
+    """Fold ``src`` into ``dst`` (both :class:`_Position`) when two ticker
+    spellings resolve to one identity. Shares, cost basis and income are
+    additive; the open lots concatenate (re-sorted oldest-first) so average cost
+    over the pooled lots is the combined basis over the combined shares."""
+    dst.qty += src.qty
+    dst.cost += src.cost
+    dst.dividends += src.dividends
+    dst.realized += src.realized
+    dst.ever_held = dst.ever_held or src.ever_held
+    dst.lots.extend(src.lots)
+    dst.lots.sort(key=lambda l: (l.date or "", l.txn_id or 0))
+    dst.gains.extend(src.gains)
+
+
+def _fold_aliases(conn, positions: dict) -> dict:
+    """Re-key a per-symbol position map onto canonical identities, merging the two
+    spellings of a renamed security into ONE :class:`_Position`. This is where a
+    ticker rename becomes a single continuous holding: the old ticker's lots and
+    the new ticker's lots pool under the canonical symbol, so the Holdings window
+    and every valuation see one identity across the rename date. A no-op (the same
+    object) when no aliases exist -- the overwhelmingly common case -- so the hot
+    replay path pays nothing."""
+    alias_map = {a: c for a, c in list_aliases(conn)}
+    if not alias_map:
+        return positions
+
+    def canon(sym):
+        seen = {sym}
+        while sym in alias_map and alias_map[sym] not in seen:
+            sym = alias_map[sym]
+            seen.add(sym)
+        return sym
+
+    folded: dict = {}
+    for sym, pos in positions.items():
+        key = canon(sym)
+        if key in folded:
+            _merge_position(folded[key], pos)
+        else:
+            folded[key] = pos
+    return folded
+
+
 def _replay_positions(conn, account_id: int, as_of: Optional[str] = None,
                       use_snapshots: bool = True) -> dict:
     """Replay the account's investment transactions into per-symbol
@@ -1084,7 +1357,10 @@ def _replay_positions(conn, account_id: int, as_of: Optional[str] = None,
     method, assigned = _replay_context(conn, account_id)
     for t in _list_txns_in_range(conn, account_id, lower, as_of):
         _apply_txn(positions, t, method, assigned)
-    return positions
+    # Fold aliased tickers onto their canonical identity AFTER the raw replay, so
+    # the snapshot+delta path and the from-inception oracle fold an identical raw
+    # dict (checkpoints stay stored per raw ticker; continuity is read-time).
+    return _fold_aliases(conn, positions)
 
 
 def _replay_context(conn, account_id: int) -> tuple:
@@ -1383,9 +1659,126 @@ def list_holdings(conn, account_id: int) -> list:
 
 
 def get_holding(conn, account_id: int, symbol: str):
+    # Resolve first so a lookup by a renamed (aliased) ticker finds the holding,
+    # which rebuild_holdings now keys under the canonical symbol.
     return conn.execute(
-        "SELECT * FROM holdings WHERE account_id=? AND symbol=?", (account_id, symbol)
+        "SELECT * FROM holdings WHERE account_id=? AND symbol=?",
+        (account_id, resolve_symbol(conn, symbol)),
     ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Security aliases (ticker renames)
+# ---------------------------------------------------------------------------
+# A ticker rename must not split one security's history into two identities. The
+# alias table records that an old ticker IS a former spelling of a surviving
+# (canonical) symbol; every symbol lookup on the price/holdings/valuation paths
+# routes through resolve_symbol, and price reads union an alias's rows into the
+# canonical identity (_identity_symbols). Nothing rewrites a historical row -- the
+# continuity is entirely a read-time resolution, which is what lets both spellings
+# keep resolving to one holding across the rename date. This module is the SOLE
+# writer of security_aliases (add_alias / remove_alias).
+def list_aliases(conn) -> list:
+    """Every ``(alias_symbol, canonical_symbol)`` pair, in alias order."""
+    return [(r["alias_symbol"], r["canonical_symbol"])
+            for r in conn.execute(
+                "SELECT alias_symbol, canonical_symbol FROM security_aliases "
+                "ORDER BY alias_symbol")]
+
+
+def resolve_symbol(conn, symbol):
+    """The canonical symbol ``symbol`` belongs to: follow its alias if one is
+    recorded, else ``symbol`` itself (identity; also for a falsy/blank symbol).
+    add_alias forbids self-aliases and cycles, so a single hop is all that ever
+    exists, but this follows a short bounded chain defensively so a stray chain
+    can never spin."""
+    if not symbol:
+        return symbol
+    seen = {symbol}
+    cur = symbol
+    for _ in range(16):
+        row = conn.execute(
+            "SELECT canonical_symbol FROM security_aliases WHERE alias_symbol=?",
+            (cur,)).fetchone()
+        if row is None:
+            return cur
+        cur = row["canonical_symbol"]
+        if cur in seen:                       # defensive; add_alias prevents this
+            return cur
+        seen.add(cur)
+    return cur
+
+
+def _identity_symbols(conn, symbol) -> list:
+    """Every price_history spelling that shares ``symbol``'s canonical identity:
+    the canonical symbol itself PLUS every alias that resolves to it. A price read
+    over this SET is what keeps a renamed ticker's series continuous across the
+    rename date -- the old ticker's price rows attribute to the new identity with
+    nothing rewritten."""
+    canon = resolve_symbol(conn, symbol)
+    if not canon:
+        return [symbol]
+    aliases = [r["alias_symbol"] for r in conn.execute(
+        "SELECT alias_symbol FROM security_aliases WHERE canonical_symbol=?",
+        (canon,))]
+    return [canon, *aliases]
+
+
+def _price_identity_clause(conn, symbol):
+    """``(where_fragment, params)`` selecting every price_history row that shares
+    ``symbol``'s canonical identity -- ``symbol IN (?,...)``."""
+    syms = _identity_symbols(conn, symbol)
+    return "symbol IN (%s)" % ",".join("?" for _ in syms), list(syms)
+
+
+def add_alias(conn, alias_symbol, canonical_symbol) -> None:
+    """Record that ``alias_symbol`` is a former ticker for ``canonical_symbol``.
+    Thereafter every price/holdings/valuation lookup for the alias resolves to the
+    canonical security, so the two spellings value as one continuous identity.
+
+    Four guards, each guarding against a corrupt mapping rather than a typo:
+    a security cannot alias itself; the canonical MUST be an existing security
+    (the identity everything folds onto); the new alias must not close a cycle
+    (the canonical must not already resolve back to the alias), which would make
+    resolution ambiguous; and NEITHER SIDE may be an option contract.
+
+    That last one is what this table means. ``security_aliases`` says "two ticker
+    spellings of one continuous identity" -- a rename, and only a rename. An
+    option contract is a different instrument from its underlying: different
+    terms, different price series, different lifetime, and it expires while the
+    stock goes on. Folding one onto the other would value the contract at the
+    stock's price and merge two unrelated holdings, and no read-time resolution
+    could tell them apart again. Refused on both sides, because the mistake is
+    as easy to make in either direction."""
+    alias = (alias_symbol or "").strip()
+    canon = (canonical_symbol or "").strip()
+    if not alias or not canon:
+        raise ValueError("both alias and canonical symbols are required")
+    if alias == canon:
+        raise ValueError(f"a security cannot alias itself: {alias!r}")
+    if looks_like_option(alias, canon):
+        raise ValueError(
+            f"refusing alias {alias!r} -> {canon!r}: one side is an option "
+            "contract, and an option is never another spelling of its "
+            "underlying -- security_aliases records renames only")
+    if conn.execute("SELECT 1 FROM securities WHERE symbol=?", (canon,)).fetchone() is None:
+        raise ValueError(f"canonical symbol {canon!r} is not a known security")
+    if resolve_symbol(conn, canon) == alias:
+        raise ValueError(
+            f"alias {alias!r} -> {canon!r} would form a cycle")
+    conn.execute(
+        "INSERT INTO security_aliases(alias_symbol, canonical_symbol) VALUES (?,?) "
+        "ON CONFLICT(alias_symbol) DO UPDATE SET canonical_symbol=excluded.canonical_symbol",
+        (alias, canon))
+    conn.commit()
+
+
+def remove_alias(conn, alias_symbol) -> None:
+    """Drop an alias so its symbol resolves to itself again (the rename is
+    reversed for lookup purposes; no historical row was ever touched)."""
+    conn.execute("DELETE FROM security_aliases WHERE alias_symbol=?",
+                 ((alias_symbol or "").strip(),))
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1660,8 +2053,11 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
     for (sym, date, units, price) in positions:
         if not sym:
             continue
+        # compute_holdings keys by the canonical symbol, so resolve the broker's
+        # (possibly renamed) ticker before comparing share counts or prices.
+        canon = resolve_symbol(conn, sym)
         lots = compute_holdings(conn, account_id, as_of=date)
-        computed_qty = lots[sym].qty if sym in lots else Decimal(0)
+        computed_qty = lots[canon].qty if canon in lots else Decimal(0)
         reported_qty = _D(units) if units not in (None, "") else Decimal(0)
         if computed_qty != reported_qty:
             out.append({
@@ -1671,9 +2067,10 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
             })
         if price not in (None, ""):
             reported_price = _D(price)
+            clause, params = _price_identity_clause(conn, sym)
             row = conn.execute(
-                "SELECT close_price FROM price_history WHERE symbol=? AND date=?",
-                (sym, date),
+                "SELECT close_price FROM price_history WHERE " + clause + " AND date=?",
+                (*params, date),
             ).fetchone()
             if row is not None and _D(row["close_price"]) != reported_price:
                 out.append({
@@ -1684,10 +2081,118 @@ def reconcile_positions(conn, account_id: int, positions) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Split-adjusting a price series at READ time
+# ---------------------------------------------------------------------------
+# Price rows are stored RAW, on the scale that was current when they were
+# recorded, and the split adjustment is recomputed on every read from the
+# ``StkSplit`` rows themselves. Rewriting the stored prices when a split lands
+# would be a one-way door: correcting a mistyped ratio, or deleting a split
+# entered by accident, could not put the old numbers back, and a second pass
+# over the same history would divide twice. Read-time adjustment self-corrects
+# instead -- edit or delete the split row and the series follows.
+_PRICE_EXP = Decimal("1E-6")      # the precision _price_from_value stores at
+
+# Sources whose HISTORY arrives ALREADY back-adjusted for splits: everything a
+# quote provider hands back is expressed on the scale trading at fetch time
+# (see :class:`YFinanceQuoteSource.get_history`). These rows must NOT be scaled
+# again -- doing so would put a downloaded pre-split close an extra factor below
+# the series instead of on it. Same set as :data:`REFETCHABLE_SOURCES`, for the
+# same reason: a provider row is the provider's CURRENT opinion, in today's
+# units. Everything else ("txn", "qif-txn", a broker position, a hand-typed
+# price) is AS TRADED on its own date and is what needs adjusting.
+SPLIT_ADJUSTED_SOURCES = frozenset(REFETCHABLE_SOURCES)
+
+
+def _split_events(conn, symbol) -> list:
+    """``(date, factor)`` for every stock split on ``symbol``'s identity, ascending.
+
+    ``factor`` is the EXACT :class:`~fractions.Fraction` a split multiplies a
+    share count by (:func:`split_factor`) -- 8 for an 8:1 forward split. Read
+    over the alias identity (:func:`_share_identity_clause`) so a renamed
+    security still finds the splits recorded under its old ticker.
+
+    Deduplicated BY DATE, and deliberately not scoped to an account: the same
+    corporate action is recorded once per account that held the security, so
+    summing the rows would tell a two-account holder the 8:1 split was 64:1.
+    Voided rows are out of the share math (:func:`void_investment`) and so are
+    out of the price math.
+    """
+    frag, params = _share_identity_clause(conn, symbol)
+    rows = conn.execute(
+        "SELECT date, action, quantity, split_num, split_den, memo"
+        " FROM investment_transactions WHERE " + frag + " ORDER BY date, id",
+        params,
+    )
+    seen: dict = {}
+    for r in rows:
+        if _action_key(r["action"]) not in _SPLIT_ACTIONS:
+            continue
+        if is_void_investment(r):
+            continue
+        factor = split_factor(r)
+        if not factor or factor <= 0 or factor == 1:
+            continue
+        seen.setdefault(r["date"], factor)
+    return sorted(seen.items())
+
+
+def _cumulative_split(events, date: str) -> Fraction:
+    """The product of every split factor dated strictly AFTER ``date``.
+
+    Strict, so a price stamped ON the split date is already on the new scale and
+    is left alone. Multiple splits compound exactly (2:1 then 3:1 -> 6)."""
+    factor = Fraction(1)
+    for when, f in events:
+        if when > date:
+            factor *= f
+    return factor
+
+
+def _rescale_price(price: Decimal, factor: Fraction) -> Decimal:
+    """``price`` divided by an exact split ``factor``, HALF_UP at the stored
+    precision. Fraction arithmetic throughout -- a float divide by 3 would put
+    drift into a price the chart then plots as a step."""
+    if factor == 1 or price == 0:
+        return price
+    exact = Fraction(price) / factor
+    places = -_PRICE_EXP.as_tuple().exponent
+    scale = 10 ** places
+    num, den = exact.numerator * scale, exact.denominator
+    # HALF_UP on the exact integer quotient (no Decimal context rounding).
+    whole, rem = divmod(abs(num), den)
+    if rem * 2 >= den:
+        whole += 1
+    out = Decimal(whole if num >= 0 else -whole).scaleb(-places)
+    out = out.normalize()
+    if out.as_tuple().exponent > 0:                   # 5E+1 -> 50
+        out = out.quantize(Decimal(1))
+    return out
+
+
+def _split_adjusted(events, date: str, source, value) -> Optional[Decimal]:
+    """One stored price as the series should read it. ``None`` passes through."""
+    if value is None:
+        return None
+    price = _D(value)
+    if not events or str(source or "").strip().lower() in SPLIT_ADJUSTED_SOURCES:
+        return price
+    return _rescale_price(price, _cumulative_split(events, date))
+
+
 def latest_price(conn, symbol: str, as_of: Optional[str] = None) -> Optional[Decimal]:
-    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever)."""
-    sql = "SELECT close_price FROM price_history WHERE symbol=?"
-    params: list = [symbol]
+    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever).
+    Reads across the whole canonical identity, so a renamed ticker's pre-rename
+    closes still price its holding (:func:`_identity_symbols`).
+
+    RAW, deliberately -- unlike :func:`price_history` this is NOT split-adjusted.
+    It prices a holding at ``as_of``, and the share count it multiplies comes
+    from the replay AS OF that same date, which has not yet had a later split
+    applied to it (:func:`_apply_txn`). Pre-split shares x pre-split price is the
+    consistent pairing; a current valuation reads a post-split row on both sides
+    and is unaffected either way."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = "SELECT close_price FROM price_history WHERE " + clause
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
@@ -1701,14 +2206,27 @@ def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
     by date (then id for a stable order within a day), optionally capped at
     ``as_of``. ``close_price`` is a :class:`~decimal.Decimal` (dollars per share),
     so no float error creeps into the series the price-history chart plots. An
-    empty list means the symbol has no recorded prices."""
-    sql = "SELECT date, close_price FROM price_history WHERE symbol=?"
-    params: list = [symbol]
+    empty list means the symbol has no recorded prices. Rows across the whole
+    canonical identity are merged, so an aliased ticker's series is continuous
+    across its rename date (:func:`_identity_symbols`).
+
+    SPLIT-ADJUSTED at read time: each as-traded price is divided by the exact
+    cumulative factor of every split dated after it (:func:`_cumulative_split`),
+    so the whole series reads in TODAY's units. Without it an 8:1 split left the
+    pre-split transaction prices standing eight times above the back-adjusted
+    downloaded closes -- the spikes the user sees on the chart. Prices from a
+    quote provider are already on that scale and are passed through untouched
+    (:data:`SPLIT_ADJUSTED_SOURCES`)."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = "SELECT date, close_price, source FROM price_history WHERE " + clause
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
     sql += " ORDER BY date, id"
-    return [(row["date"], _D(row["close_price"])) for row in conn.execute(sql, params)]
+    events = _split_events(conn, symbol)
+    return [(row["date"],
+             _split_adjusted(events, row["date"], row["source"], row["close_price"]))
+            for row in conn.execute(sql, params)]
 
 
 def price_history_bounds(conn, symbol: str, as_of: Optional[str] = None) -> list:
@@ -1718,21 +2236,27 @@ def price_history_bounds(conn, symbol: str, as_of: Optional[str] = None) -> list
     known one (a quote, or a price the source stated). ``high`` alone can be
     None on a row whose share count was too coarse to bound it from above
     (:func:`price_bounds`). Kept separate from :func:`price_history` so the many
-    callers that only want the series are unaffected."""
-    sql = ("SELECT date, close_price, price_low, price_high FROM price_history "
-           "WHERE symbol=?")
-    params: list = [symbol]
+    callers that only want the series are unaffected. Unions the canonical
+    identity like :func:`price_history`.
+
+    Split-adjusted exactly like :func:`price_history`, close and bounds alike:
+    they are drawn on the same axes, so a low/high left on the pre-split scale
+    would put the error band eight times above the close it brackets."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = ("SELECT date, close_price, price_low, price_high, source "
+           "FROM price_history WHERE " + clause)
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
     sql += " ORDER BY date, id"
+    events = _split_events(conn, symbol)
     out = []
     for row in conn.execute(sql, params):
-        lo = row["price_low"]
-        hi = row["price_high"]
-        out.append((row["date"], _D(row["close_price"]),
-                    _D(lo) if lo is not None else None,
-                    _D(hi) if hi is not None else None))
+        date, src = row["date"], row["source"]
+        out.append((date,
+                    _split_adjusted(events, date, src, row["close_price"]),
+                    _split_adjusted(events, date, src, row["price_low"]),
+                    _split_adjusted(events, date, src, row["price_high"])))
     return out
 
 
@@ -1740,9 +2264,13 @@ def _resolve_price(conn, symbol, as_of, prices, account_id=None) -> Optional[Dec
     """The price to value ``symbol`` at ``as_of``: an explicit caller-supplied
     ``prices`` override (symbol -> price) takes precedence, otherwise the latest
     recorded ``price_history`` close on/before ``as_of``. ``None`` when neither
-    is available -- the holding is reported unpriced rather than guessed at."""
-    if prices and symbol in prices:
-        return _D(prices[symbol])
+    is available -- the holding is reported unpriced rather than guessed at. The
+    caller-supplied override may be keyed by any spelling of the identity (the
+    old ticker or the new), so it is matched across the identity too."""
+    if prices:
+        for s in _identity_symbols(conn, symbol):
+            if s in prices:
+                return _D(prices[s])
     return latest_price(conn, symbol, as_of)
 
 
@@ -1769,15 +2297,46 @@ class AccountValuation:
     unpriced: list = field(default_factory=list)    # symbols with no price
 
 
+def _holdings_as_of(conn, account_id: int, as_of: Optional[str]):
+    """Yield ``(symbol, quantity, cost_basis_cents)`` for the securities the
+    account held on ``as_of`` -- the SOURCE SET :func:`holding_values` values.
+
+    With no ``as_of`` this reads the DERIVED ``holdings`` table: one indexed
+    SELECT, and the fast path the 40-year open leans on. With an explicit
+    ``as_of`` it REPLAYS positions to that date via :func:`compute_holdings`
+    (snapshot-seeded through ``holdings_checkpoints``, so the replay stays cheap),
+    and a position closed by ``as_of`` (qty 0) is dropped -- exactly as the
+    ``holdings`` table excludes a fully-closed position.
+
+    Sourcing from ``holdings`` regardless of ``as_of`` was the historical-
+    valuation bug: every past date valued TODAY's share counts, so a since-sold
+    position vanished from the past (and an account closed out years ago reported
+    its cash sleeve alone), making the whole net-worth curve understate history.
+    The two row shapes -- ``holdings`` rows (symbol/quantity/cost_basis) and
+    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalised HERE,
+    at the one boundary, so every caller above sees a single shape."""
+    if as_of is None:
+        for h in list_holdings(conn, account_id):
+            yield h["symbol"], _D(h["quantity"]), (h["cost_basis"] or 0)
+    else:
+        for sym, lot in sorted(compute_holdings(conn, account_id, as_of).items()):
+            if lot.qty == 0:
+                continue
+            yield sym, lot.qty, lot.cost
+
+
 def holding_values(conn, account_id: int, as_of: Optional[str] = None,
                    prices: Optional[dict] = None) -> list[HoldingValue]:
-    """Value each holding at its latest price (or an injected ``prices`` override,
-    symbol -> price). Unpriced holdings get market_value 0 and gain None."""
+    """Value each holding at its latest price on/before ``as_of`` (or an injected
+    ``prices`` override, symbol -> price). Unpriced holdings get market_value 0
+    and gain None.
+
+    ``as_of`` rewinds the POSITIONS too, not just the price: the shares valued are
+    those actually held on that date (:func:`_holdings_as_of`), so a historical
+    net-worth figure reflects the past holdings rather than today's. With ``as_of``
+    None the current holdings are valued at their latest price (the fast path)."""
     out: list[HoldingValue] = []
-    for h in list_holdings(conn, account_id):
-        sym = h["symbol"]
-        qty = _D(h["quantity"])
-        cost = h["cost_basis"] or 0
+    for sym, qty, cost in _holdings_as_of(conn, account_id, as_of):
         price = _resolve_price(conn, sym, as_of, prices, account_id)
         if price is None:
             out.append(HoldingValue(sym, qty, cost, None, 0, None))
@@ -1854,8 +2413,13 @@ def security_positions(conn, account_id: int, as_of: Optional[str] = None,
     of ``as_of``, sorted by symbol. Includes previously-held positions (now zero
     shares) so the Holdings window can list them in their own tab with each one's
     realized P/L. A bare dividend/interest-only symbol (never actually held) is
-    excluded. As-of caps only the valuation price, never the replay -- so the
-    open positions here match :func:`compute_holdings` / :func:`holding_values`."""
+    excluded. As-of here caps only the valuation PRICE, never the replay -- the
+    share counts are always TODAY's. So the open positions here match
+    :func:`compute_holdings` and match :func:`holding_values` only at the current
+    date (as-of None or the latest activity date); for a historical as-of
+    ``holding_values`` rewinds the share counts to that date and these do not,
+    deliberately -- this view answers "what I hold now, priced then", the
+    valuation path answers "what I held then, priced then"."""
     positions = _replay_positions(conn, account_id)
     return [
         _value_position(conn, account_id, sym, positions[sym], as_of, prices)
@@ -2265,19 +2829,23 @@ class YFinanceQuoteSource:
         out: list[Quote] = []
         for sym in symbols:
             try:
-                # auto_adjust=False is LOAD-BEARING, not a default worth taking.
-                # yfinance defaults it to True (1.7.0), which back-adjusts every
-                # historical close for dividends AND splits -- a total-return
-                # series. Every other price in this file is AS TRADED: the QIF
-                # price, the transaction-carried price, the latest close. Mixing
-                # the two scales does not merely look wrong, it IS wrong: a
-                # high-yield holding came back at half its real 2021 price
-                # (QYLD 11.67 against an as-traded 22.62) and an 8:1 split put
-                # VGT's whole pre-split history at an eighth of what it traded
-                # for, so the chart read as a flat line with the real prices
-                # spiking out of it. Splits are already modelled here
-                # (`split_ratio`), and a dividend is a transaction, not a price
-                # revision -- so the provider must not adjust for either.
+                # auto_adjust=False is LOAD-BEARING, but it buys LESS than it
+                # was once thought to. It suppresses the DIVIDEND back-adjust
+                # only (yfinance defaults it to True in 1.7.0, returning a
+                # total-return series -- that is how a high-yield holding came
+                # back at half its real 2021 price, QYLD 11.67 against an
+                # as-traded 22.62). It does NOT suppress the SPLIT adjustment:
+                # Yahoo's chart endpoint serves OHLC already restated in the
+                # currently-trading unit, so after VGT's 8:1 split on 2026-04-21
+                # every pre-split close in this download arrives at an eighth of
+                # what it traded for, whatever this flag says. That is not
+                # fixable at the provider, so it is absorbed on the READ side:
+                # rows from a provider are marked with their source and left
+                # alone, while the as-traded prices this app derives itself are
+                # divided by the cumulative split factor when the series is read
+                # (`price_history` / `SPLIT_ADJUSTED_SOURCES`). A dividend, by
+                # contrast, is a transaction and not a price revision -- hence
+                # the flag stays False.
                 kw = {"interval": interval, "auto_adjust": False}
                 if start:
                     kw["start"] = start
@@ -2362,3 +2930,679 @@ def fetch_quotes(conn, symbols, source=None, names=None) -> list[Quote]:
         for target in targets:
             record_price(conn, target, q.date, q.close, q.source or default_name)
     return quotes
+
+
+# ---------------------------------------------------------------------------
+# Share reconciliation (SRD 5.11b)
+#
+# The share balance is to a security what the cash balance is to a bank
+# account, and a 401(k) of untickered internal funds is the case that forces
+# this: there is no quote source, so the statement's share count is the only
+# truth available. So share reconciliation mirrors the cash reconcile shapes
+# one-for-one (ledger.reconcile_summary / finish_reconciliation / the draft
+# get-save-clear), on the investment_transactions schema, one period per
+# (account, security).
+#
+# Two things a naive "sum the buys, subtract the sells" would get wrong, both
+# of them real history the user hit in Quicken:
+#
+#   * A STOCK SPLIT is not a share delta -- it RESCALES the running balance by
+#     M/N on its date. Summing quantities across a split period is off by the
+#     whole ratio. The split row here is the EXISTING ``StkSplit`` action
+#     replayed through :func:`apply_split`, the same exact-arithmetic helper
+#     _apply_txn uses, so a reconciliation and the Holdings window can never
+#     disagree about a split.
+#   * A RENAMED security is two ticker spellings of ONE identity. Quicken's
+#     answer was a huge share "adjustment"; ours is the security_aliases table,
+#     so every quantity is summed over the whole identity (via
+#     :func:`_identity_symbols`) BEFORE any difference is reported and long
+#     before an adjustment is offered.
+# ---------------------------------------------------------------------------
+
+_QTY_ACTIONS = (_ADD_ACTIONS | _REMOVE_ACTIONS | _SHORT_OPEN_ACTIONS
+                | _SHORT_COVER_ACTIONS | _SPLIT_ACTIONS)
+
+#: Memo marker stamped on a share-balance adjustment, so the row stays
+#: identifiable (and therefore deletable) forever after.
+SHARE_ADJUSTMENT_MARK = "**SHARE ADJ**"
+
+#: What the UI must tell the user whenever an adjustment is offered or listed.
+#: The reconciliation is a stamped fact about rows; deleting the adjustment
+#: cannot un-stamp them.
+SHARE_ADJUSTMENT_WARNING = (
+    "This adjustment is a real transaction: you can delete it later if you find "
+    "the missing shares. Deleting it does NOT undo the reconciliation -- the "
+    "affected period has to be reconciled again by hand."
+)
+
+
+def _validate_iso_date(date: str) -> None:
+    """Storage dates are ISO ``YYYY-MM-DD`` everywhere (SRD compartment M); a
+    statement date typed by the dialog has to be checked before it becomes one."""
+    try:
+        _dt.date.fromisoformat(date)
+    except (TypeError, ValueError):
+        raise ValueError(f"date must be ISO 'YYYY-MM-DD', got {date!r}")
+
+
+def _action_key(action) -> str:
+    """An action string in the normalized form the action sets are keyed by."""
+    return (action or "").strip().lower().replace(" ", "")
+
+
+def is_quantity_action(action) -> bool:
+    """True when this action CHANGES the share balance -- an acquisition, a
+    disposal, a short leg, or a split. A Div/IntInc/RtrnCap row moves cash or
+    basis only and is invisible to a share reconciliation."""
+    return _action_key(action) in _QTY_ACTIONS
+
+
+def share_qty_delta(txn) -> Decimal:
+    """The signed share change one row contributes, or 0 for a split (whose
+    effect is multiplicative -- see :func:`apply_split`) or a non-share row."""
+    a = _action_key(_row_value(txn, "action"))
+    q = _D(_row_value(txn, "quantity"))
+    if a in _ADD_ACTIONS or a in _SHORT_COVER_ACTIONS:
+        return q
+    if a in _REMOVE_ACTIONS or a in _SHORT_OPEN_ACTIONS:
+        return -q
+    return Decimal(0)
+
+
+def is_share_adjustment(txn) -> bool:
+    """True when the row is a reconciliation share adjustment (memo marker)."""
+    return str(_row_value(txn, "memo") or "").startswith(SHARE_ADJUSTMENT_MARK)
+
+
+def _share_identity_clause(conn, symbol):
+    """``(where_fragment, params)`` selecting every investment row that shares
+    ``symbol``'s canonical identity -- the canonical spelling plus every alias
+    of it, compared case-insensitively."""
+    syms = [str(s).strip().upper() for s in _identity_symbols(conn, symbol) if s]
+    if not syms:
+        syms = [str(symbol or "").strip().upper()]
+    frag = "UPPER(TRIM(COALESCE(symbol,''))) IN (%s)" % ",".join("?" for _ in syms)
+    return frag, syms
+
+
+def share_identity(conn, symbol) -> list:
+    """Every ticker spelling that reconciles as ``symbol``: its canonical symbol
+    first, then its aliases. Public so the dialog can show the user WHICH names
+    a share balance was summed over."""
+    return [s for s in _identity_symbols(conn, symbol) if s]
+
+
+def share_reconcile_rows(conn, account_id: int, symbol: str,
+                         through: Optional[str] = None) -> list:
+    """Every share-quantity-changing row for ``symbol``'s identity on this
+    account, in application order (date, id), as plain dicts. Voided rows are
+    dropped -- a void is out of the share math (see :func:`void_investment`).
+
+    Each dict carries the raw ``split_num``/``split_den``/``quantity`` columns,
+    so it can be handed straight to :func:`apply_split`."""
+    frag, params = _share_identity_clause(conn, symbol)
+    sql = "SELECT * FROM investment_transactions WHERE account_id=? AND " + frag
+    args = [account_id, *params]
+    if through:
+        sql += " AND date<=?"
+        args.append(through)
+    sql += " ORDER BY date, id"
+    out = []
+    for t in conn.execute(sql, tuple(args)):
+        action = t["action"]
+        if not is_quantity_action(action) or is_void_investment(t):
+            continue
+        split = _action_key(action) in _SPLIT_ACTIONS
+        out.append({
+            "id": t["id"],
+            "date": t["date"],
+            "action": action,
+            "symbol": t["symbol"],
+            "quantity": t["quantity"],
+            "split_num": _row_value(t, "split_num"),
+            "split_den": _row_value(t, "split_den"),
+            "memo": t["memo"],
+            "cleared": bool(_row_value(t, "cleared")),
+            "reconciled": bool(_row_value(t, "reconciled")),
+            "split": split,
+            "split_display": split_display(t) if split else "",
+            "delta": share_qty_delta(t),
+            "adjustment": is_share_adjustment(t),
+        })
+    return out
+
+
+def _run_shares(rows, seed=None, *, count_reconciled: bool = True,
+                count_cleared: bool = True,
+                skip_reconciled: bool = False) -> Decimal:
+    """Replay ``rows`` (already in date order) into a running share balance.
+
+    A split RESCALES the balance in place; every other row adds its signed
+    delta, but only if the caller counts it. This is the one place the share
+    running balance is computed -- summary and finish both call it, so they can
+    never disagree."""
+    qty = _D(seed)
+    for r in rows:
+        if skip_reconciled and r["reconciled"]:
+            continue
+        if r["split"]:
+            qty = apply_split(qty, r)
+        elif (r["reconciled"] and count_reconciled) or (
+                r["cleared"] and not r["reconciled"] and count_cleared):
+            qty += r["delta"]
+    return qty
+
+
+def last_share_reconciliation(conn, account_id: int, symbol: str,
+                              before: Optional[str] = None):
+    """The newest finished share reconciliation for ``symbol``'s canonical
+    identity on this account (optionally strictly before a date)."""
+    canon = resolve_symbol(conn, symbol)
+    sql = ("SELECT * FROM share_reconciliations WHERE account_id=? "
+           "AND UPPER(symbol)=?")
+    args = [account_id, str(canon or "").upper()]
+    if before:
+        sql += " AND statement_date<?"
+        args.append(before)
+    sql += " ORDER BY statement_date DESC, id DESC LIMIT 1"
+    return conn.execute(sql, tuple(args)).fetchone()
+
+
+def list_share_reconciliations(conn, account_id: int,
+                               symbol: Optional[str] = None) -> list:
+    """Finished share reconciliations for the account, oldest first."""
+    sql = "SELECT * FROM share_reconciliations WHERE account_id=?"
+    args = [account_id]
+    if symbol:
+        sql += " AND UPPER(symbol)=?"
+        args.append(str(resolve_symbol(conn, symbol) or "").upper())
+    sql += " ORDER BY statement_date, id"
+    return conn.execute(sql, tuple(args)).fetchall()
+
+
+def share_reconcile_summary(conn, account_id: int, symbol: str,
+                            statement_date: str, stated_ending_qty,
+                            starting_qty=None) -> dict:
+    """What a share reconciliation of ``symbol`` through ``statement_date``
+    stands at. The share mirror of :func:`mammon.ledger.reconcile_summary`.
+
+    ``prior_qty`` is the balance already reconciled (or ``starting_qty`` when
+    the user types the statement's starting share count, exactly as the cash
+    dialog lets them type a beginning balance). ``computed_ending_qty`` adds the
+    CLEARED rows to it; ``difference`` is what is still unexplained -- the
+    number the user clears items (or records an adjustment) to drive to zero.
+
+    Quantities in and out are Decimal (strings are accepted and parsed); never
+    floats. Splits and aliases are handled by the replay, not by the caller."""
+    if not symbol or not str(symbol).strip():
+        raise ValueError("share reconciliation needs a security symbol")
+    _validate_iso_date(statement_date)
+    canon = resolve_symbol(conn, str(symbol).strip())
+    rows = share_reconcile_rows(conn, account_id, canon, through=statement_date)
+    explicit = starting_qty not in (None, "")
+    if explicit:
+        seed = _D(starting_qty)
+        prior = _run_shares(rows, seed, count_reconciled=False,
+                            count_cleared=False, skip_reconciled=True)
+        computed = _run_shares(rows, seed, count_reconciled=False,
+                               count_cleared=True, skip_reconciled=True)
+    else:
+        prior = _run_shares(rows, count_reconciled=True, count_cleared=False)
+        computed = _run_shares(rows, count_reconciled=True, count_cleared=True)
+    stated = _D(stated_ending_qty)
+    prior_row = last_share_reconciliation(conn, account_id, canon,
+                                          before=statement_date)
+    return {
+        "account_id": account_id,
+        "symbol": canon,
+        "identity_symbols": share_identity(conn, canon),
+        "statement_date": statement_date,
+        "prior_qty": prior,
+        "prior_statement_date": (prior_row["statement_date"]
+                                 if prior_row is not None else None),
+        "prior_statement_qty": (_D(prior_row["ending_qty"])
+                                if prior_row is not None else None),
+        "starting_qty_given": _D(starting_qty) if explicit else None,
+        # A split is NOT a statement line the user clears -- it is history the
+        # statement's share count already reflects -- so it is reported only in
+        # split_rows, and finish stamps it alongside the cleared lines.
+        "reconciled_rows": [r for r in rows
+                            if r["reconciled"] and not r["split"]],
+        "cleared_rows": [r for r in rows if r["cleared"]
+                         and not r["reconciled"] and not r["split"]],
+        "uncleared_rows": [r for r in rows if not r["cleared"]
+                           and not r["reconciled"] and not r["split"]],
+        "split_rows": [r for r in rows if r["split"]],
+        "cleared_qty_change": computed - prior,
+        "computed_ending_qty": computed,
+        "stated_ending_qty": stated,
+        "difference": stated - computed,
+        "adjustment_qty": stated - computed,
+        "adjustment_warning": SHARE_ADJUSTMENT_WARNING,
+    }
+
+
+def set_investment_cleared(conn, txn_id: int, cleared: bool = True) -> bool:
+    """Mark one investment row cleared (or not) for share reconciliation.
+    Refuses to un-clear an already-reconciled row -- reconciling the period
+    again is what that is for. Returns True when a row changed."""
+    row = get_investment_txn(conn, txn_id)
+    if row is None:
+        return False
+    if _row_value(row, "reconciled"):
+        return False
+    conn.execute("UPDATE investment_transactions SET cleared=? WHERE id=?",
+                 (1 if cleared else 0, txn_id))
+    conn.commit()
+    return True
+
+
+def record_share_adjustment(conn, account_id: int, symbol: str, date: str,
+                            qty_delta, *, memo: Optional[str] = None,
+                            cleared: bool = True) -> int:
+    """Record the share adjustment that closes an unexplained share gap.
+
+    Quicken offered these, and they were sometimes enormous -- usually because a
+    security had been renamed and the old spelling's shares were invisible. Here
+    the alias identity is summed FIRST (:func:`share_reconcile_summary`), so an
+    adjustment only ever appears for a genuinely missing share count.
+
+    It is an ordinary ``ShrsIn``/``ShrsOut`` row (no new action invented, no
+    cash effect) carrying :data:`SHARE_ADJUSTMENT_MARK` on its memo, so it is
+    identifiable in the register and deletable later with
+    :func:`delete_share_adjustment`. The caller MUST show the user
+    :data:`SHARE_ADJUSTMENT_WARNING` first. Returns the new row id."""
+    q = _D(qty_delta)
+    if q == 0:
+        raise ValueError("a share adjustment of zero shares changes nothing")
+    _validate_iso_date(date)
+    canon = resolve_symbol(conn, str(symbol).strip())
+    note = (memo or "").strip()
+    text = SHARE_ADJUSTMENT_MARK + " share balance adjustment"
+    if note:
+        text = text + ": " + note
+    txn_id = record_investment(
+        conn, account_id, date, "ShrsIn" if q > 0 else "ShrsOut",
+        symbol=canon, quantity=_qty_text(abs(q)), amount=0, memo=text)
+    if cleared:
+        conn.execute("UPDATE investment_transactions SET cleared=1 WHERE id=?",
+                     (txn_id,))
+        conn.commit()
+    return txn_id
+
+
+def list_share_adjustments(conn, account_id: int,
+                           symbol: Optional[str] = None) -> list:
+    """Every share adjustment on the account (optionally for one security's
+    identity), oldest first, each with the reconciliation it closed. This is
+    what lets the user find and delete an adjustment once the real shares turn
+    up."""
+    frag, params = "", []
+    if symbol:
+        frag, params = _share_identity_clause(conn, symbol)
+    sql = ("SELECT * FROM investment_transactions WHERE account_id=? "
+           "AND memo LIKE ?")
+    args = [account_id, SHARE_ADJUSTMENT_MARK + "%"]
+    if frag:
+        sql += " AND " + frag
+        args.extend(params)
+    sql += " ORDER BY date, id"
+    out = []
+    for t in conn.execute(sql, tuple(args)):
+        recs = conn.execute(
+            "SELECT id, statement_date FROM share_reconciliations "
+            "WHERE adjustment_txn_id=?", (t["id"],)).fetchall()
+        out.append({
+            "id": t["id"], "date": t["date"], "action": t["action"],
+            "symbol": t["symbol"], "quantity": t["quantity"],
+            "delta": share_qty_delta(t), "memo": t["memo"],
+            "reconciled": bool(_row_value(t, "reconciled")),
+            "reconciliation_ids": [r["id"] for r in recs],
+            "statement_dates": [r["statement_date"] for r in recs],
+            "warning": SHARE_ADJUSTMENT_WARNING,
+        })
+    return out
+
+
+def delete_share_adjustment(conn, txn_id: int) -> dict:
+    """Delete a share adjustment the user no longer believes in.
+
+    Deliberately does NOT unwind anything else: the rows it let them reconcile
+    stay stamped, and the share_reconciliations row stays as the record that the
+    period WAS reconciled -- it just loses its link and gains a note saying the
+    adjustment was removed. Restoring the reconciliation is manual, which is
+    exactly what :data:`SHARE_ADJUSTMENT_WARNING` tells the user up front.
+
+    Returns ``{"deleted", "reconciliation_ids", "warning"}``."""
+    row = get_investment_txn(conn, txn_id)
+    if row is None or not is_share_adjustment(row):
+        return {"deleted": False, "reconciliation_ids": [],
+                "warning": SHARE_ADJUSTMENT_WARNING}
+    recs = [r["id"] for r in conn.execute(
+        "SELECT id FROM share_reconciliations WHERE adjustment_txn_id=?",
+        (txn_id,))]
+    for rid in recs:
+        conn.execute(
+            "UPDATE share_reconciliations SET adjustment_txn_id=NULL, "
+            "note=TRIM(COALESCE(note,'') || ' adjustment deleted; restore this"
+            " reconciliation by hand.') WHERE id=?", (rid,))
+    conn.commit()
+    delete_investment(conn, txn_id)
+    return {"deleted": True, "reconciliation_ids": recs,
+            "warning": SHARE_ADJUSTMENT_WARNING}
+
+
+def finish_share_reconciliation(conn, account_id: int, symbol: str,
+                                statement_date: str, stated_ending_qty,
+                                *, starting_qty=None, adjust: bool = False,
+                                adjust_memo: Optional[str] = None,
+                                note: Optional[str] = None) -> int:
+    """Stamp the cleared share rows reconciled and record the finished period.
+    The share mirror of :func:`mammon.ledger.finish_reconciliation`.
+
+    Refuses a non-zero difference, exactly as the cash side does, UNLESS
+    ``adjust=True``: then the remaining gap is booked as a share adjustment
+    (:func:`record_share_adjustment`) dated ``statement_date`` and the period
+    closes on it. Splits in the period are stamped along with the cleared rows
+    -- a split is part of the history the statement's share count already
+    reflects, not a line the user clears.
+
+    Idempotent: finishing the same (account, security, statement date) again
+    upserts the same row and re-stamps nothing, because the rows are already
+    reconciled and the difference is therefore already zero.
+
+    Returns the share_reconciliations row id."""
+    _validate_iso_date(statement_date)
+    canon = resolve_symbol(conn, str(symbol).strip())
+    summary = share_reconcile_summary(conn, account_id, canon, statement_date,
+                                      stated_ending_qty, starting_qty)
+    adj_id = None
+    if summary["difference"] != 0 and adjust:
+        adj_id = record_share_adjustment(
+            conn, account_id, canon, statement_date, summary["difference"],
+            memo=adjust_memo)
+        summary = share_reconcile_summary(conn, account_id, canon,
+                                          statement_date, stated_ending_qty,
+                                          starting_qty)
+    if summary["difference"] != 0:
+        raise ValueError(
+            "cannot finish share reconciliation for " + str(canon) + ": off by "
+            + _qty_text(summary["difference"]) + " shares (clear items until "
+            "the difference is zero, or record an adjustment)")
+    ids = [r["id"] for r in summary["cleared_rows"]]
+    ids += [r["id"] for r in summary["split_rows"] if not r["reconciled"]]
+    for txn_id in sorted(set(ids)):
+        conn.execute("UPDATE investment_transactions SET cleared=1, "
+                     "reconciled=1 WHERE id=?", (txn_id,))
+    conn.execute(
+        "INSERT INTO share_reconciliations"
+        "(account_id, symbol, statement_date, starting_qty, ending_qty,"
+        " adjustment_txn_id, note) VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(account_id, symbol, statement_date) DO UPDATE SET"
+        " starting_qty=excluded.starting_qty, ending_qty=excluded.ending_qty,"
+        " adjustment_txn_id=COALESCE(excluded.adjustment_txn_id,"
+        " adjustment_txn_id), note=COALESCE(excluded.note, note)",
+        (account_id, canon, statement_date, _qty_text(summary["prior_qty"]),
+         _qty_text(summary["computed_ending_qty"]), adj_id, note))
+    clear_share_reconcile_draft(conn, account_id, canon)
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM share_reconciliations WHERE account_id=? AND symbol=? "
+        "AND statement_date=?", (account_id, canon, statement_date)).fetchone()
+    return row["id"]
+
+
+_SHARE_DRAFT_FIELDS = (
+    "statement_date", "starting_qty", "ending_qty",
+    "starting_price", "ending_price",
+)
+
+
+def get_share_reconcile_draft(conn, account_id: int,
+                              symbol: str) -> Optional[dict]:
+    """The in-progress share reconciliation for one security, or None. Mirrors
+    :func:`mammon.ledger.get_reconcile_draft`; the price fields are carried for
+    the dialog's starting/ending value columns (the share reconciliation itself
+    needs only the two quantities)."""
+    canon = resolve_symbol(conn, str(symbol).strip())
+    row = conn.execute(
+        "SELECT * FROM share_reconcile_drafts WHERE account_id=? AND symbol=?",
+        (account_id, canon)).fetchone()
+    return {k: row[k] for k in _SHARE_DRAFT_FIELDS} if row is not None else None
+
+
+def save_share_reconcile_draft(conn, account_id: int, symbol: str,
+                               **fields) -> None:
+    """Upsert the in-progress share reconciliation for one security."""
+    bad = set(fields) - set(_SHARE_DRAFT_FIELDS)
+    if bad:
+        raise ValueError("unknown share reconcile draft field(s): "
+                         + str(sorted(bad)))
+    canon = resolve_symbol(conn, str(symbol).strip())
+    conn.execute(
+        "INSERT OR IGNORE INTO share_reconcile_drafts(account_id, symbol) "
+        "VALUES (?,?)", (account_id, canon))
+    if fields:
+        sets = ", ".join(k + "=?" for k in fields)
+        conn.execute(
+            "UPDATE share_reconcile_drafts SET " + sets + ", "
+            "updated_at=datetime('now') WHERE account_id=? AND symbol=?",
+            (*[str(v) for v in fields.values()], account_id, canon))
+    conn.commit()
+
+
+def clear_share_reconcile_draft(conn, account_id: int,
+                                symbol: Optional[str] = None) -> None:
+    """Drop the draft for one security (or every draft on the account)."""
+    if symbol:
+        canon = resolve_symbol(conn, str(symbol).strip())
+        conn.execute("DELETE FROM share_reconcile_drafts WHERE account_id=? "
+                     "AND symbol=?", (account_id, canon))
+    else:
+        conn.execute("DELETE FROM share_reconcile_drafts WHERE account_id=?",
+                     (account_id,))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Holdings / balance SNAPSHOT application (SRD 5.11b; the parser is
+# mammon/importers/holdings_csv.py)
+#
+# A snapshot is a statement of FACT -- "you hold 123.456 shares of ANON
+# BALANCED FUND, priced 24.19, as of 2026-03-31" -- so it must never become a
+# transaction: that would invent history. What it legitimately does is exactly
+# two things, both of them writes only this module is allowed to make:
+#
+#   * it states the ENDING share count a share reconciliation reconciles TO, so
+#     it is stored in the reconcile draft (share_reconcile_drafts) where the
+#     dialog picks it up, rather than being typed by hand per fund;
+#   * it carries a per-share price for a fund that HAS no ticker and therefore
+#     no quote source -- the user's stated gap. That price goes into
+#     price_history like any quote, marked with its own source so a later real
+#     quote can be told from a statement figure.
+#
+# Matching is by symbol when the file has one and by NAME otherwise, because a
+# plan export of internal funds usually has no symbol column at all. Both routes
+# end at the canonical symbol through resolve_symbol / security_aliases, so a
+# renamed security stays ONE identity here exactly as it does in the reconcile.
+# ---------------------------------------------------------------------------
+
+#: price_history.source stamped on a price that came from a statement snapshot
+#: rather than a quote feed.
+SNAPSHOT_PRICE_SOURCE = "snapshot"
+
+
+def _snap_field(rec, key: str) -> str:
+    """One field of a snapshot record, which may be a
+    :class:`mammon.importers.holdings_csv.HoldingSnapshot` or a plain dict."""
+    if isinstance(rec, dict):
+        return str(rec.get(key, "") or "")
+    return str(getattr(rec, key, "") or "")
+
+
+def _known_symbol(conn, account_id: int, text) -> Optional[str]:
+    """The canonical symbol ``text`` names -- as a securities row, as a recorded
+    alias, or as a symbol already used on this account -- else None. Compared
+    case-insensitively and trimmed, because a statement prints what it likes."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    row = conn.execute(
+        "SELECT symbol FROM securities WHERE UPPER(TRIM(symbol))=?",
+        (t.upper(),)).fetchone()
+    if row is not None:
+        return resolve_symbol(conn, row["symbol"])
+    row = conn.execute(
+        "SELECT alias_symbol FROM security_aliases "
+        "WHERE UPPER(TRIM(alias_symbol))=?", (t.upper(),)).fetchone()
+    if row is not None:
+        return resolve_symbol(conn, row["alias_symbol"])
+    # A security is STORED under whatever a source called it, with the public
+    # ticker (when one is known) in its own column -- so a file that prints only
+    # "ANONX" must be allowed to find "ANONX ANON LARGE CAP INDEX".
+    row = conn.execute(
+        "SELECT symbol FROM securities WHERE UPPER(TRIM(COALESCE(ticker,'')))=?",
+        (t.upper(),)).fetchone()
+    if row is not None:
+        return resolve_symbol(conn, row["symbol"])
+    used = symbols_used(conn, account_id)
+    for s in used:
+        if str(s).strip().upper() == t.upper():
+            return resolve_symbol(conn, s)
+    for s in used:                      # exact spelling first, ticker second
+        if ticker_of(s) and ticker_of(s) == t.upper():
+            return resolve_symbol(conn, s)
+    return None
+
+
+def match_snapshot_security(conn, account_id: int, symbol=None,
+                            name=None) -> dict:
+    """Which security a snapshot line is about: ``{"symbol", "matched_by",
+    "name"}`` with ``matched_by`` one of ``"symbol"``, ``"name"`` or None.
+
+    Symbol first when the file has one; then the NAME, which for an untickered
+    401(k) fund is the only identity it carries -- matched against
+    ``securities.name`` and then against the symbols the account already uses
+    (a tickerless fund is recorded under its own name as its symbol). Every hit
+    resolves through :func:`resolve_symbol`, so a fund matched under a former
+    spelling lands on the canonical identity the reconciliation sums over."""
+    sym = str(symbol or "").strip()
+    nm = str(name or "").strip()
+    if sym:
+        hit = _known_symbol(conn, account_id, sym)
+        if hit:
+            return {"symbol": hit, "matched_by": "symbol", "name": nm}
+    if nm:
+        row = conn.execute(
+            "SELECT symbol FROM securities "
+            "WHERE UPPER(TRIM(COALESCE(name,'')))=?", (nm.upper(),)).fetchone()
+        if row is not None:
+            return {"symbol": resolve_symbol(conn, row["symbol"]),
+                    "matched_by": "name", "name": nm}
+        hit = _known_symbol(conn, account_id, nm)
+        if hit:
+            return {"symbol": hit, "matched_by": "name", "name": nm}
+    return {"symbol": resolve_symbol(conn, sym) if sym else None,
+            "matched_by": None, "name": nm}
+
+
+def _snapshot_price(quantity: Decimal, price_text: str,
+                    value_text: str) -> str:
+    """The per-share price a snapshot line states, as Decimal text. Falls back
+    to value / shares when the statement printed only a position value, which
+    plan statements routinely do. Never a float; "" when neither is available
+    (or the share count is zero, which cannot imply a price)."""
+    if price_text:
+        return _qty_text(_D(price_text))
+    if value_text and quantity != 0:
+        derived = (_D(value_text) / quantity).quantize(Decimal("0.000001"))
+        return _qty_text(derived)
+    return ""
+
+
+def apply_holdings_snapshot(conn, account_id: int, records, *,
+                            as_of: Optional[str] = None,
+                            source: str = SNAPSHOT_PRICE_SOURCE,
+                            write_prices: bool = True,
+                            seed_drafts: bool = True) -> list[dict]:
+    """Apply a parsed holdings snapshot to one investment account.
+
+    **Creates no transactions, ever.** Per matched line it records the stated
+    per-share price in ``price_history`` (the only price a tickerless fund will
+    ever have) and seeds that security's share-reconcile draft with the
+    statement date, ending share count and ending price, so the share reconcile
+    dialog opens with the statement's numbers already in it.
+
+    ``as_of`` is the fallback statement date for lines whose file carried none;
+    a line with no date at all is an error, because an undated share count
+    cannot be reconciled to anything.
+
+    Returns one result dict per input line: ``name``, ``symbol`` (canonical or
+    None), ``matched_by``, ``date``, ``quantity``/``price``/``market_value`` as
+    Decimal text, the account's current ``book_qty`` for that security and the
+    ``difference`` the reconciliation would have to explain, plus
+    ``price_recorded`` / ``draft_saved``. An UNMATCHED line is reported, not
+    guessed at and not silently dropped: the user is the only one who can say
+    which security an unknown fund name is."""
+    out: list[dict] = []
+    books: dict = {}
+    for rec in records:
+        name = _snap_field(rec, "name")
+        symbol = _snap_field(rec, "symbol")
+        qty_text = _snap_field(rec, "quantity")
+        date = _snap_field(rec, "date") or (as_of or "")
+        label = symbol or name or "(unnamed)"
+        if not date:
+            raise ValueError("holdings snapshot line for " + label
+                             + " has no as-of date")
+        _validate_iso_date(date)
+        qty = _D(qty_text)
+        price_text = _snapshot_price(qty, _snap_field(rec, "price"),
+                                     _snap_field(rec, "market_value"))
+        match = match_snapshot_security(conn, account_id, symbol, name)
+        canon = match["symbol"]
+        priced = drafted = False
+        book = None
+        if canon and match["matched_by"]:
+            if date not in books:
+                books[date] = compute_holdings(conn, account_id, as_of=date)
+            lot = books[date].get(canon)
+            book = lot.qty if lot is not None else Decimal(0)
+            if write_prices and price_text:
+                record_price(conn, canon, date, price_text, source)
+                priced = True
+            if seed_drafts:
+                fields = {"statement_date": date,
+                          "ending_qty": _qty_text(qty)}
+                if price_text:
+                    fields["ending_price"] = price_text
+                save_share_reconcile_draft(conn, account_id, canon, **fields)
+                drafted = True
+        out.append({
+            "name": name,
+            "symbol": canon,
+            "matched_by": match["matched_by"],
+            "date": date,
+            "quantity": _qty_text(qty),
+            "price": price_text,
+            "market_value": _snap_field(rec, "market_value"),
+            "book_qty": _qty_text(book) if book is not None else None,
+            "difference": _qty_text(qty - book) if book is not None else None,
+            "price_recorded": priced,
+            "draft_saved": drafted,
+        })
+    return out
+
+
+def snapshot_targets(conn, account_id: int) -> dict:
+    """``{canonical_symbol: {"statement_date", "ending_qty", "ending_price"}}``
+    for every security on this account with a saved reconcile draft -- what an
+    imported snapshot left behind for the share reconcile dialog to open on."""
+    out: dict = {}
+    for row in conn.execute(
+            "SELECT symbol FROM share_reconcile_drafts WHERE account_id=? "
+            "ORDER BY symbol", (account_id,)):
+        draft = get_share_reconcile_draft(conn, account_id, row["symbol"])
+        if draft is not None:
+            out[row["symbol"]] = draft
+    return out

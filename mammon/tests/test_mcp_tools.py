@@ -9,8 +9,8 @@ import sqlite3
 
 import pytest
 
-from mammon import (budgets, db, investments, ledger, loans, mcp_server, mcp_tools,
-                    rebalance, scheduled, sqldriver)
+from mammon import (budgets, crypto, db, investments, ledger, loans, mcp_server,
+                    mcp_tools, rebalance, scheduled, sqldriver)
 
 
 @pytest.fixture
@@ -57,7 +57,12 @@ def seeded(conn):
     bud = budgets.create_budget(conn, "Household")
     budgets.set_line(conn, bud, rent, "2026-01", 1200_00)
     budgets.set_line(conn, bud, groc, "2026-01", 300_00)
-    return {"chk": chk, "sav": sav, "inv": inv, "loan": loan_acct, "budget": bud}
+    cw = crypto.create_account(conn, "Cold Wallet", opening_balance=0)
+    crypto.record_buy(conn, cw, "2026-01-25", "BTC", "1", 30000_00)
+    crypto.rebuild_holdings(conn, cw)
+    investments.record_price(conn, crypto.pair_symbol("BTC"), "2026-02-27", "40000")
+    return {"chk": chk, "sav": sav, "inv": inv, "loan": loan_acct, "budget": bud,
+            "crypto": cw}
 
 
 def _json(obj):
@@ -126,6 +131,7 @@ def test_every_tool_returns_json_without_identifying_data(conn, seeded):
         "transactions": {"start": "2026-01-01", "end": "2026-03-31"},
         "search": {"query": "landlord"},
         "holdings": {"account": "Brokerage", "as_of": "2026-02-28"},
+        "crypto_holdings": {"account": "Cold Wallet", "as_of": "2026-02-28"},
         "lots": {"account": "Brokerage", "as_of": "2026-02-28"},
         "capital_gains": {"account": "Brokerage", "start": "2026-01-01", "end": "2026-03-31"},
         "performance": {"account": "Brokerage", "start": "2026-01-01", "end": "2026-02-28"},
@@ -230,7 +236,7 @@ def test_query_is_read_only_and_blanks_identifying_columns(conn, seeded):
     out = mcp_tools.query(conn, "SELECT name, account_number, url FROM accounts ORDER BY name")
     assert out["columns"] == ["name", "account_number", "url"]
     assert out["rows"][1] == ["Checking", None, None]
-    assert out["count"] == 4 and out["truncated"] is False
+    assert out["count"] == 5 and out["truncated"] is False
     capped = mcp_tools.query(conn, "SELECT id FROM transactions", limit=3)
     assert capped["count"] == 3 and capped["truncated"] is True
     for bad in ("DELETE FROM transactions", "UPDATE accounts SET name='x'",
@@ -250,7 +256,7 @@ def test_query_is_read_only_and_blanks_identifying_columns(conn, seeded):
 # ---------------------------------------------------------------------------
 def test_open_readonly_refuses_writes_and_schema_mismatch(dbfile, conn, seeded):
     ro = mcp_server.open_readonly(str(dbfile))
-    assert ro.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 4
+    assert ro.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 5
     with pytest.raises(sqldriver.OperationalError):
         ro.execute("DELETE FROM transactions")
     ro.close()

@@ -36,6 +36,27 @@ What counts as a future event, and why each is not double-counted:
   be dismissed or turned into a definition. ``include_predictions=False``
   gives the reminders-only view.
 
+Predicted-vs-scheduled dedup, and why it lives HERE. Two guards used to be
+asked to keep a reminder and a prediction of the same bill apart, and both
+are month-shaped or text-shaped:
+:func:`mammon.predictions.predict_recurring` skips a payee that a definition
+already covers, but only when the definition's stored payee text normalizes
+to the same key as the ledger rows -- a rename applied after the definition
+was written, or different bank text, and the guard misses silently; and
+:func:`mammon.predictions.is_entered` suppresses a prediction only where a
+real posted row sits within a few days, which is true of the CURRENT month
+and false of every month further out. So the duplicate was invisible in the
+month that already had the payment and appeared in the next one. The merge
+point below is the only place that sees both lists, so it does the
+reconciliation: a PREDICTED event is dropped when a SCHEDULED event on the
+same account falls within ``ENTERED_WINDOW_DAYS`` of it and agrees on EITHER
+the normalized payee key OR the signed amount. Either, not both: the case
+this exists for is precisely payee text that drifted, and demanding both
+would leave it broken, while demanding neither would collapse two genuinely
+different bills that happen to fall on one day. The asymmetry is deliberate
+-- what the user defined always wins, a guess never suppresses a definition,
+and two definitions never suppress each other.
+
 Balances are ledger balances (cash), so an investment account projects its
 cash only; projection is a spending-account question.
 """
@@ -108,6 +129,9 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
     inset = set(ids)
     marks = ",".join("?" for _ in ids)
     out: list[ProjectedEvent] = []
+    # (account_id, date, payee key, signed cents) of every SCHEDULED event put
+    # in the window, so a prediction of the same bill can be dropped below.
+    sched_marks: list[tuple[int, _dt.date, str, int]] = []
     for t in conn.execute(
             f"SELECT id, account_id, date, payee, amount, scheduled FROM transactions "
             f"WHERE account_id IN ({marks}) AND date >= ? AND date <= ? ORDER BY date, id",
@@ -130,8 +154,11 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
         for due in scheduled.occurrences(d["next_date"], d["frequency"], "0000-01-01", end):
             when = max(due, start)
             for aid, amount in legs:
-                out.append(ProjectedEvent(when, aid, d["payee"] or "Scheduled payment",
-                                          amount, SCHEDULED, definition_id=d["id"]))
+                name = d["payee"] or "Scheduled payment"
+                out.append(ProjectedEvent(when, aid, name, amount, SCHEDULED,
+                                          definition_id=d["id"]))
+                sched_marks.append((aid, _dt.date.fromisoformat(when),
+                                    scheduled._payee_key(name), int(amount)))
     from mammon import loans_schedule
     for r in conn.execute("SELECT account_id FROM loan_params").fetchall():
         aid = int(r["account_id"])
@@ -173,9 +200,25 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
         first = max(start, today)
         if first <= end:
             entered = _pred.entered_dates(conn, ids, first, end)
+
+            def _scheduled_covers(aid: int, key: str, amount: int, due: str) -> bool:
+                """A reminder for this bill already sits within a few days of
+                ``due``. Payee key OR amount: see the module docstring."""
+                d_due = _dt.date.fromisoformat(due)
+                for s_aid, s_date, s_key, s_amount in sched_marks:
+                    if s_aid != aid:
+                        continue
+                    if abs((d_due - s_date).days) > _pred.ENTERED_WINDOW_DAYS:
+                        continue
+                    if (s_key and s_key == key) or s_amount == amount:
+                        return True
+                return False
+
             for p in _pred.predict_recurring(conn, today, account_ids=ids):
                 for due in scheduled.occurrences(p.next_date, p.frequency, first, end):
                     if _pred.is_entered(entered, p.account_id, p.key, due):
+                        continue
+                    if _scheduled_covers(p.account_id, p.key, p.amount, due):
                         continue
                     out.append(ProjectedEvent(due, p.account_id, p.payee, p.amount,
                                               PREDICTED, automatic=p.automatic,

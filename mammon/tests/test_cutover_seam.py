@@ -41,6 +41,47 @@ def _n_invtxn(conn, aid):
     ).fetchone()["c"]
 
 
+def test_a_qif_set_defers_its_watermark_so_every_file_lands(conn):
+    """The watermark is the migration's END, not a guard between the files of one
+    set. A full history exported a year at a time is imported as a SET, and with
+    ``set_cutover=False`` a file carrying EARLIER dates than one already imported
+    still lands -- otherwise the first file to arrive would shut out the rest and
+    report their rows as duplicates."""
+    newer = [importers.NormalizedTxn(external_account="Checking",
+                                     account_type="checking", date="1998-03-03",
+                                     amount_cents=-1_200, payee="New Grocer")]
+    older = [importers.NormalizedTxn(external_account="Checking",
+                                     account_type="checking", date="1997-03-03",
+                                     amount_cents=-1_000, payee="Old Grocer")]
+    importers.import_records(conn, newer, provider="quicken", source_format="qif",
+                             set_cutover=False)
+    aid = _acct_id(conn, "Checking")
+    # Deferred: nothing was watermarked, so the older file is not pre-empted.
+    assert ledger.account_cutover_date(conn, aid) in (None, "")
+    res = importers.import_records(conn, older, provider="quicken",
+                                   source_format="qif", set_cutover=False)
+    assert res.added == 1 and res.duplicates == 0
+    assert _n_txn(conn, aid) == 2
+
+
+def test_a_qif_set_imported_per_file_would_shut_out_the_rest(conn):
+    """The reason the deferral exists, pinned as behaviour: with the watermark
+    applied PER FILE (the default), a later year imported first makes every
+    earlier row look already-migrated."""
+    newer = [importers.NormalizedTxn(external_account="Checking",
+                                     account_type="checking", date="1998-03-03",
+                                     amount_cents=-1_200, payee="New Grocer")]
+    older = [importers.NormalizedTxn(external_account="Checking",
+                                     account_type="checking", date="1997-03-03",
+                                     amount_cents=-1_000, payee="Old Grocer")]
+    importers.import_records(conn, newer, provider="quicken", source_format="qif")
+    aid = _acct_id(conn, "Checking")
+    assert ledger.account_cutover_date(conn, aid) == "1998-03-03"
+    res = importers.import_records(conn, older, provider="quicken", source_format="qif")
+    assert res.added == 0 and res.duplicates == 1      # skipped as pre-cutover
+    assert _n_txn(conn, aid) == 1
+
+
 def test_cash_no_duplication_across_cutover_seam(conn):
     # --- migrate: full Quicken history for a checking account (fitid=NULL) ---
     migrated = [

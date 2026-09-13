@@ -393,16 +393,21 @@ def test_default_filename_derives_from_title(qapp, tmp_path):
         conn.close()
 
 
-def test_account_balances_spec_hides_account_checklist(qapp, tmp_path):
+def test_account_balances_spec_shows_the_account_checklist(qapp, tmp_path):
     from mammon.app import sample_data
     conn = db.init_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, ACCOUNT_BALANCES_SPEC)
     try:
-        # The balances report takes no account filter, so its spec suppresses
-        # the checklist rather than showing an ignored control.
-        assert ACCOUNT_BALANCES_SPEC.show_accounts is False
+        # The balances report NOW takes an account filter: _run_account_balances
+        # passes f.selected_account_ids() through, so the check-list subsets which
+        # accounts are valued -- "what are these three accounts worth" is a real
+        # question, and its total is net worth over exactly the rows shown. The
+        # spec therefore shows the picker. It hid the picker while the report took
+        # no filter at all, for the same underlying rule that now requires it to be
+        # visible: a control that filters nothing is worse than no control.
+        assert ACCOUNT_BALANCES_SPEC.show_accounts is True
         # The projection ends with the net-worth total row.
         assert win._rows[-1].label == "Net Worth"
         assert win._rows[-1].section == "Total"
@@ -650,6 +655,57 @@ def test_itemize_report_offers_csv_html_pdf_export(qapp, tmp_path):
         pdf_path = tmp_path / "itemize.pdf"
         assert str(win.print_to_pdf(pdf_path)) == str(pdf_path)
         assert pdf_path.read_bytes()[:5] == b"%PDF-"
+    finally:
+        win.close()
+        conn.close()
+
+
+def test_income_expense_shows_end_date_centered_in_header(qapp, tmp_path):
+    """Income vs Expense alone shows the selected range's END date in the
+    header, centered between the Period selector and the gear button (a
+    stretch on each side of the label) -- every other report leaves the
+    control out entirely rather than show a label naming nothing meaningful."""
+    from datetime import date
+    from mammon.app import sample_data
+    from mammon.reports.spending import preset_range
+    conn = db.init_db(tmp_path / "gen.db")
+    sample_data(conn)
+
+    win = _win(conn, INCOME_EXPENSE_SPEC)
+    try:
+        assert win.end_date_label is not None
+        assert win.end_date_label.text() == fmt_date(win.filters.end_iso())
+
+        # Centered: exactly one stretch on each side of the label within the
+        # period row, between the combo and the gear button.
+        period_row = win.period_row
+        idx = period_row.indexOf(win.end_date_label)
+        assert period_row.itemAt(idx - 1).spacerItem() is not None
+        assert period_row.itemAt(idx + 1).spacerItem() is not None
+
+        # Changing the period re-resolves the range and updates the label.
+        combo_idx = win.period_combo.findData("last_30_days")
+        win.period_combo.setCurrentIndex(combo_idx)  # fires _on_period -> refresh
+        start, end = preset_range("last_30_days", date.today())
+        assert win.filters.end_iso() == end
+        assert win.end_date_label.text() == fmt_date(end)
+    finally:
+        win.close()
+        conn.close()
+
+
+def test_other_reports_have_no_end_date_label(qapp, tmp_path):
+    """Cash Flow's Net includes transfers over the whole range, not a single
+    as-of date, so it (like every non-Income/Expense report) gets no end-date
+    label at all -- the field defaults False and only INCOME_EXPENSE_SPEC
+    turns it on."""
+    from mammon.app import sample_data
+    conn = db.init_db(tmp_path / "gen.db")
+    sample_data(conn)
+
+    win = _win(conn, CASH_FLOW_SPEC)
+    try:
+        assert win.end_date_label is None
     finally:
         win.close()
         conn.close()

@@ -17,16 +17,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor
+from PyQt5.QtCore import QEvent, QStandardPaths, Qt, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFontMetrics
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFrame,
-    QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
+    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .. import import_review
-from . import prefs
+from .. import crypto, import_review
+from . import prefs, style
 from .models import fmt_date
 
 # Column layout of the review table. Category is intentionally absent:
@@ -50,10 +50,38 @@ STATUS, DATE, NUM, PAYEE, MEMO, AMOUNT = range(6)
 # holds. Editing the name here is what puts it on the right one.
 I_STATUS, I_DATE, I_SECURITY, I_ACTION, I_SHARES, I_PRICE, I_AMOUNT = range(7)
 
+# A crypto WALLET (a paper-wallet address) gets a THIRD column set, because the
+# other two are both wrong for it. A wallet row's identity is date + coin +
+# quantity + the counterparty ADDRESS; no fiat ever moves, so an Amount column
+# has nothing to put in it. Reviewing a by-address export through the cash layout
+# is what produced the reported defect -- the block number landed under Amount
+# and a Cash Bal column appeared on an account that has no cash sleeve.
+#
+# Increases and decreases get their OWN columns (the source's Value_IN / Value_OUT),
+# the way a cash register separates payment from deposit: on-chain the two are
+# different events with different counterparties, and one signed column hides that.
+# FEE is coin-denominated (ETH gas), never USD, and only a send carries one.
+C_STATUS, C_DATE, C_PAYEE, C_MEMO, C_COIN, C_IN, C_OUT, C_FEE = range(8)
+
+# A crypto EXCHANGE gets a FOURTH set. It is a wallet's columns plus the fiat a
+# custodial account really does move: a trade's per-unit Price and the Amount
+# debited or credited to the cash sleeve. Giving it the wallet's set would hide
+# what a Buy cost; giving it the CASH set would hide the coin entirely, which is
+# what it did before -- a Coinbase history reviewed as cash showed a dollar
+# figure and no asset, for rows whose whole content is "0.099 ETH moved".
+X_STATUS, X_DATE, X_PAYEE, X_MEMO, X_ACTION, X_COIN, X_QTY, X_PRICE, X_AMOUNT = range(9)
+
 # Foreground for an already-accepted / discarded row: present but inert.
 _ACTIONED_FG = "#9a9a9a"
 _HEADERS = ["Status", "Date", "Num", "Payee", "Memo", "Amount"]
 _INV_HEADERS = ["Status", "Date", "Security", "Action", "Shares", "Price", "Amount"]
+_CRYPTO_HEADERS = ["Status", "Date", "Payee", "Memo", "Coin",
+                   "Coin In", "Coin Out", "Fee"]
+_EXCHANGE_HEADERS = ["Status", "Date", "Payee", "Memo", "Action", "Coin",
+                     "Quantity", "Price", "Amount"]
+# Which side of the register a wallet row's quantity renders on. Read from the
+# domain layer's own vocabulary so the panel cannot drift from the writers.
+_COIN_OUT_ACTIONS = crypto.WALLET_DEBIT_ACTIONS
 
 
 def _fmt_amount(cents: int) -> str:
@@ -143,14 +171,24 @@ class ImportReviewPanel(QWidget):
         self._entries: list = []
         self._states: list[_RowState] = []
         self.is_investment = self._account_is_investment()
-        self._headers = _INV_HEADERS if self.is_investment else _HEADERS
+        self.is_crypto_wallet = self._account_is_crypto_wallet()
+        self.is_crypto_exchange = self._account_is_crypto_exchange()
+        if self.is_crypto_wallet:
+            self._headers = _CRYPTO_HEADERS
+        elif self.is_crypto_exchange:
+            self._headers = _EXCHANGE_HEADERS
+        elif self.is_investment:
+            self._headers = _INV_HEADERS
+        else:
+            self._headers = _HEADERS
         # The review list is GROUND TRUTH -- what the source sent -- and is
         # read-only, save for the cash layout's Num (a check number the user
         # needs in order to identify a payee). Corrections to an investment row
         # belong in the register's editable PENDING row, which is where the same
         # correction happens for cash. Two editable surfaces onto one value could
         # disagree about what Accept would commit.
-        self._edit_col = None if self.is_investment else NUM
+        self._edit_col = (None if (self.is_investment or self.is_crypto_wallet
+                                   or self.is_crypto_exchange) else NUM)
         # Guards _on_num_edited against the setItem() calls in _render_row, which
         # would otherwise re-fire itemChanged while we are just re-drawing.
         self._suppress_num_edit = False
@@ -213,8 +251,43 @@ class ImportReviewPanel(QWidget):
             QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
             | QAbstractItemView.AnyKeyPressed)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(PAYEE, QHeaderView.Stretch)
-        hh.setSectionResizeMode(MEMO, QHeaderView.Stretch)
+        if self.is_crypto_wallet:
+            # The counterparty is a 42-character hex address; it needs the room,
+            # and it is the one field that identifies the row to the user.
+            hh.setSectionResizeMode(C_PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(C_MEMO, QHeaderView.Stretch)
+            # Coin quantities are NOT dollar amounts: ETH carries 18 decimals, so
+            # a real row reads 25.566401739928923937 -- 21 characters against a
+            # fiat cell's 9. At the default column width those elided to "0....",
+            # which on a number is worse than useless. Measured from the FONT
+            # rather than left to ResizeToContents, which takes whatever the
+            # widest row wants and starves the stretched Payee beside it -- and
+            # the payee is the 42-character address that identifies the row.
+            # Clamped at both ends: a measurement is only as sane as the font it
+            # is taken in, and an unbounded one starved the Payee to a 21px stub.
+            # Past the cap the number elides and the cell's tooltip carries the
+            # full value.
+            fm = QFontMetrics(self.table.font())
+            coin_w = max(110, min(200, fm.width("25.566401739928923937") + 16))
+            hh.setMinimumSectionSize(72)
+            for col, w in ((C_COIN, max(56, fm.width("WBTC") + 16)),
+                           (C_IN, coin_w), (C_OUT, coin_w),
+                           (C_FEE, coin_w + 36)):        # + " ETH"
+                hh.setSectionResizeMode(col, QHeaderView.Fixed)
+                self.table.setColumnWidth(col, w)
+        elif self.is_crypto_exchange:
+            hh.setSectionResizeMode(X_PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(X_MEMO, QHeaderView.Stretch)
+            fm = QFontMetrics(self.table.font())
+            coin_w = max(110, min(200, fm.width("25.566401739928923937") + 16))
+            hh.setMinimumSectionSize(72)
+            for col, w in ((X_COIN, max(56, fm.width("WBTC") + 16)),
+                           (X_QTY, coin_w), (X_PRICE, coin_w)):
+                hh.setSectionResizeMode(col, QHeaderView.Fixed)
+                self.table.setColumnWidth(col, w)
+        else:
+            hh.setSectionResizeMode(PAYEE, QHeaderView.Stretch)
+            hh.setSectionResizeMode(MEMO, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         # An edited Num cell flows straight to entry.mapped.check_number so it
         # carries through save_new when the row is accepted.
@@ -248,6 +321,30 @@ class ImportReviewPanel(QWidget):
                   self.undo_all_btn):
             bar.addWidget(b)
         bar.addStretch()
+        # Load Amazon invoice itemization (cash accounts only). Reads a
+        # time-tagged invoice file from the user's Downloads folder and runs a
+        # review session that itemizes each order into per-item split legs
+        # (requirement A6/A8). Hidden on investment accounts, which have no
+        # item-split concept. The register also offers the same action from its
+        # gear menu, so this stays reachable when the panel is otherwise empty.
+        # Parent the button to the panel AT CONSTRUCTION (the ``self`` argument).
+        # ``bar`` is a bare QHBoxLayout not installed on any widget until the
+        # ``box.addLayout(bar)`` below, so a button merely added to it stays
+        # parentless -- and calling setVisible() on a parentless QPushButton makes
+        # Qt briefly realise it as its own TOP-LEVEL window. That stray window
+        # steals focus from a register cell being edited in ANOTHER account,
+        # closing (and committing) that editor before MainWindow.open_register's
+        # leave-guard can see it -- a silent cross-account edit commit. Parented
+        # up front, setVisible only marks it shown-with-the-panel and grabs no
+        # focus (the panel itself is hidden until a load).
+        self.load_amazon_btn = QPushButton("Load Amazon Invoices…", self)
+        self.load_amazon_btn.setToolTip(
+            "Load a time-tagged Amazon invoice file (from your Downloads folder) "
+            "and review each order as an itemized split against this account. "
+            "Nothing is stored -- the file can be re-loaded any time.")
+        self.load_amazon_btn.clicked.connect(self.load_amazon_invoices)
+        self.load_amazon_btn.setVisible(not self.is_investment)
+        bar.addWidget(self.load_amazon_btn)
         box.addLayout(bar)
 
         # Right-click a row -> Manual Match… (hand-pick the existing register line).
@@ -299,6 +396,51 @@ class ImportReviewPanel(QWidget):
         else:
             self.hide()
 
+    def load_amazon_invoices(self, path: "Optional[str]" = None) -> int:
+        """Load a time-tagged Amazon invoice file and run an itemization review.
+
+        Reads the file on demand (nothing is stored -- requirement A6), classifies
+        each order into a NEW or MATCHING review row through
+        :func:`import_review.build_amazon_review` (the sole review-flow writer),
+        and shows the resulting rows in this panel. The proposed per-item split
+        rides on each row transiently; accepting it later writes the legs through
+        the Amazon accept path. Returns the number of review rows produced.
+
+        The file dialog defaults to the user's Downloads folder, where the
+        webSlinger Amazon script drops its report. ``path`` bypasses the dialog
+        (tests / callers that already have a file)."""
+        if self.is_investment:
+            return 0
+        if path is None:
+            downloads = QStandardPaths.writableLocation(
+                QStandardPaths.DownloadLocation) or ""
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Load Amazon Invoices", downloads,
+                "Amazon invoice export (*.json);;All files (*)")
+            if not path:
+                return 0
+        try:
+            entries = import_review.build_amazon_review(
+                self.conn, self.account_id, path)
+        except Exception as exc:             # pragma: no cover - UI error path
+            QMessageBox.warning(
+                self, "Load Amazon Invoices",
+                "Could not read that invoice file:\n%s" % exc)
+            return 0
+        if not entries:
+            QMessageBox.information(
+                self, "Load Amazon Invoices",
+                "No card charges to reconcile were found in that file.\n"
+                "Orders fully covered by a gift-card balance (and refunds) "
+                "create no card charge.")
+            return 0
+        # Reveal BEFORE populating: set_entries selects row 0 and emits
+        # row_selected, and the register's handler acts on it only when the panel
+        # is already visible (a MATCHING row then highlights its register line).
+        self.show()
+        self.set_entries(entries)
+        return len(entries)
+
     def has_pending(self) -> bool:
         """True while any row is still un-actioned (nothing committed yet)."""
         return any(not s.done for s in self._states)
@@ -347,6 +489,16 @@ class ImportReviewPanel(QWidget):
             # (import_review.accept_match); this only surfaces it.
             merge_tip = (_merge_policy_tooltip(entry)
                          if getattr(entry, "is_matching", False) else None)
+            if self.is_crypto_wallet:
+                self._render_crypto_row(i, m, status, cell, actioned, merge_tip)
+                if actioned:
+                    self._grey_row(i)
+                return
+            if self.is_crypto_exchange:
+                self._render_exchange_row(i, m, status, cell, actioned, merge_tip)
+                if actioned:
+                    self._grey_row(i)
+                return
             if self.is_investment:
                 self._render_investment_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
@@ -384,6 +536,119 @@ class ImportReviewPanel(QWidget):
         row = self.conn.execute(
             "SELECT type FROM accounts WHERE id=?", (self.account_id,)).fetchone()
         return bool(row) and str(row[0]).strip().lower() == "investment"
+
+    def _account_is_crypto_wallet(self) -> bool:
+        """Whether this panel is reviewing a coin-native crypto WALLET -- a single
+        address whose rows move coin and no fiat. A crypto EXCHANGE account is
+        deliberately excluded: it has a cash sleeve and trades coin for dollars,
+        so its rows really do carry an amount and a price. The classification is
+        read through :mod:`mammon.crypto` rather than compared here, so the two
+        kinds are distinguished in exactly one place."""
+        return crypto.is_wallet_account(
+            crypto.get_account(self.conn, self.account_id))
+
+    def _account_is_crypto_exchange(self) -> bool:
+        """Whether this panel is reviewing a custodial crypto EXCHANGE -- coins
+        PLUS a fiat cash sleeve. Distinguished from a wallet in the one place the
+        two kinds are ever distinguished, :mod:`mammon.crypto`."""
+        return crypto.is_exchange_account(
+            crypto.get_account(self.conn, self.account_id))
+
+    def _render_exchange_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
+        """Draw one custodial-exchange review row: the coin AND the fiat.
+
+        The ACTION is shown because on this source it is the least certain field.
+        A Coinbase history states product names ("Pro Deposit", "Exchange
+        Withdrawal", "Advanced Trade Buy") that only approximate what happened,
+        and the same name means opposite directions on different rows. The mapped
+        action is the importer's reading of it; the register's pending row is
+        where the user corrects it."""
+        st = cell(status)
+        if merge_tip:
+            st.setToolTip(merge_tip)
+        self.table.setItem(i, X_STATUS, st)
+        self.table.setItem(i, X_DATE, cell(fmt_date(m.date)))
+        self.table.setItem(i, X_PAYEE, cell(m.payee))
+        self.table.setItem(i, X_MEMO, cell(m.memo))
+        act = cell(m.action)
+        source_type = (m.raw or {}).get("source_type")
+        if source_type and source_type.upper() != (m.action or "").upper():
+            # Show what the FILE called it, so a mapping the user disagrees with
+            # is visible rather than silently substituted.
+            act.setToolTip(f"The export called this {source_type!r}.")
+        self.table.setItem(i, X_ACTION, act)
+        self.table.setItem(i, X_COIN, cell(m.symbol))
+        for col, text in ((X_QTY, (m.quantity or "").strip()),
+                          (X_PRICE, (m.price or "").strip())):
+            it = cell(text)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if text:
+                it.setToolTip(text)
+            self.table.setItem(i, col, it)
+        # Fiat only moves on a trade or a bare cash deposit/withdrawal. A coin
+        # move carries a USD valuation in the source, but no money changed hands,
+        # so the cell stays EMPTY rather than showing a figure the sleeve never saw.
+        amt = cell(_fmt_amount(m.amount_cents) if m.amount_cents else "")
+        amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if m.amount_cents < 0:
+            amt.setForeground(QBrush(QColor(style.negative_color())))
+        self.table.setItem(i, X_AMOUNT, amt)
+
+    def _render_crypto_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
+        """Draw one coin-native wallet review row: the counterparty address, the
+        coin, and the quantity in whichever direction it moved. Everything is the
+        imported ground truth and read-only -- the chain is not a guess the way an
+        importer's action mapping is, so there is nothing here to correct.
+
+        The quantity is stored UNSIGNED with the direction carried by the action,
+        so it renders under Coin In or Coin Out rather than as a signed number."""
+        st = cell(status)
+        if merge_tip:
+            st.setToolTip(merge_tip)
+        self.table.setItem(i, C_STATUS, st)
+        self.table.setItem(i, C_DATE, cell(fmt_date(m.date)))
+        # The on-chain counterparty IS the payee: the From address on a coin
+        # increase, the To address on a decrease.
+        self.table.setItem(i, C_PAYEE, cell(m.payee))
+        self.table.setItem(i, C_MEMO, cell(m.memo))
+        if not getattr(m, "is_crypto", False):
+            # A row queued for this wallet by the CASH path -- the leftovers of a
+            # by-address export that was routed to the generic delimited importer
+            # before crypto routing existed. It carries a fiat amount and no coin,
+            # so there is nothing to show in the coin columns and nothing this
+            # account could do with it. Name it rather than drawing four blanks,
+            # which read as a corrupt row.
+            legacy = cell("(not on-chain)")
+            legacy.setToolTip(
+                "This row was queued by the cash importer before on-chain "
+                "routing existed. It carries no coin, so it cannot be added to "
+                "a wallet. Discard it and import the export again.")
+            self.table.setItem(i, C_COIN, legacy)
+            for col in (C_IN, C_OUT, C_FEE):
+                self.table.setItem(i, col, cell(""))
+            return
+        self.table.setItem(i, C_COIN, cell(m.symbol))
+        is_out = (m.action or "").strip().upper() in _COIN_OUT_ACTIONS
+        qty = (m.quantity or "").strip()
+        for col, text in ((C_IN, "" if is_out else qty),
+                          (C_OUT, qty if is_out else "")):
+            it = cell(text)
+            it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            # A quantity long enough to elide anyway is one hover from readable
+            # rather than lost behind an ellipsis.
+            if text:
+                it.setToolTip(text)
+            self.table.setItem(i, col, it)
+        # The network fee is paid in the COIN (ETH gas), never in dollars, and
+        # only the sender pays it -- so an inbound row's Fee cell stays empty.
+        fee = ""
+        if m.fee_quantity:
+            fee = f"{m.fee_quantity} {m.fee_symbol}".strip()
+        fee_item = cell(fee)
+        fee_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if fee:
+            fee_item.setToolTip(fee)
+        self.table.setItem(i, C_FEE, fee_item)
 
     def _render_investment_row(self, i, m, status, cell, actioned, merge_tip=None) -> None:
         """Draw one investment review row. Security is editable; everything else
@@ -581,6 +846,29 @@ class ImportReviewPanel(QWidget):
         self._remove_and_advance(i, txn_id=txn_id)
         return txn_id
 
+    def accept_amazon_index(self, i: int) -> int:
+        """Accept an Amazon itemization row at ``i``, then drop it and advance.
+
+        A MATCHING row REPLACES its existing register line's splits/categories
+        with the invoice's per-item split (requirement A8); a NEW row posts a
+        fresh card charge carrying that split. Both write through the Amazon
+        accept path in :mod:`import_review` (``ledger.set_splits`` /
+        ``ledger.add_transaction``) -- no second write path. Amazon rows are never
+        persisted to ``review_items``, so acceptance always removes the row."""
+        entry = self._entries[i]
+        if getattr(entry, "amazon_alloc", None) is None:
+            raise ValueError("row %d carries no Amazon allocation" % i)
+        if entry.is_matching:
+            txn_id = import_review.accept_amazon_match(self.conn, entry)
+        else:
+            txn_id = import_review.accept_amazon_new(
+                self.conn, self.account_id, entry)
+        self.transactionSaved.emit()
+        # Refresh the register FIRST (its reload resets the view); only then drop.
+        self.changed.emit()
+        self._remove_and_advance(i, txn_id=txn_id, drop=True)
+        return txn_id
+
     def discard_index(self, i: int) -> None:
         """Discard the pending row at ``i`` without adding it to the register.
         A persisted row is DELETED, so downloading the same range again brings it
@@ -662,7 +950,12 @@ class ImportReviewPanel(QWidget):
         # discard_index has always guarded this; accept did not.
         if getattr(entry, "is_actioned", False):
             return
-        if entry.is_matching:
+        # An Amazon itemization row (transient, carries its own multi-leg split)
+        # is accepted through the Amazon split writer whether NEW or MATCHING --
+        # never through the single-category NEW pending-row path.
+        if getattr(entry, "amazon_alloc", None) is not None:
+            self.accept_amazon_index(self._selected_index())
+        elif entry.is_matching:
             self.accept_index(self._selected_index())
         else:
             # NEW rows -- cash AND investment -- are committed from the
@@ -670,12 +963,41 @@ class ImportReviewPanel(QWidget):
             self.accept_new_requested.emit(entry)
 
     # ---- bulk operations --------------------------------------------------
+    def _has_amazon_pending(self) -> bool:
+        """Whether the in-memory list holds any un-actioned Amazon itemization
+        row. Such rows are transient (never in ``review_items``), so the DB-based
+        bulk helpers cannot see them."""
+        return any(getattr(e, "amazon_alloc", None) is not None
+                   and not getattr(e, "is_actioned", False)
+                   for e in self._entries)
+
     def _on_accept_all(self):
+        # Transient Amazon rows live only in memory, so accept_all (which reads
+        # review_items) cannot see them -- accept each in place through the Amazon
+        # split writer instead. accept_amazon_index drops the row it accepts, so
+        # re-scan from the front each pass.
+        if self._has_amazon_pending():
+            while True:
+                i = next((j for j, e in enumerate(self._entries)
+                          if getattr(e, "amazon_alloc", None) is not None
+                          and not getattr(e, "is_actioned", False)), None)
+                if i is None:
+                    break
+                self.accept_amazon_index(i)
+            return
         import_review.accept_all(self.conn, self.account_id)
         self.reload_pending()
         self.changed.emit()
 
     def _on_discard_all(self):
+        # Transient Amazon rows aren't in review_items: discarding them just
+        # clears the in-memory list (the file can be re-loaded to bring them
+        # back), so there is nothing to delete and no confirmation to ask.
+        if self._has_amazon_pending():
+            self.set_entries([])
+            self.hide()
+            self.row_selected.emit(None)
+            return
         if import_review.count_pending(self.conn, self.account_id) == 0:
             return
         resp = QMessageBox.question(

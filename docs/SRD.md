@@ -34,7 +34,9 @@ Non-goals (for now): bill pay, tax-form generation, mobile/web, multi-user.
 One SQLite database. Core tables:
 
 - accounts(id, name, type[checking|savings|credit|cash|investment|asset|liability],
-  currency, opening_balance, opening_date, institution, note, closed_flag)
+  currency, opening_balance, opening_date, institution, note, closed_flag) -
+  `currency` is the account's native ISO 4217 code (TEXT NOT NULL DEFAULT 'USD',
+  the base), chosen at creation and treated as immutable thereafter (see 5.4a).
 - categories(id, name, parent_id, type[income|expense], hidden) - hierarchical,
   Quicken-style "Parent:Child".
 - payees(id, name, normalized_name) - for matching/auto-fill.
@@ -82,6 +84,14 @@ One SQLite database. Core tables:
 - holdings(id, account_id, symbol, name, quantity, cost_basis) - investment
   positions.
 - price_history(id, symbol, date, close_price, source) - per-holding quotes.
+- asset_values(id, account_id, date, value_cents, source, note,
+  UNIQUE(account_id, date)) - the dated MARKET-VALUE series for a non-investment
+  `asset` account (schema v42), shaped like `price_history` is for securities and
+  kept separate from the account's ledger balance (its cost basis). `value_cents`
+  is signed integer cents; `date` is ISO YYYY-MM-DD; `source` distinguishes a
+  hand-entered `manual` value from a fetched `zillow` one. Net worth reads the
+  LATEST value on or before the as-of date through `investments.display_balance`.
+  Written only by `mammon/asset_values.py`; the zEstimate wiring is 5.8e.
 - investment_transactions(id, account_id, date, action[Buy|Sell|Div|ReinvDiv|
   IntInc|...], symbol, quantity, price, amount, commission, memo) - lot-level
   investment activity (kept distinct from cash transactions).
@@ -120,6 +130,12 @@ One SQLite database. Core tables:
   exact at any decimal count, so only summation is at risk.
 - reconciliations(id, account_id, statement_date, statement_balance, ...) - the
   record of COMPLETED reconciliations only.
+- reconciled_change_log(id, account_id, transaction_id, changed_at, operation,
+  field, old_value, new_value) - a per-account audit trail of every change made
+  to an ALREADY-reconciled transaction (schema v63; see 5.11a). Append-only,
+  written only by `mammon/ledger.py` (the sole transaction writer) and otherwise
+  read-only. `transaction_id` carries no foreign key on purpose: after a delete
+  the row it names is gone, and the log entry must outlive it.
 - reconcile_drafts(account_id PK, statement_date, beginning/ending_cents,
   charges/payments/credits/finance_cents, finance_category, finance_txn_id) -
   the statement inputs of an UNFINISHED reconcile, one per account (schema v30).
@@ -268,6 +284,28 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   the highlighted result or on every result, replacing the WHOLE field
   (Quicken's semantics; blank clears). Category skips transfers and splits and
   teaches the payee mapping. Confirms first; open registers reload after.
+- **The investment register shares this whole toolkit** (parity roadmap item 2 /
+  upgrade_priorities #5), reusing the cash register's pattern and differing only
+  where the content does. `InvestmentRegisterModel` gains the same
+  `_view`-projection indirection, so a header click sorts (Quantity / Price /
+  Share Bal by Decimal magnitude, Inv Amt / Cash Amt / Cash Bal by cents, Action
+  and Security / Category by text, Date the identity); a filter bar
+  (`InvestmentFilter`) narrows by text over action / security / memo / amount, a
+  date range and an amount range, reporting "Showing n of m"; a header-menu
+  column chooser hides Price / Share Bal / Inv Amt / Cash Amt, persisted through
+  `ui/prefs.hidden_columns` under its OWN scope (`investment_register`) so it
+  never collides with the cash names; a multi-row selection batch-changes the
+  memo, voids or deletes; and a memo/security find-and-replace rewrites matching
+  rows. **Void** has no payee to stamp and no splits to drop, so
+  `investments.void_investment` zeros amount / commission / quantity / price
+  (taking the row out of BOTH the money and the share math), prefixes `**VOID**`
+  to the memo with the original amount noted, and the register renders the mark
+  on the Action cell; idempotent, like the cash void. **Every write still goes
+  through `mammon.investments`** (the sole `investment_transactions` writer) --
+  batch edits via `update_investment_fields`, so no second write path opens and
+  a cash-only transfer leg shown here is skipped rather than mis-resolved against
+  the shared id space. Only the CONTENT differs (shares/price columns, an action
+  verb, no cash-only payee/category cells); the behaviour matches.
 - **Tags** (the register's Tag column): a transaction carries any number of tags,
   entered and edited as ONE comma-separated string in the single Tag cell -- a
   free-text slot, NOT a multi-widget picker (explicit UX choice). Commas separate;
@@ -280,6 +318,58 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   (the substring Find also hits payees/memos), and Reports ▸ By Tag (Window)
   (`reports/tags.py`) totals spending per tag, attributing a line to EACH of its
   tags so overlapping tags can each show the full amount.
+- **Tag colors** (identity, not rank): each tag carries an optional display color
+  (`tags.color`, a `#RRGGBB` hex string, NULL = "not chosen"). The color is per-tag
+  IDENTITY, so a tag keeps the SAME color everywhere -- the register Tag cell paints
+  a small colored square before each tag name (in both one- and two-line view), the
+  split dialog tints a tagged leg's row with its tag color, and the By Tag report
+  colors each row's tag -- instead of color following a chart slice's rank and
+  changing as the ranking moves. A split's per-leg tags surface on the collapsed
+  register row as the UNION of the row's own tags and its legs' tags (the same
+  `reports/_lines._line_tags` union), so leg colors show without double-counting.
+  Every surface reads color through ONE domain accessor, `ledger.tag_colors(conn)`
+  (casefolded name -> hex), keeping `ui/` free of SQL. Colors are written only
+  through `ledger.set_tag_color` (validated `#RRGGBB`), which -- with `rename_tag`
+  and `delete_tag` -- keeps `mammon/ledger` the sole writer of the tags table and
+  its `transactions.tag` cache. A split leg's own single tag round-trips through
+  `ledger.set_splits` (get-or-created by name), so editing a split no longer drops a
+  per-leg tag an import set.
+- **Tag Manager** (Tools ▸ Tag Manager…, mirroring the Category Manager): lists
+  every tag with its color swatch and usage count, and renames a tag (in place,
+  keeping its id so links and color survive), sets or clears its color via a color
+  picker, or deletes it (removing it from every transaction and split leg). A thin
+  `QDialog` over the ledger verbs above; its destructive delete confirms through the
+  `QMessageBox.question` seam, and it emits `changed` so open registers and the By
+  Tag report refresh.
+
+### 5.1c Register Undo/Redo
+- The register has multi-level Undo and Redo for edits the user makes there:
+  adding a transaction, editing a transaction's fields, deleting a transaction,
+  editing splits, and creating / editing / deleting a transfer. The Edit menu
+  carries **Undo** (Ctrl+Z) and **Redo** (Ctrl+Y and Ctrl+Shift+Z); both items
+  enable/disable from the stack and show what they would reverse (e.g. "Undo Add
+  transaction", "Redo Delete transfer").
+- **No second write path.** Undo/redo does not touch SQL. It captures a snapshot
+  of the affected transaction(s) and REPLAYS the inverse THROUGH the same
+  `mammon.ledger` verbs the forward edit used (`add_transaction`,
+  `update_transaction`, `delete_transaction`, `create_transfer`, `set_splits`,
+  `clear_splits`). So every transfer/split/checkpoint invariant stays enforced in
+  the one place it already lives, and undoing a transfer inverts BOTH mirror legs
+  together for free (delete removes both sides; `update_transaction` mirrors
+  date/amount/payee/memo to the pair) — see 5.2.
+- The stack is **in-memory and session-scoped**, one history per open register
+  (`mammon/undo.py`, hung off the register's `RegisterModel`). Nothing is
+  persisted; there is no schema change. Closing the register or the app clears it.
+- **Identity churn.** The ledger allocates a fresh row id on every insert, so
+  undoing a create (delete) then redoing (recreate) yields a different row id.
+  The manager keeps a small remap table so a later stack entry that referenced
+  the old id still resolves to whatever row currently stands in for it.
+- **Deliberate limitations.** Converting a plain transaction into a transfer, or
+  re-pointing a transfer at a different account, have no clean ledger inverse;
+  they are treated as a barrier that drops the redo stack rather than recording a
+  step that could not be cleanly reversed. Batch (multi-row) edits are likewise a
+  barrier in this version — single-row add / edit / delete / transfer / split are
+  the undoable acts. A new edit always clears the redo stack.
 
 ### 5.2 Transfers between accounts (FIRST PRIORITY)
 - Classic Quicken behavior (user confirmed Q1): a transfer is one transaction
@@ -331,6 +421,78 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   payee and memo live on the intermediary account's own register rows. This needs
   no extra field, scales past a handful of payments a month, and reuses the
   transfer machinery that is already tested. See migration 28 in `mammon/db.py`.
+
+### 5.4a Per-account currency (multi-currency)
+Every account has a native currency (`accounts.currency`, ISO 4217, `NOT NULL
+DEFAULT 'USD'`). The base/presentation currency is USD (`fx.BASE_CURRENCY`); an
+account with no explicit currency IS the base. The backend is `mammon/fx.py`: a
+dated `fx_rates` store (Decimal-encoded TEXT rates, direct or derived inverse),
+`convert_cents` (integer cents, `ROUND_HALF_UP`), `net_worth_by_currency`, and a
+`total_in_currency` fold. Money stays integer cents; rates stay Decimal text; no
+floats and no money math in the UI layer.
+
+- **Currency is chosen at CREATION and is immutable.** The New Account dialog
+  offers a currency selector (an editable ISO-4217 combo, defaulting to the base
+  so the all-USD case needs no thought). Creation funnels through the sole account
+  writer `ledger.create_account`, which takes and normalises a `currency`
+  argument — there is no second write path. Changing an account's currency after
+  it holds transactions would silently reinterpret every past amount, so the
+  Account Details dialog shows the currency **read-only** and never writes it back.
+- **Per-account amounts render in the account's own currency.** A base-currency
+  account renders bare (the dense classic look — no symbol clutter); a foreign
+  account is tagged with its currency symbol/code (`ui/models.fmt_amount_ccy`,
+  `currency_symbol`) so its balance is never misread as base dollars. This applies
+  to the account bar / accounts overview per-account balances and to the register
+  header (a foreign register names its currency once, in the title, and shows its
+  ending balance in that currency). Formatting is presentation only — the cents
+  are unconverted.
+- **Net worth is a per-currency presentation folded to the base through
+  `mammon.fx`.** `fx.net_worth_currencies(conn)` returns a `NetWorthCurrencies`:
+  one `CurrencyLine` per native currency (the base currency first, then the rest
+  A→Z), each carrying its **native subtotal** (signed cents in that currency),
+  its **converted** value in the base currency, and a **grand total** equal to
+  the sum of the converted lines — the layout the user asked for: each currency
+  listed, then its conversion, then one USD total. The accounts overview / account
+  bar figure is `net_worth_currencies(conn).total_cents`; `ledger.net_worth`
+  (hence the whole reports/charts stack and every AS-OF sample of
+  `net_worth_series`) folds through the same object, taking a single-currency fast
+  path that delegates straight to `investments.net_worth` so an all-USD ledger is
+  byte-for-byte unchanged and never pays for the currency machinery. All the cents
+  arithmetic and rate lookup live in `mammon/fx.py`, not the UI.
+- **A missing rate is surfaced, never folded at 1:1.** A **non-zero** foreign
+  balance with no recorded FX rate becomes an UNCONVERTED line
+  (`converted_cents is None`, `rate_missing`) and is **excluded** from
+  `total_cents`; `NetWorthCurrencies.unconverted` names those currencies and
+  `is_complete` is false, so the total is honestly *incomplete* rather than
+  silently overstated by the raw foreign number. Adding such a balance at 1:1
+  would overstate net worth by the whole foreign amount — the same shape of error
+  as a double-counted transfer — so the code refuses to. A **zero-valued bucket
+  needs no rate**: `convert_cents` returns 0 for a zero amount before any rate
+  lookup (zero converts to zero at any rate), so an empty foreign account
+  (balance 0, no recorded rate) is a clean converted line, not an unconverted
+  one; a non-zero foreign balance with no rate raises `FxRateUnavailable`
+  internally, which `net_worth_currencies` catches to mark that one line
+  unconverted without disturbing the others.
+- The app holds no FX credentials; rate fetching is behind the same injectable
+  seam as investment quotes (`fx.fetch_rates`, default yfinance source).
+- **Rates are entered and refreshed from a file-wide "Exchange Rates" manager**
+  (`ui/fx_rates_dialog.py`, Tools menu). It lists the dated `fx_rates` store
+  (`fx.list_rates`, a pure read — the UI keeps no SQL of its own), lets the user
+  ENTER a rate for a (from-currency, to-currency, date) — "how many *to* units
+  equal 1 *from* unit on this date" — and REFRESH the rates every account's
+  currency implies against the base, plus every pair already recorded. Dates use
+  the standard `ui/delegates.make_date_edit` / `date_edit_iso` chokepoints and
+  render through `ui/models.fmt_date`. Every write funnels through
+  `fx.set_rate` — the store's single writer, an upsert on (date, from, to) —
+  including a refresh (`fx.fetch_rates` calls `set_rate` for each fetched rate),
+  so the UI adds **no second write path** to `fx_rates`. There is no
+  delete-rate writer by design, so editing an existing rate corrects its value
+  in place with the (from/to/date) key locked. The network fetch is behind the
+  `_fetch_rates` seam and the result notice behind an overridable `_notify`, so
+  a headless test injects a fake source and opens no blocking modal. Entering or
+  refreshing a rate immediately revalues the open registers' foreign-currency
+  accounts (the dialog's `changed` signal drives a refresh, and net worth folds
+  through the newest stored rate on/before the date).
 
 ### 5.5 Auto-categorization from history
 - When a payee recurs, Mammon learns its category and auto-fills/suggests the
@@ -408,6 +570,10 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
 - Retrieve updated quotes automatically via a Python package where one exists
   (e.g. yfinance for public tickers), falling back to webSlinger only where no
   package covers a source.
+- The investment register offers the same register toolkit as the cash register
+  -- sort, filter, column chooser, multi-row batch edit, find-and-replace and
+  Void -- over the investment columns; see §5.1b for the shared behaviour and the
+  investment-specific Void.
 
 ### 5.8b Stock splits
 - A split's ratio is stored EXACTLY, as an integer `split_num`/`split_den` pair
@@ -585,6 +751,26 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   is not evidence of what a house was worth in 2012, and letting one leak
   backwards would rewrite every historical net-worth figure the first time the
   user clicked Get Value.
+- **A security valuation is as-of on BOTH the price and the share count.** The same
+  leak in the other direction was the historical-net-worth bug: `holding_values`
+  threaded the as-of date into the price but sourced its positions from the derived
+  `holdings` table (today's share counts, no date), so every past date valued the
+  shares held NOW. A position since sold vanished from the past and an account
+  closed out years ago reported its cash sleeve alone at every historical date --
+  the whole net-worth curve understated history. Given an explicit `as_of`,
+  `holding_values` now REPLAYS positions to that date via `compute_holdings`
+  (snapshot-seeded through `holdings_checkpoints`, the same fast path the 40-year
+  open relies on) and values the shares actually held then; a position closed by
+  the date is dropped, exactly as the derived table drops it. With no `as_of` it
+  keeps the fast `holdings`-table read, so today's totals are unchanged. This is
+  the source set behind `account_valuation` / `investments.net_worth` /
+  `ledger.net_worth` / `reports.net_worth_series` / `fx.net_worth_by_currency`
+  (all via `display_balance`), so the whole net-worth stack is point-in-time
+  correct. (The Holdings window and a security-filtered register instead read
+  `security_positions`, which by design freezes the share count at today and caps
+  only the price -- "what I hold now, priced then" -- so those two views and the
+  valuation stack agree at the current date and diverge, intentionally, for a
+  historical as-of.)
 - **Fetching is source-injected** (`asset_values.fetch_values`), exactly like
   `investments.fetch_quotes`: any object with `get_values(requests)`, so the
   network lives inside the source and tests inject a fake.
@@ -705,6 +891,46 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   its own so it never appears among the proposals -- reporting only
   proposal-vs-proposal collisions described a two-way merge as a simple rename,
   which is the one change here that re-running cannot undo.
+
+### 5.8e-2a Ticker renames without rewriting history (security aliases)
+- A **ticker rename** is a different problem from the merge above. When a listed
+  company changes its symbol (`FB`->`META`, `GOOG`->`GOOGL`), the security is ONE
+  identity that traded under two tickers on either side of a rename date, and both
+  spellings are legitimately present in the file -- pre-rename lots and prices
+  under the old ticker, post-rename ones under the new. The merge in 5.8e-2
+  REWRITES every old-ticker row to the new spelling; a rename does not need that,
+  and rewriting 27 years of `FB` rows to `META` loses the fact that they WERE
+  `FB`. The **`security_aliases`** table keeps both spellings and resolves them to
+  one identity at READ time instead.
+- **How the table is created.** `security_aliases(alias_symbol PRIMARY KEY,
+  canonical_symbol NOT NULL REFERENCES securities(symbol))` is created by
+  migration 64 (`init_db` applies it; nothing else creates it). The alias points
+  AT the canonical securities row (the surviving identity); the retired ticker
+  need not keep a `securities` row of its own.
+- **How aliases are added and removed.** `mammon/investments.py` is the SOLE
+  writer: `add_alias(conn, alias_symbol, canonical_symbol)`,
+  `remove_alias(conn, alias_symbol)`, `list_aliases(conn)`. `add_alias` guards
+  three corrupt mappings -- a security cannot alias ITSELF; the canonical MUST be
+  an existing security (it is the identity everything folds onto); and the alias
+  must not close a CYCLE (the canonical must not already resolve back to the
+  alias), which would make resolution ambiguous. `remove_alias` reverses the
+  rename for lookup purposes; because no historical row was ever touched, the old
+  ticker's lots and prices simply resolve to themselves again.
+- **How aliases are used.** `resolve_symbol(conn, symbol)` maps a symbol to its
+  canonical identity (identity when there is no alias). Every price / holdings /
+  valuation lookup routes through it: the position replay folds an aliased
+  ticker's lots onto the canonical symbol (`_fold_aliases`), and a price read
+  unions the whole canonical identity -- the canonical symbol PLUS every alias
+  that resolves to it (`_identity_symbols`) -- so a renamed ticker's pre-rename
+  price series still values its holding. The continuity is entirely read-time:
+  holdings and valuation are UNCHANGED by the mere act of adding the alias, and
+  the fast paths (`list_holdings`, `holdings_checkpoints`) keep working because
+  `rebuild_holdings` writes the folded position under the canonical symbol.
+- **Alias vs. merge, when to use which.** Use an alias for a genuine ticker
+  rename, where preserving that the security once traded under the old symbol is
+  correct and reversibility is cheap. Use the 5.8e-2 merge to collapse two
+  spellings that were never distinct (an import typo, a name-as-symbol vs. its
+  real ticker), where the old spelling is simply wrong and should disappear.
 
 ### 5.8e-3 Downloaded prices are AS TRADED
 - `YFinanceQuoteSource` passes **`auto_adjust=False`** on both `get_quotes` and
@@ -882,10 +1108,45 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   domain layer is `mammon/crypto.py`, a parallel of `mammon/investments.py`: it
   is the SOLE writer of the `crypto_*` tables (mirroring investments' single-
   writer discipline), and `ledger.py` stays the only writer of the cash
-  `transactions` table -- crypto adds no second writer there. The fiat side of a
+  `transactions` table -- crypto adds no second writer there. On an EXCHANGE-kind account (below) the fiat side of a
   buy/sell rides on the crypto row's own `amount` (an internal cash sleeve, the
   way investments keeps buy/sell cash in `investment_transactions`), so both
-  domains tell one cash story and no cash-ledger row is written for a trade.
+  domains tell one cash story and no cash-ledger row is written for a trade; a
+  WALLET-kind account has no cash sleeve at all.
+- **Two account KINDS, an explicit typed `accounts.crypto_kind` (migration 61).**
+  A `'wallet'` is a single address / paper wallet holding coins and ERC-20 tokens
+  with NO fiat: coin simply arrives and leaves, the network fee is paid IN the
+  coin, and the on-chain COUNTERPARTY IS THE PAYEE (`crypto_transactions.payee` --
+  the `From` address on a coin increase, the `To` on a coin decrease; there is no
+  separate "counterparty" concept and no third-party-payee field). An `'exchange'`
+  is a custodial account holding coins PLUS fiat currencies through the internal
+  cash sleeve (the `BUY`/`SELL`/`SWAP` model below). The kind is a REAL value in
+  (`'wallet'`, `'exchange'`), never an overloaded NULL -- a NULL kind means "not a
+  crypto account"; migration 61 backfills every pre-split crypto account to
+  `'exchange'`, the model they were built on. Predicates `crypto.is_wallet_account`
+  / `is_exchange_account` / `account_kind` classify a row. Both kinds are
+  multi-token, security-style: each token is a distinct position valued at market.
+- **Coin-native wallet writers (the ShrsIn/ShrsOut analogue).** A wallet coin
+  increase is `crypto.record_wallet_credit` (add coin, no fiat leg -- `price` /
+  `amount` / `basis` left NULL) and a decrease is `record_wallet_debit` (remove
+  coin, with an optional coin-native fee leg via `fee_symbol`/`fee_quantity`, the
+  USD `fee_amount` left NULL); both take the on-chain counterparty as `payee`.
+  With no USD proceeds or basis, no realized gain is booked -- correct for a
+  coin-native wallet. Each token (`ETH`, `USDC`, `LINK`) stays a DISTINCT position
+  in `crypto_holdings` (`UNIQUE(account_id, symbol)`); symbols never merge. An
+  own-wallet move between two of the user's accounts is still the coin transfer
+  mirror (`record_wallet_transfer`, below). All route through the existing
+  `record_event`, so `crypto.py` remains the sole writer of `crypto_*`.
+- **Both crypto KINDS are creatable from the New Account dialog.** `Crypto` is
+  offered in the dialog's type list alongside `Investment` (both are
+  investment-like); when `Crypto` is chosen a **Wallet vs Exchange** control
+  appears, and the choice flows to `crypto.create_account(kind=...)` through the
+  shared `widgets.create_account_from_values` -- the ONE place the dialog's
+  `values()` become an account, so the crypto routing lives in a single spot and
+  `crypto_kind`/`asset_class` are set. `crypto.create_account` itself funnels the
+  base row through the sole writer `ledger.create_account` and then sets the
+  crypto fields via `ledger.update_account`. The account groups under Investing
+  and routes to its own `CryptoRegisterWidget` (SRD 5.8j).
 - **Quantities and per-unit prices are Decimal-encoded TEXT; fiat is signed
   integer cents.** TEXT storage round-trips an 18-decimal wei value exactly. The
   one new hazard over equities is SUMMATION, not storage: Python's default
@@ -900,8 +1161,10 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   linked single-asset legs `SWAP_OUT`+`SWAP_IN` sharing a `swap_group_id`
   (SWAP_OUT is a disposal at fair-market value, SWAP_IN's basis IS that FMV --
   never one row crammed with two symbols, which would break holdings replay),
-  `SEND`/`RECEIVE` to/from a third party (SEND disposes at FMV, RECEIVE is income
-  at FMV), the in-kind income actions `REWARD`/`INTEREST`/`AIRDROP`/`MINING`
+  `SEND`/`RECEIVE` to/from a third party (on an exchange, SEND disposes at FMV and
+  RECEIVE is income at FMV; on a coin-native WALLET these carry no fiat and are
+  written by `record_wallet_debit`/`record_wallet_credit` above), the in-kind
+  income actions `REWARD`/`INTEREST`/`AIRDROP`/`MINING`
   (credited as coin quantity, basis = FMV, accruing to the checkpoint `income`
   total -- the crypto twin of a dividend), `FEE` (a network/gas fee), and `FORK`
   (basis per policy, default the supplied FMV or 0 -- disputed, never hardcoded).
@@ -939,9 +1202,60 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   contribution -- is its full market valuation (cash sleeve + coin value):
   `investments.display_balance` delegates a `'crypto'` account to
   `crypto.display_balance`, so the app's single valuation entry point values any
-  account correctly.
+  account correctly. **The "cash sleeve" is EXACTLY the register's Cash Bal --
+  `opening_balance` plus `crypto_cash` (the fiat that settles HERE: BUY/SELL and
+  bare DEPOSIT/WITHDRAW) -- and nothing else.** `account_valuation` does NOT read
+  `ledger.account_balance`: a crypto account's ordinary `transactions` rows (a
+  SELLX/BUYX's mirror leg -- its proceeds went to a LINKED cash account, so it
+  leaves this sleeve untouched -- or an imported cash row) are not part of the
+  sleeve, and folding them in reported cash a coin-only exchange does not hold
+  (e.g. $78k of "cash" on an account whose register Cash Bal is correctly $0,
+  nearly doubling its net worth). So a coin-only exchange reads $0 cash, matching
+  its register exactly.
+- **Coins get the SAME quote plumbing securities have -- current, historical, and
+  register-sourced -- reusing the investments code rather than duplicating it.**
+  `crypto.fetch_quotes` fetches the latest close per coin (the injectable
+  `CryptoQuoteSource`; a missing yfinance backend is a setup step, never raised);
+  a just-fetched quote counts toward the displayed total because
+  `valuation_as_of` treats a recorded price as activity (§5.5c). Historical
+  backfill mirrors §5.5e: `crypto.fetch_quote_history` asks the source for a
+  monthly series via `get_history` (a source that only reports the latest close
+  says so with `QuoteSourceUnavailable` rather than failing obscurely) and writes
+  it with `record_prices_if_absent`, so a downloaded close is refetchable while a
+  register-carried price is kept. And the register is itself price history:
+  `crypto.learn_prices_from_transactions` records each buy/sell/income/swap row's
+  own per-unit USD price (the mirror of §5.5f -- derived from `|amount|/quantity`
+  when a raw event states value and quantity but no price) under the coin's pair,
+  with DO-NOTHING precedence so a single trade never stomps a market close. Unlike
+  equities there is no name-to-ticker guess to confirm -- a coin symbol IS its
+  ticker.
+- **Net worth breaks out per coin AND per currency, USD applied only at this
+  layer (the wallet's rule).** `fx.net_worth_by_asset` returns one line per coin
+  (its NATIVE quantity and its USD-converted market value, coin x latest
+  `{SYM}-USD` price) and one per fiat currency (native cents and its FX-converted
+  value), plus a base-currency total. A crypto account contributes its holdings as
+  coin lines and its cash sleeve as a fiat line -- the SAME two halves
+  `display_balance` already sums -- so a holding is counted EXACTLY once and the
+  total equals `fx.total_in_currency` (no double count anywhere net worth is
+  computed). A wallet has no cash sleeve, so it adds only coin lines. The accounts
+  overview renders this as a grid (`ui/models.NetWorthByAssetModel`): one column
+  per asset, a NATIVE-quantity row, a USD-converted row, and a Total column -- a
+  thin projection holding no coin/cents math of its own.
 
 ### 5.8i Cryptocurrency import (Etherscan-style native-coin CSV)
+- **ETHERSCAN RENAMES ITS COLUMNS, so the header must be matched broadly.**
+  Exports through ~2023 head the hash column `Txhash` and the timestamp
+  `DateTime`; current ones say `Transaction Hash` and `DateTime (UTC)` (and append
+  a `Method` column). That column is load-bearing twice — it is the exact-dedup
+  key AND the signature that identifies the file as a by-address export at all —
+  so matching only the old spelling rejected a real export outright: the parser
+  found no header, the file read as EMPTY, and the import reported it in the cash
+  importer's words ("use Adjust mapping to point out the date and amount
+  columns"), naming a control the crypto path does not have. Every accepted
+  spelling lives in `crypto_csv._is_hash_col`, used by both the header scan and
+  the column lookup so the two cannot drift. A zero-row import on a crypto
+  account says so in crypto's terms, and a parse failure carries its REASON
+  through the multi-file batch path rather than collapsing to "could not read".
 - A block-explorer by-address CSV export (Etherscan's per-wallet "Export CSV" is
   the reference shape) lands as crypto events on a `type='crypto'` account. The
   path mirrors the file-import hourglass (Section 6): a PURE parser turns text
@@ -950,31 +1264,70 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   is the parser (the crypto twin of `NormalizedTxn`); `importers/crypto_core`
   (`import_crypto_records` / `import_etherscan_file`) resolves the wallet, dedups,
   classifies each row and writes.
-- **The importer adds NO second writer of the `crypto_*` tables.** Every write
-  funnels through `mammon.crypto`'s event writers (`record_income` for an inbound
-  RECEIVE, `record_send` for a disposal, `record_wallet_transfer` for an
-  own-wallet move) -- never a raw `INSERT`, so the SINGLE-WRITER discipline and
+- **The importer dispatches on the account KIND and adds NO second writer of the
+  `crypto_*` tables.** `import_crypto_records` routes a `kind='wallet'` account to
+  a coin-native path (`_import_wallet_records`) and a `kind='exchange'` account to
+  the fiat-sleeve FMV path. Every write funnels through `mammon.crypto`'s event
+  writers -- `record_wallet_credit`/`record_wallet_debit` for a coin-native wallet,
+  `record_income`/`record_send` for an exchange, and `record_wallet_transfer` for
+  an own-wallet move -- never a raw `INSERT`, so the SINGLE-WRITER discipline and
   the transfer-mirror/lot invariants stay enforced in one place.
+- **A WALLET import is coin-native (the redesign).** A `Value_IN(ETH)` row becomes
+  a `record_wallet_credit` (coin in, the `From` address as `payee`); a
+  `Value_OUT(ETH)` row a `record_wallet_debit` (coin out, the `To` address as
+  `payee`) with the gas as a coin-native `fee_symbol`/`fee_quantity` leg. NO USD is
+  written on any row (`price`/`amount`/`basis` NULL, `fee_amount` NULL) -- a wallet
+  is valued at market only at the net-worth layer (SRD 5.8h), so there is no cost
+  basis, no realized gain, and no cash sleeve to move. The rules below (gas
+  attribution, sign, own-wallet transfer, `tx_hash` dedup, failed-row skip) hold
+  for both kinds.
 - **Gas is the user's only when the user is the sender.** The export prints a
   `TxnFee` on EVERY row, including inbound ones, but on-chain only the sender pays
   gas. Gas is booked as a same-coin `fee_*` leg on the parent event ONLY when the
   sender address is one of the user's own registered wallets; an inbound row's fee
   belongs to the counterparty and must never debit the user's coin. This was the
   single most consequential finding from the real 2020 ETH export (23 inbound
-  rows, 1 outbound).
+  rows, 1 outbound). On a WALLET-kind account no address registry is needed: an
+  Etherscan by-address export puts the wallet on the `From` of every `Value_OUT`
+  row, so a coin-out row IS a row the user sent and its gas is the coin-native fee
+  leg; the registered-sender test applies to the exchange-kind FMV path.
 - **Sign derives from the two unsigned columns.** Value is split across
   `Value_IN` / `Value_OUT` (exactly one non-zero per row); `Value_IN>0` acquires,
   `Value_OUT>0` disposes.
-- **Fair-market value comes from `Historical $Price/Eth`, never `CurrentValue`.**
-  The `CurrentValue @ $<rate>/Eth` column values every row at one export-time rate
-  and is ignored; the per-transaction historical price supplies the basis /
-  proceeds / gas value, computed to signed integer cents under the wei-scale
-  high-precision decimal context (`crypto.quantity_context`).
+- **Fair-market value comes from `Historical $Price/Eth`, never `CurrentValue`
+  (EXCHANGE-kind path only).** The `CurrentValue @ $<rate>/Eth` column values every
+  row at one export-time rate and is ignored; on an exchange-kind account the
+  per-transaction historical price supplies the basis / proceeds / gas value,
+  computed to signed integer cents under the wei-scale high-precision decimal
+  context (`crypto.quantity_context`). A WALLET-kind import writes no USD on the
+  row at all (SRD 5.8h), so this historical price is not booked there.
+- **The counterparty is the payee on BOTH kinds.** `record_send` / `record_income`
+  (the exchange path) take a `payee=` just as the wallet writers do, and the
+  importer fills it from `To` (out) / `From` (in). This is what makes a move from
+  the user's own paper wallet to their exchange legible: the EXCHANGE side shows
+  the paper-wallet address (a real holding the user controls), while the
+  exchange-assigned deposit address on the paper side is institutional and is not
+  tracked as a user holding.
 - **An own-wallet transfer needs a known-address registry.** A row is a
   wallet-to-wallet transfer (mirror model, no realized gain) only when the OTHER
   address also belongs to one of the user's Mammon crypto accounts (matched on
   `accounts.account_number`); otherwise it stays SEND / RECEIVE for the user to
   reclassify, since own-wallet intent is not derivable from the chain data alone.
+  The address is captured at CREATION: the New Account dialog shows a "Wallet
+  address" field for a crypto type and passes it to
+  `crypto.create_account(wallet_address=)`, which stores it in `account_number`
+  (the column the MCP authorizer already blanks, so crypto adds no new place a
+  private identifier can leak from). Asking only in the after-the-fact properties
+  dialog meant a freshly created wallet could never auto-classify anything.
+- **The crypto KIND is changeable after creation.** The account-properties dialog
+  shows a "Crypto kind" selector for a `type='crypto'` account, writing through
+  `ledger.update_account`. This is not a convenience: migration 61 backfilled
+  every pre-split crypto account to `'exchange'`, including the ones that are
+  really paper wallets, so without it those accounts keep the exchange register,
+  the exchange review columns and the exchange import path — and the redesign
+  never reaches the account it was built for. Changing the kind only changes how
+  existing rows are READ and how future ones are written; no stored row is
+  rewritten.
 - **`tx_hash` is the exact-dedup key, so a re-import is a NO-OP.** The on-chain
   hash is globally unique and immutable -- the crypto analogue of `fitid`, and
   strictly better. Each row whose `(account_id, tx_hash)` already exists is
@@ -986,6 +1339,111 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
 - Wallet addresses and tx hashes flow through only in memory to attribute gas and
   detect own-wallet transfers; they are never written to a tracked file, and the
   test fixtures use synthetic ANON placeholders only.
+- **A crypto account's file import routes to the coin parser BEFORE anything
+  else, and this is load-bearing.** `MainWindow._ingest_file_via_review` tests the
+  account for `crypto.is_crypto_account` first and hands the file to
+  `_ingest_crypto_file`; only a non-crypto account reaches the multi-account /
+  cash / investment routing below it. Without that test a by-address export fell
+  through to the generic delimited importer, which knows only date/payee/amount
+  columns: it inferred **`Blockno` as the money column** and produced cash-shaped
+  review rows with an Amount and a Cash Bal for an account where no dollar ever
+  moves. A file that does not parse as an on-chain export is reported as such
+  rather than silently reinterpreted as cash.
+- **A WALLET import goes through the import-review queue like every other
+  source; an EXCHANGE import writes through.** `import_review.build_crypto_review`
+  classifies the parsed records and `persist_entries` stores them as coin-native
+  `review_items` (schema v62: `is_crypto`, `fee_symbol`, `fee_quantity`, `tx_hash`,
+  reusing `symbol`/`quantity`/`action`/`payee`/`memo`/`date`) — REAL typed columns,
+  never a serialized blob, so the panel's DB-backed bulk operations keep working.
+  Nothing reaches `crypto_transactions` until the user accepts a row. Every row is
+  NEW: there is no fuzzy amount/date matching because `tx_hash` is an exact key, so
+  a row either already exists in this wallet (posted OR still pending) and is
+  skipped, or it is new — inventing a fuzzy match would manufacture ambiguity the
+  chain does not have. Accepting routes through `import_review._save_crypto` into
+  `crypto.record_wallet_credit` / `record_wallet_debit`, keeping `crypto.py` the
+  sole writer. `_crypto_hash_state` is the single authority on what counts as a
+  duplicate, so what gets skipped and what gets reported as skipped cannot
+  disagree; a DISCARDED row is deliberately not a duplicate (discard means "not
+  now", not "never again", the same policy the cash path states).
+- **Rows READ and rows QUEUED are different numbers, and reporting one as the
+  other is a lie.** A re-import of an already-imported export queues nothing;
+  calling that "0 rows read" made the zero-row message explain it as a layout
+  problem, for a file that had just been read perfectly. `crypto_import_counts`
+  reports what the export HELD plus the state of the rows already known ("130
+  already in the register"), so the "Already imported" wording fires. The cash
+  path documents the same distinction in `MainWindow._import_report`.
+- **A leftover cash-shaped review row cannot be added to a wallet.** A ledger
+  that imported a by-address export before on-chain routing existed still holds
+  the rows that import queued: a fiat amount (often the BLOCK NUMBER the generic
+  importer mistook for money) and no coin. `save_new` dispatches on
+  `mapped.is_crypto`, so accepting one takes the CASH branch and posts that
+  amount against an account with no cash sleeve. The review pane names such a row
+  `(not on-chain)` rather than drawing four blank coin cells, opens no pending
+  line for it, and Accept refuses with the reason and the remedy (discard, then
+  re-import).
+- **Boundary (not yet built): the webSlinger SCRAPE path is still cash-shaped for
+  crypto.** A download whose script DROPS A FILE (EXPORT mode) goes through
+  `_ingest_file_via_review` and therefore gets the coin-native routing above. A
+  download that SCRAPES ROWS calls `import_review.build_review` on flat row dicts,
+  which maps date/payee/amount — there is no coin row shape for it to map because
+  no recorded script scrapes an address explorer yet. When one exists, the mapping
+  belongs beside `mapped_from_crypto_record`, keyed off the account kind, and must
+  not be guessed at in advance: the field names come from the generated script.
+
+### 5.8i-2 Cryptocurrency import (custodial exchange history)
+
+- A custodial exchange's transaction history (Coinbase's per-year "Transactions"
+  CSV is the reference shape) lands on a `kind='exchange'` crypto account.
+  `importers/coinbase_csv.parse_coinbase(text) -> list[ExchangeRecord]` is the
+  pure parser -- the exchange twin of `parse_etherscan` -- and the same
+  `crypto_core` / `import_review` machinery does everything DB-facing.
+- **The FILE picks the reader; the ACCOUNT only decides whether USD rides along.**
+  `crypto_core.parse_export_file` returns `(shape, records)`, sniffing the two
+  signatures (`looks_like_coinbase` / `looks_like_etherscan`). Both documents are
+  CSVs imported into crypto accounts and only their CONTENT tells them apart, so
+  routing by account kind hands one of them a reader that cannot read it and then
+  blames the file -- the reported failure. The account kind gets exactly one say:
+  an on-chain export into a WALLET is coin-native with no USD on the row, while
+  into an EXCHANGE the export's historical price rides along
+  (`mapped_from_crypto_record(with_price=True)`), because an exchange keeps cost
+  basis and a disposal without an FMV books a phantom loss equal to its basis.
+- **The header is not the first line.** The export opens with a blank line, a
+  `Transactions` title and a `User,<name>,<uuid>` line. The header is located by
+  its `Transaction Type` / `Asset` columns, as the Etherscan reader locates its
+  own by `Transaction Hash`.
+- **The SIGN on `Quantity Transacted` fixes direction; the type only chooses
+  which action of that direction.** The same `Withdrawal` is coin leaving on one
+  row and dollars leaving on the next, and `Exchange Withdrawal` is money
+  ARRIVING (withdrawn from the exchange venue INTO this account). Reading
+  direction off the word inverts those.
+- **A row can be pure FIAT.** When `Asset` equals `Price Currency` the row moves
+  dollars against the cash sleeve and opens no position; a reader that assumes
+  every row carries a coin books a phantom `USD` holding. Conversely a coin move
+  that is NOT a trade moves no cash at all -- the export prints a USD figure on
+  it for tax purposes, and that is a valuation, not money the account saw.
+- **Coin moved between the user's own venues is a TRANSFER, never a disposal.**
+  `Pro Deposit` / `Pro Withdrawal` / `Exchange Deposit` / `Exchange Withdrawal`
+  map to `TRANSFER_IN` / `TRANSFER_OUT` (basis rides, no gain booked); booking
+  them as SEND would realize a gain on coin that never left the user's control.
+  A one-sided leg is legitimate here: the other end is a sub-ledger Mammon does
+  not model.
+- **An unknown Transaction Type is NOT an error.** The vocabulary is open and
+  Coinbase keeps extending it; an unrecognised type falls back to the direction
+  the sign already fixed, and the raw type is kept (`raw_type`, surfaced as the
+  Action cell's tooltip) so the review row shows what the file actually said and
+  the user corrects the action before accepting. Refusing a file over one
+  unrecognised word would make every future Coinbase product a broken import.
+- **A pure cash move needs its own writer.** `crypto.record_cash` (actions
+  `DEPOSIT` / `WITHDRAW`, `crypto.CASH_ACTIONS`) writes fiat with `symbol`,
+  `quantity` and `price` NULL -- which is what keeps the row out of the holdings
+  replay (`_apply_txn` skips a symbol-less row) while `crypto_cash` and the
+  register's running Cash Bal still count it. A WALLET never carries one.
+- **An exchange import goes through the review queue like every other source.**
+  It used to write straight through; its rows need MORE judgement than a
+  wallet's, not less, precisely because the source's product names only
+  approximate what happened. `import_review.build_exchange_review` shares one
+  body (`_build_crypto_entries`) with the wallet builder so the two can never
+  dedupe by different rules.
 
 ### 5.8j Cryptocurrency accounts in the UI (register, holdings, grouping)
 - **Grouping is already investment-like, by the shared constant.** A `type='crypto'`
@@ -1001,27 +1459,176 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   grouping, but their activity lives in DIFFERENT tables (`crypto_transactions`
   vs `investment_transactions`), so widening the dispatch to the membership test
   would misroute a wallet into a register that reads the wrong table.
-- **The crypto register is a THIN, read-only projection.** It renders through
+- **The crypto register is a THIN projection whose writes all go through
+  `crypto.py`, and ITS COLUMNS DEPEND ON THE ACCOUNT KIND.** It renders through
   `crypto.register_rows`, which owns every running-balance / cents / label
-  computation (the UI holds no SQL and no money or precision math). Columns: Date,
-  Action, Coin / Wallet, Quantity (stored SIGNED -- an OUT leg is negative), Price,
-  Coin Bal (running per-coin balance, folding in the same-coin gas so it ties to
-  `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a Buy/Sell), Cash Bal,
-  and Fee. The crypto event taxonomy renders as designed: a swap's two
+  computation (the UI holds no SQL and no money or precision math), and every edit
+  it accepts funnels through `crypto.update_event` / `link_as_transfer` (the sole
+  writer of `crypto_*`). `CryptoRegisterModel` lists the columns each kind shows and maps
+  position -> column KEY, so a position that means Price on an exchange is a coin
+  quantity on a wallet; callers address columns through `column_index(key)`, and a
+  key the kind does not show returns -1.
+  - **EXCHANGE** (custodial: a fiat cash sleeve, coin traded for dollars) —
+    Date, Action, Coin / Wallet, Payee, Quantity (stored SIGNED — an OUT leg is
+    negative), Price, Coin Bal (running per-coin balance, folding in the same-coin
+    gas so it ties to `rebuild_holdings`), Amount (the fiat cash-sleeve effect of a
+    Buy/Sell), Cash Bal, Fee.
+  - **WALLET** (a single address) — Date, Action, Coin / Wallet, Payee, Memo,
+    Coin Out, Coin In, Coin Bal, Fee. **Price, Amount and Cash Bal are ABSENT, not
+    blank.** For a paper-wallet address there is no per-row USD, no fiat leg and no
+    cash sleeve, so those columns are not merely empty — they invite a reading of
+    the register that is false. Increases and decreases get their own columns (the
+    source's `Value_IN` / `Value_OUT`) because on-chain they are different events
+    with different counterparties, which one signed column hides. The Fee is
+    coin-denominated (`<qty> <SYM>`), never USD. USD is not absent from a wallet,
+    it is just not on the ROW: each coin is a security valued at quantity x market
+    price at the holdings and net-worth layers.
+  The crypto event taxonomy renders as designed: a swap's two
   `swap_group_id` legs BOTH read as one paired `OUT->IN` trade; a same-coin wallet
   transfer renders as `[Other Wallet]` (the mirror model in coin, consuming no
   category, SRD 5.8h); gas that rides an event shows as a `<qty> <SYM>` entry in the
-  Fee column. Events are entered by import, so the register is read-only (no inline
-  editor to defer out of `setModelData`).
-- **The holdings window values coins + cash to the account's own balance.**
-  `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price | Market Value |
-  Gain/Loss from `crypto.holding_values` (priced through the shared `{SYM}-USD`
-  path), with the fiat cash sleeve as the last row, and a footer that totals to
-  `crypto.account_valuation().total` -- the SAME number the accounts list shows, so
-  the two cannot drift. An unpriced coin leaves Price / Market Value / Gain-Loss
-  blank. Get Quotes prices the coins (a coin symbol IS its ticker, so unlike
-  equities there is no name-to-ticker guess to confirm) behind the injectable
-  `crypto.fetch_quotes` source.
+  Fee column.
+- **The crypto register carries the same import-review pane as the cash and
+  investment registers.** It mounts an `ImportReviewPanel` below its button row and
+  exposes `show_review` / `reopen_review` / `_sync_review_action`, so the shared
+  MainWindow import and download paths (all guarded on `hasattr(reg, "show_review")`
+  / `reopen_review`) drive a crypto account exactly as they do a cash one, and the
+  gear's `Review…` action enables whenever `review_items` are pending. Previously
+  `CryptoRegisterWidget` mounted no panel and had no `_sync_review_action`, so a
+  crypto import wrote `review_items` (lighting the sidebar's red dot, whose
+  `count_pending` has no account-type filter) but NO widget showed them and the
+  `Review…` action stayed permanently disabled — the pane never appeared and the
+  menu item read as grayed. A NEW row is accepted from its editable PENDING
+  register line through the single `import_review` chokepoint (`_save_crypto` for
+  a coin-native wallet row, into `crypto_transactions`; a MATCHING row still
+  points at its existing register line where one can be found).
+- **A crypto review row opens a PENDING register line, like every other kind.**
+  Selecting a NEW row shows the line about to be added at the bottom of the
+  register with an Accept button on it. Most of a chain row is fact and stays
+  read-only — editing the date, coin, quantity or fee would invent history, and
+  the review list is meant to be ground truth. Three fields ARE a judgement and
+  are editable: the **action** (the chain shows coin arriving and cannot say
+  whether it was a plain receive, a staking reward, an airdrop, interest, mined
+  coin or a fork), the **payee** (the address is the truthful default, a
+  recognisable name is more useful), and the **memo**. The action is PICKED from
+  the vocabulary the domain layer validates (`ChoiceDelegate`), scoped to the
+  direction the chain already fixed — a typo would otherwise surface as an
+  exception at accept, with the row already gone from the list.
+- **The crypto review list auto-renames the payee through the SAME rename tree the
+  cash review uses.** The pending line's payee is resolved first, exactly as the
+  cash register's is (`import_review.predict_crypto_payee` → `rename_tree.suggest`,
+  `kind='payee'`): once the user has renamed a counterparty ADDRESS to a friendly
+  name on enough accepted rows (`rename_tree.MIN_FILL`), the next import of that
+  address auto-fills the name instead of showing the raw hex; an address the user
+  has not yet named stays the honest address, because the tree fills only from
+  CORRECTIONS. The content differs from the cash path — a crypto row's stable
+  identifier is the on-chain address, not a bank's statement text, so that address
+  is what drives the rename (`_crypto_rename_source`) — but the path is identical:
+  accepting a corrected payee feeds `rename_tree.learn` (`_learn_crypto_rename`),
+  and only a genuine rename (final ≠ the raw address) teaches anything. Crypto
+  examples are stored with **`txn_id=None`**: the rename corpus reads a live label
+  by joining `rename_examples.txn_id` against the `transactions` table, and a
+  crypto id lives in the overlapping id space of `crypto_transactions`, so
+  forwarding it could let an unrelated cash row's payee masquerade as the label —
+  storing the label directly sidesteps that collision.
+- **The crypto register FUNCTIONS like the cash register (behavioural parity),
+  differing only where the content requires it.** The gaps closed:
+  - a per-row **context menu** (right-click) offering New / Edit / Delete. Edit
+    opens `CryptoTransactionDialog` — the crypto twin of the cash
+    `TransactionDialog` — which shows every field of a posted event on one form;
+    Delete removes the row (both legs of a transfer or all legs of a swap) through
+    `crypto.delete_event`. Both rebuild holdings afterward.
+  - **Every field a posted crypto row legitimately has is editable — inline AND
+    in the Edit dialog.** An import is not an oracle: an address is mistyped, a
+    coin symbol comes through wrong, a source dates a row a day off, so a register
+    you cannot fix is one you cannot trust. The reported gap was that a posted row
+    was inline-editable in only a few cells (payee, memo, action, transfer, an
+    exchange's amount) and its direction was uncorrectable even in the dialog.
+    Now the ONLY read-only cells are the DERIVED running balances (Coin Bal, Cash
+    Bal) — computed, never stored, so nothing there to edit. Every write funnels
+    through `crypto.update_event` (or `link_as_transfer` for the Transfer link),
+    so `crypto.py` stays the sole writer and no second write path appears.
+  - **The DIRECTION is correctable: `SEND` ↔ `RECEIVE`, `BUY` ↔ `SELL`.** A
+    mis-recorded direction was the sharpest edge of the bug — the Action list on a
+    posted row was scoped to its own direction, so the flip was impossible. The
+    Action cell now offers the full same-KIND vocabulary (a coin row cannot become
+    a bare cash DEPOSIT and vice versa, since that swaps a quantity for a fiat
+    amount that is not there), and flipping the action **re-signs the magnitude to
+    match**: the stored quantity keeps its size but takes the new direction's sign,
+    and a trade's fiat amount flips with it (a buy is money out, a sell money in).
+    Coin In / Coin Out render off the quantity's sign and the cash column off the
+    amount's, so the flip moves the coin to the correct side and the payee's
+    meaning with it — the same counterparty is the recipient (`To`) on a send and
+    the sender (`From`) on a receive (`crypto.payee_role` names which, surfaced as
+    the Payee cell's tooltip). Entered as a positive magnitude in the dialog, the
+    sign follows the action, so the user never reasons about the stored sign. The
+    quantity/action consistency this keeps is exactly why the direction used to be
+    frozen; re-signing in one place (`_write_action`, and the dialog's `values()`)
+    is what makes the flip safe to allow.
+  - a trailing **blank quick-entry row**, the cash register's manual-entry
+    gesture, that records a brand-new event through `mammon.crypto` (a wallet's
+    Coin In / Coin Out → `record_wallet_credit` / `record_wallet_debit`, an
+    exchange's trade/deposit → `record_buy` / `record_sell` / `record_cash` /
+    `record_event`). It commits on Enter (not per keystroke as the two-field cash
+    row can): a crypto event spans several fields, so a partial auto-commit would
+    post a wrong transaction. No second write path — `crypto.py` stays the sole
+    writer of `crypto_*`, and a wallet write never touches the cash `transactions`.
+  - **field navigation identical to the cash register**: keyboard-only edit
+    triggers (no double-click-to-edit), a SINGLE click opens the editor, and the
+    coin/text cells use the same focus-select editor the cash Payee/Memo cells use
+    (`FocusSelectDelegate` → `_FocusSelectLineEdit`: Tab replaces the value, a
+    mouse click appends), with the calendar `DateDelegate` on Date.
+  Only the CONTENT differs (coin quantities as Decimal text, a coin-denominated
+  fee, and a wallet's absent Price / Amount / Cash Bal); the behaviour is the same.
+  `show_review` must re-fire the selection handler AFTER revealing the panel:
+  `set_entries` selects row 0 and emits while the panel is still hidden, so the
+  first row — the one already selected, whose re-click changes no selection and
+  emits nothing — is precisely the one whose pending line never appeared.
+- **A coin column is sized from the font, and clamped.** A coin quantity is not a
+  dollar amount: ETH carries 18 decimals, so a real row reads
+  `25.566401739928923937` — 21 characters where a fiat cell needs 9 — and fixed
+  96-110px columns elided them to `0....`. Sizing to CONTENT instead starved the
+  stretched Payee (the 42-character address that identifies the row) to a 21px
+  stub, so the width is measured against a worst-case quantity and clamped at
+  both ends, with a header minimum so no section can collapse. Past the cap the
+  number elides and the cell's tooltip carries the full value: two fields that
+  both need room is a scrollbar problem, not a reason to lose either.
+- **The review PANE has a FOURTH column set for an exchange.** Status, Date,
+  Payee, Memo, **Action**, Coin, Quantity, Price, Amount -- a wallet's fields
+  plus the fiat a custodial account really does move. The cash layout hid the
+  coin entirely (a dollar figure and no asset, for rows whose whole content is
+  "0.25 ETH moved"); the wallet layout would hide what a Buy cost. The ACTION is
+  shown because on this source it is the least certain field, with the export's
+  own product name on its tooltip whenever it differs from the mapped action.
+- **The review PANE has a third column set for a wallet.** The cash layout
+  (Status, Date, Num, Payee, Memo, Amount) and the investment one (Status, Date,
+  Security, Action, Shares, Price, Amount) are both wrong for an address: a wallet
+  row's identity is date + coin + quantity + the counterparty ADDRESS, and no fiat
+  moves, so an Amount column has nothing to put in it. A `kind='wallet'` account
+  gets **Status, Date, Payee, Memo, Coin, Coin In, Coin Out, Fee** — read-only in
+  every cell (the chain is not a guess the way an importer's action mapping is),
+  with the fee shown as `<qty> <SYM>`. A crypto EXCHANGE keeps the cash layout: it
+  really does trade coin for dollars.
+- **The holdings window values coins (+ cash on an exchange) to the account's own
+  balance.** `CryptoHoldingsDialog` lists Coin | Quantity | Cost Basis | Price |
+  Market Value | Gain/Loss from `crypto.holding_values` (priced through the shared
+  `{SYM}-USD` path), and a footer that totals to `crypto.account_valuation().total`
+  -- the SAME number the accounts list shows, so the two cannot drift. On an
+  EXCHANGE the fiat cash sleeve is the last row; a WALLET has no cash sleeve at all,
+  so it gets no Cash row, no Cash total and no `Cash: $0.00` in the register header
+  -- printing a zero states a balance that is not even a concept there. An unpriced
+  coin leaves Price / Market Value / Gain-Loss blank. Get Quotes prices the coins (a
+  coin symbol IS its ticker, so unlike equities there is no name-to-ticker guess to
+  confirm) behind the injectable `crypto.fetch_quotes` source.
+- **Net worth breaks out per coin and per currency, from the Reports menu.**
+  `Reports ▸ Net Worth by Asset…` opens `NetWorthByAssetDialog`: one COLUMN per
+  coin/currency plus a Total, a NATIVE row (a coin's quantity, a currency bucket's
+  own cents) and a USD row converting each through price history / `fx`. Once a
+  ledger holds coin or a foreign currency, one folded dollar figure hides what it
+  is made of -- the same total can be four coins or one. It is a THIN projection of
+  `NetWorthByAssetModel` over `fx.net_worth_by_asset`, which splits exactly the two
+  halves `display_balance` already sums, so a crypto holding is counted EXACTLY
+  once and the Total equals the sidebar's Net Worth strip.
 
 ### 5.8c Backup scoping (one folder per database)
 - Snapshots live in `data/backups/<db-file-name>/`, one folder per database, and
@@ -2238,6 +2845,14 @@ money movement.
   They are all built by `ui/delegates.make_date_edit`, read back through
   `date_edit_iso`. A `QDateEdit` cannot hold a non-date, so nothing downstream
   has to defend against one.
+- **An unbound date field opens on TODAY and is typeable.** With no initial value
+  `make_date_edit` sets the widget to the current date, never the Qt sentinel
+  minimum (1752-09-14) — which rendered as blank AND refused keystrokes, so a
+  field defaulted to it looked broken. A `blank_ok` field also opens on today; the
+  sentinel is reached only when the user clears the field, which `date_edit_iso`
+  reports as `""`. The one deliberate exception is a field that must be blank ON
+  OPEN — a date FILTER, where today would hide all history — which opts in with
+  `setDate(edit.minimumDate())` after building; an ENTRY field never does.
 - Changing the preference **reaches windows already open**:
   `ui/delegates.refresh_date_format` re-stamps every date editor under the main
   window, and displayed dates re-render through `fmt_date`.
@@ -2256,9 +2871,13 @@ money movement.
 - **The new-account dialog's opening date is a date editor too.** Its optional
   opening-date field was the last holdout — a bare `QLineEdit` with a hardcoded
   `YYYY-MM-DD` placeholder read raw, so it ignored the preference and only accepted
-  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso` (blank
-  → `None`), like the reconcile setup: the DISPLAY honors the setting while the
-  stored/returned value stays ISO `YYYY-MM-DD`.
+  ISO. It is now `make_date_edit(blank_ok=True)` read through `date_edit_iso`, like
+  the reconcile setup: the DISPLAY honors the setting while the stored/returned
+  value stays ISO `YYYY-MM-DD`. It **opens on today** and is immediately typeable;
+  the first `make_date_edit(blank_ok=True)` port pinned it to the sentinel minimum,
+  which rendered blank and refused input, so the field looked broken. `blank_ok` is
+  retained only so the user can clear the field back to `None`; the visible default
+  is today.
 
 ### 5.11 Reconcile against a statement
 - Two-pane workspace (debits left, credits right) after a setup dialog that
@@ -2349,6 +2968,33 @@ money movement.
   `Balances…` still edits them. This also carries the posted finance charge's
   transaction id, so a reopened reconcile updates that charge rather than posting
   a duplicate.
+
+### 5.11a Audit log of changes to reconciled transactions
+A reconciled transaction should rarely be changed. Once a row is locked in
+against a statement, editing its amount or date, un-reconciling it, or deleting
+it outright silently throws off the NEXT reconcile of that account, and the
+failure then surfaces far from its cause. So every such change is recorded, on a
+per-account basis, to make that class of problem easy to diagnose after the fact.
+
+- The store is `reconciled_change_log` (Section 4, schema v63). It is written
+  ONLY from `mammon/ledger.py` -- the sole writer of transaction rows -- so the
+  same choke point that enforces the transfer invariants records the audit. The
+  edit path (`_apply_update`, through which `update_transaction`, `void` and
+  `replace` all pass) logs one row per changed field on a transaction whose
+  `reconciled` flag was already set; the delete path (`delete_transaction`) logs
+  one row per surviving value field of a reconciled row it removes. Both legs of
+  a reconciled transfer are audited, each in its own account's log.
+- What is captured per row: the account, the transaction id, an ISO timestamp,
+  the operation (`edit`/`delete`), the field name, and the old and new values as
+  TEXT (amounts as signed cents, stored verbatim -- the log carries no money
+  logic). Only fields that affect a reconcile are tracked (date, num, payee,
+  category, memo, amount, and the cleared/reconciled flags for edits); internal
+  ids are excluded. Editing an UN-reconciled transaction, or reconciling a row
+  for the first time (a 0 -> 1 transition), logs nothing.
+- The read side is `ledger.reconciled_change_log(conn, account_id)` (oldest
+  first). The viewer is a strictly read-only dialog reachable from the account's
+  Details window ("Reconciled change log…"); like all of `ui/` it holds no SQL
+  and no money logic, rendering the stored strings as-is.
 
 ### 5.12 Budgets (roadmap item 6)
 Named per-category monthly spending targets, so "did I overspend Groceries in
@@ -2640,6 +3286,112 @@ A companion utility set (not the core ledger app):
     one. The tool filters by card, not by account, so pointing it at the other
     account's scrape picks them up.
 
+- Amazon invoice ITEMIZATION (`mammon/importers/amazon_items.py` phase-1 core +
+  `mammon/import_review.py` phase-2 review integration, both IMPLEMENTED; see
+  §7.2a for the review/UI wiring). Where §7.2's CSV tool only
+  names the items in a memo, this turns one matched card charge into a proper
+  SPLIT - one leg per item - so each purchase lands in the right category. It is
+  a pure, offline core: it reads the webSlinger invoice report file (the
+  time-tagged JSON that lands in the user's Downloads folder, `priceAccounting`
+  schema assumed present) ON DEMAND via `amazon_invoices.load_orders` and returns
+  plain data structures. **Mammon does not store Amazon data**; the file is
+  re-loaded when needed, across sessions. Nothing here writes the ledger - the
+  legs it emits reach the register only through the review queue and
+  `mammon.ledger`, the single writer, in the later phase.
+
+  Data flow: invoice file in Downloads -> `load_invoice_orders` -> `Order`
+  records (cents fields; LIST prices index-aligned with de-duplicated item
+  titles) -> `allocate_order` / `allocate_charges` -> `ChargeAllocation`
+  (per-item split legs + offsets) -> review rows (§7.2a) -> ledger.
+
+  The proportional-allocation rule (locked; integer cents throughout, no floats,
+  `ROUND_HALF_UP` at the cents boundary during money parsing):
+  - **One leg per item.** Each item's leg gets its share of the *item portion* -
+    the items' cost grossed up by tax - distributed across items by LIST PRICE
+    with **largest-remainder rounding** (ties broken by lowest index), so the item
+    legs sum to the item portion to the cent. TAX is therefore allocated
+    PROPORTIONALLY across the item legs and is never a leg of its own. The item
+    portion is `|charge| + gift_card + rewards`, because the invoice `Grand Total`
+    (the charge) is already net of the offsets. List prices weight the split but
+    are never summed to reconcile it - the charge is authoritative.
+  - **Gift card and reward points are CATEGORIES, not accounts.** A partial
+    gift-card / rewards payment adds a balancing money-IN leg categorised
+    `gift cards` / `reward points`. This is the locked override of the earlier
+    design, which modelled the offset as a transfer to a synthetic
+    `[Amazon Gift Card]` / `[Amazon Rewards]` account: **no account is ever
+    created here.** The offset legs net against the proportionally allocated item
+    legs to reach the charge. (Worked example: subtotal $80, tax $6, gift card
+    $30 -> charge -$56.00; items list $30 / $50 -> `-32.25`, `-53.75`,
+    `gift cards +30.00` -> sum `-56.00`.)
+  - **Multiple charges per order.** Amazon bills per shipment, so one order can be
+    charged several times; each charge is allocated INDEPENDENTLY from its own
+    item subset and is self-consistent to its own cents (`allocate_charges`). Which
+    shipment consumed a shared gift card is not in the scrape, so the caller
+    supplies the per-charge offset (0 by default); this core does not guess.
+  - **Exactness is the invariant.** Every allocation satisfies
+    `sum(legs) == charge` in signed integer cents; any residual (only possible
+    when list prices are missing and the fallback puts the money on one visible
+    `Amazon - unallocated` leg) is folded deterministically so the sum never
+    silently breaks.
+  - Item legs are left UNCATEGORISED for the user to fill from a dropdown ordered
+    by `default_category_order`: the fixed fallback list (`household`, `groceries`,
+    `electronics accessories`, `computer accessories`, `electronic hardware`,
+    `computer hardware`) first, then the categories the user has historically put
+    on Amazon rows (`amazon_categories_from_history`, READ-ONLY). Ordering only -
+    it overrides no learned rule and proposes nothing the data has not shown.
+  - **Refunds are out of scope** (not on an invoice; handled manually). The
+    allocator rejects a credit outright.
+
+### 7.2a Amazon invoice itemization: review integration (phase 2, IMPLEMENTED)
+
+Phase 1 (§7.2) parses an invoice and allocates the split; phase 2 wires that into
+the register's import-review flow (`mammon/import_review.py`, the SOLE review-flow
+writer) so the item legs actually reach the ledger. Locked behavior:
+
+- **Loading is on demand and never stored (requirement A6).** The cash register
+  offers a `Load Amazon Invoices…` action (gear menu, and a button on the
+  `ImportReviewPanel` — cash accounts only; investment/crypto registers share the
+  panel but hide it). It opens a file picker defaulting to the user's Downloads
+  folder — where the webSlinger Amazon script drops its time-tagged report — and
+  calls `import_review.build_amazon_review`, which reads the file ON DEMAND and
+  returns in-memory review rows. Amazon data is NEVER persisted: the proposed
+  per-item split rides on `ReviewEntry.amazon_alloc` (transient), no `review_items`
+  row records it, and `persist_entries` neither reads nor writes it. The same file
+  can be re-loaded across sessions.
+- **Each order becomes one card review row, classified NEW or MATCHING
+  (requirement A8).** `_find_amazon_match` mirrors `_find_match`'s date+amount tier
+  — same signed cents within +/- `DEFAULT_WINDOW_DAYS`, closest date first — and
+  ADDS a payee gate: the register line must already read as Amazon
+  (`payee LIKE '%amazon%'`), so an unrelated same-day, same-amount charge is never
+  silently itemized. A whole-transaction transfer is excluded (a transfer cannot
+  be split), and a line already claimed by an earlier order in the same load is
+  skipped.
+- **A MATCH updates the existing charge's splits; it never duplicates.**
+  `accept_amazon_match` replaces the matched register line's splits/categories with
+  the invoice's per-item split via `ledger.set_splits`, leaving its date and amount
+  (the user's already-accepted line) untouched, and fills the payee only if it was
+  blank. `accept_amazon_new` posts a fresh `Amazon` card charge carrying the split
+  via `ledger.add_transaction` + `ledger.set_splits`. A lone-leg order (one item,
+  no offset) collapses to a plain categorised transaction, since a split needs two
+  legs. Because the accept re-derives nothing from storage, re-loading the file
+  after a NEW accept re-classifies the now-existing charge as MATCHING, so a second
+  pass updates rather than duplicates.
+- **Item legs default to `household` (requirement A1).** `build_amazon_review`
+  passes `default_category_order`'s head (`household`) as the item-leg category, a
+  sensible default the user can correct; the offsets keep the `gift cards` /
+  `reward points` categories from §7.2. The fallback dropdown ordering
+  (`household`, then the user's past-Amazon categories) never overrides a learned
+  rule.
+- **Orders with no card charge create no review row.** An order fully covered by a
+  gift-card balance (`charged_cents == 0`) and refunds (out of scope, A7) are
+  skipped — there is nothing to reconcile on the card register.
+- **No second write path.** `import_review` stays the sole review-flow writer and
+  `ledger` the sole transaction writer; every Amazon accept funnels through
+  `ledger.add_transaction` / `ledger.set_splits`. The UI stays a thin projection:
+  the panel opens the file dialog and calls the domain build/accept functions,
+  holding no SQL and no money math, and routes accept to the Amazon path by the
+  presence of `amazon_alloc` on the row.
+
 ### 7.3 The MCP server: asking an LLM about the ledger (roadmap item 3)
 - `python -m mammon.mcp_server [--db PATH] [--transport stdio|streamable-http|sse]`
   serves the ledger over the Model Context Protocol. The tool surface is
@@ -2657,8 +3409,12 @@ A companion utility set (not the core ledger app):
   accident may migrate it (the lesson of the acceptance tests). A newer one is
   refused too.
 - **Aggregates first, identifiers never.** The tools wrap the report
-  computations (§5.9a), balances, holdings, upcoming scheduled payments and
-  loan schedules; a bounded `transactions` listing, `search` and a `query`
+  computations (§5.9a), balances, holdings (`holdings` for securities,
+  `crypto_holdings` for coin positions -- quantity, cost basis, price, market
+  value and gain per coin, plus the cash sleeve and total, with the wallet address
+  in `account_number` blanked like every other identifier), upcoming scheduled
+  payments and loan schedules; a bounded `transactions` listing, `search` and a
+  `query`
   (read-only SQL, with `schema`) cover the long tail, each capped by a
   `limit` with a `truncated` flag. `accounts.account_number`, `url` and
   `download_config` are never returned by any tool: the SQL tool runs under an

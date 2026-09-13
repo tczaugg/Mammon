@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mammon import db, importers, investments, ledger
-from mammon.importers.ofx import parse_ofx_positions, unmapped_investment_actions
+from mammon import db, fx, importers, investments, ledger
+from mammon.importers.ofx import (
+    parse_ofx,
+    parse_ofx_positions,
+    unmapped_investment_actions,
+)
 from mammon.importers.record import (
     dollars_to_cents,
     normalize_payee,
@@ -1066,6 +1070,83 @@ def test_ofx_checknum_captured_into_num(conn, tmp_path):
         "SELECT num FROM transactions WHERE fitid=?", ("C1",)
     ).fetchone()
     assert row["num"] == "4567"
+
+
+# ---------------------------------------------------------------------------
+# OFX <CURDEF>: the statement's own currency reaches the account it creates.
+# OFX is the only import format that states a currency at all -- QIF has no such
+# field in any version of its spec -- so this is the one automatic path by which a
+# foreign-currency account arrives correctly denominated.
+# ---------------------------------------------------------------------------
+OFX_EURO = """OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX>
+<BANKMSGSRSV1><STMTTRNRS><STMTRS>
+<CURDEF>EUR
+<BANKACCTFROM><ACCTID>999888777</ACCTID></BANKACCTFROM>
+<BANKTRANLIST>
+<STMTTRN>
+<TRNTYPE>DEBIT
+<DTPOSTED>20260210
+<TRNAMT>-40.00
+<FITID>E1
+<NAME>BOULANGERIE
+</STMTTRN>
+</BANKTRANLIST>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1>
+</OFX>
+"""
+
+
+def test_parse_ofx_carries_statement_currency():
+    # The parser stays database-free: it only stamps the code onto the records.
+    recs = parse_ofx(OFX_EURO, default_account="Euro Chk")
+    assert recs and all(r.account_currency == "EUR" for r in recs)
+
+
+def test_ofx_curdef_sets_new_account_currency(conn, tmp_path):
+    importers.import_file(conn, _write(tmp_path, "eur.ofx", OFX_EURO), account="Euro Chk")
+    assert fx.get_account_currency(conn, _acct_id(conn, "Euro Chk")) == "EUR"
+
+
+def test_ofx_via_review_creates_account_in_its_currency(conn, tmp_path):
+    # The live OFX path routes through review (multi_account_file is False for a
+    # single-account file), which creates the account itself -- so CURDEF has to
+    # reach create_account on that path too, not only in core's resolver.
+    importers.import_single_account(
+        conn, account="Euro Rev", path=_write(tmp_path, "eur2.ofx", OFX_EURO))
+    assert fx.get_account_currency(conn, _acct_id(conn, "Euro Rev")) == "EUR"
+
+
+def test_ofx_without_curdef_keeps_the_usd_default(conn, tmp_path):
+    importers.import_file(conn, _write(tmp_path, "wf.ofx", OFX_BANK), account="WF Checking")
+    assert fx.get_account_currency(conn, _acct_id(conn, "WF Checking")) == "USD"
+
+
+def test_qif_import_leaves_the_usd_default(conn, tmp_path):
+    # QIF cannot state a currency, so a QIF-created account must stay on the base.
+    # QIF_CHECK carries its own !Account block, so the account it creates is the
+    # one the FILE names -- there is no place in the format to state a currency.
+    importers.import_file(conn, _write(tmp_path, "chk.qif", QIF_CHECK))
+    assert fx.get_account_currency(conn, _acct_id(conn, "Checking")) == "USD"
+
+
+def test_ofx_curdef_never_restamps_an_existing_account(conn, tmp_path):
+    # Currency is immutable after creation (SRD 5.4a): a EUR statement imported
+    # into an account already holding USD history must not reinterpret it.
+    aid = ledger.create_account(conn, "Euro Chk", "checking", currency="USD")
+    importers.import_file(conn, _write(tmp_path, "eur.ofx", OFX_EURO), account="Euro Chk")
+    assert fx.get_account_currency(conn, aid) == "USD"
+
+
+def test_ofx_malformed_curdef_falls_back_to_usd(conn, tmp_path):
+    # A junk code must not brand an account with a value the user cannot change
+    # without rebuilding the account.
+    bad = OFX_EURO.replace("<CURDEF>EUR", "<CURDEF>Euros!")
+    importers.import_file(conn, _write(tmp_path, "bad.ofx", bad), account="Odd Chk")
+    assert fx.get_account_currency(conn, _acct_id(conn, "Odd Chk")) == "USD"
 
 
 OFX_INVST = """<OFX>

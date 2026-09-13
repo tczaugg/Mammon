@@ -501,3 +501,49 @@ def test_typing_a_genuinely_new_category_is_left_alone(qapp, conn, accounts):
     combo.setEditText("Vacaton")
     accept_category_text(combo, take_first=True)
     assert combo.currentText() == "Vacaton"
+
+
+# ---------------------------------------------------------------------------
+# make_date_edit: an unbound field opens on TODAY and is typeable -- never the Qt
+# sentinel minimum (1752-09-14), which rendered blank AND refused keystrokes.
+# Regression for the New Account dialog opening-date field.
+# ---------------------------------------------------------------------------
+def test_make_date_edit_defaults_to_today_and_is_editable(qapp):
+    from PyQt5.QtCore import QDate
+
+    edit = delegates.make_date_edit()
+    # Opens on today, a real date -- not the Qt sentinel minimum.
+    assert edit.date() == QDate.currentDate()
+    assert edit.date() != edit.minimumDate()
+    assert delegates.date_edit_iso(edit) == QDate.currentDate().toString("yyyy-MM-dd")
+    # And is a normal, typeable editor -- not disabled or read-only.
+    assert edit.isEnabled()
+    assert edit.isReadOnly() is False
+
+
+def test_make_date_edit_blank_ok_also_opens_on_today(qapp):
+    """Even the optional (blank_ok) variant defaults to today; the sentinel is
+    reached only when the user explicitly clears the field."""
+    from PyQt5.QtCore import QDate
+
+    edit = delegates.make_date_edit(blank_ok=True)
+    assert edit.date() == QDate.currentDate()
+    assert delegates.date_edit_iso(edit) == QDate.currentDate().toString("yyyy-MM-dd")
+    # Cleared back to the sentinel -> "" (blank_ok still honoured).
+    edit.setDate(edit.minimumDate())
+    assert delegates.date_edit_iso(edit) == ""
+
+
+def test_make_date_edit_round_trips_typed_input_through_date_edit_iso(qapp):
+    """A date typed in the user's display format is parsed by the widget and read
+    back as ISO -- the point of the type/calendar editor. make_date_edit and
+    fmt_date share the date-format preference, so this holds under any persisted
+    format."""
+    from mammon.ui.models import fmt_date
+
+    iso = "2025-03-04"
+    edit = delegates.make_date_edit()
+    # Simulate the user typing the date as it is shown in their chosen format.
+    edit.lineEdit().setText(fmt_date(iso))
+    edit.interpretText()
+    assert delegates.date_edit_iso(edit) == iso

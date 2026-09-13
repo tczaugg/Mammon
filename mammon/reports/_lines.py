@@ -220,3 +220,28 @@ def category_subtree(conn, category_ids: Iterable[int]) -> set[int]:
         out.add(cid)
         stack.extend(children.get(cid, []))
     return out
+
+
+def top_level_ids_for_names(conn, names: Optional[Iterable[str]]) -> Optional[set]:
+    """The ids of the TOP-LEVEL categories called ``names``, plus every
+    descendant. ``None`` in, ``None`` out -- "no filter", never "nothing".
+
+    This is the id-space translation of the customization bar's category
+    check-list, which speaks top-level NAMES (that is what it lists) while the
+    listing report filters on category ids (SRD 5.9c). Restricting to a top-level
+    category always INCLUDES its sub-categories: the user's case is "just my
+    Church spending, expanded to see the subcategories", so dropping the subtree
+    would report zero for exactly the question being asked.
+
+    Matching is by name against the top level only -- a child that happens to
+    share a top-level name is not a top-level pick, and is reached through its
+    own parent instead.
+    """
+    if names is None:
+        return None
+    wanted = {str(n) for n in names}
+    tops = [int(r["id"]) for r in
+            conn.execute("SELECT id, name FROM categories "
+                         "WHERE parent_id IS NULL").fetchall()
+            if r["name"] in wanted]
+    return category_subtree(conn, tops)

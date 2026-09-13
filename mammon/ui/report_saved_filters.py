@@ -56,17 +56,34 @@ def filter_state_to_dict(bar) -> dict:
     Reads only the bar's public getters, so it stays a thin projection with no
     SQL and no money arithmetic. ``account_ids`` and ``categories`` are ``None``
     when the picker means "no filter" (every item checked), exactly mirroring the
-    getters. Category names are sorted so the serialization is stable and two
-    equal selections compare equal.
+    getters. Every list is sorted so the serialization is stable and two equal
+    selections compare equal.
+
+    ``category_ids`` is the authoritative half and the only one
+    :func:`apply_filter_state` reads when it has any: `ledger.rename_category`
+    keeps the id, so a name-keyed set silently drops a category the moment the
+    user renames it, and ids are also the only spelling that can say "Taxes:
+    Federal but not Taxes:Property". ``categories`` -- the top-level NAMES -- is
+    still written beside it so a set stays readable by anything that only
+    understands names, and so a set written HERE still loads in a build that
+    predates the id-keyed picker.
+
+    The ``category_ids`` key is omitted entirely when the picker is in its
+    no-filter state: there is nothing to key by id, and a no-filter set then
+    serializes byte-for-byte as it did before the tree existed.
     """
     cats = bar.selected_categories()
-    return {
+    ids = bar.selected_category_ids()
+    state = {
         "start": bar.start_iso(),
         "end": bar.end_iso(),
         "include_hidden": bool(bar.include_hidden()),
         "account_ids": bar.selected_account_ids(),
         "categories": None if cats is None else sorted(cats),
     }
+    if ids is not None:
+        state["category_ids"] = sorted(ids)
+    return state
 
 
 def apply_filter_state(bar, state) -> None:
@@ -88,8 +105,16 @@ def apply_filter_state(bar, state) -> None:
         bar.hidden_check.setChecked(bool(state.get("include_hidden")))
     if "account_ids" in state:
         _apply_account_ids(bar, state.get("account_ids"))
-    if "categories" in state:
-        _apply_categories(bar, state.get("categories"))
+    # Ids win when the set has them; a set written before the picker went
+    # id-keyed (or one whose names are not real categories) falls back to
+    # resolving the NAMES against the tree, which is the back-compat path.
+    ids = state.get("category_ids")
+    if ids:
+        _apply_category_ids(bar, ids)
+    elif state.get("categories") is not None:
+        _apply_categories(bar, state["categories"])
+    elif "category_ids" in state or "categories" in state:
+        _apply_category_ids(bar, None)
 
 
 # Accept ``from_dict`` as an alias so callers can spell the inverse either way.
@@ -110,17 +135,33 @@ def _apply_account_ids(bar, ids) -> None:
             Qt.Checked if int(it.data(Qt.UserRole)) in wanted else Qt.Unchecked)
 
 
+def _apply_category_ids(bar, ids) -> None:
+    if bar.category_list is None:
+        return
+    if ids is None:
+        bar.mark_categories()
+        return
+    bar.set_selected_category_ids(ids)
+
+
 def _apply_categories(bar, names) -> None:
-    lst = bar.category_list
-    if lst is None:
+    """The legacy NAME-keyed path: tick the top-level rows so named together with
+    their whole subtrees -- which is what ticking a top level has always meant --
+    and leave everything else clear.
+
+    Matching on NAME here, rather than resolving the names to ids first, is
+    deliberate: a bar built with an explicit ``categories=`` list may be showing
+    synthesized buckets that are not rows in ``categories`` at all, and resolving
+    those through ids would tick nothing. The state left behind is still id-keyed
+    -- every later read goes through
+    :meth:`ReportFilterBar.selected_category_ids` -- so a set loaded this way is
+    immune to the next rename even though it arrived as names."""
+    if bar.category_list is None:
         return
     if names is None:
         bar.mark_categories()
         return
-    wanted = set(names)
-    for i in range(lst.count()):
-        it = lst.item(i)
-        it.setCheckState(Qt.Checked if it.text() in wanted else Qt.Unchecked)
+    bar.set_selected_category_names(names)
 
 
 # ---------------------------------------------------------------------------

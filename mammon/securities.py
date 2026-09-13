@@ -41,6 +41,25 @@ Renaming is GLOBAL here, unlike ``investments.apply_security_renames``, which is
 scoped to one account because a user fixing a typo means it in the register they
 are looking at. Merging two spellings of one security is the opposite: leaving
 account 58 on the old spelling is precisely the bug being fixed.
+
+**An OPTION CONTRACT IS NOT A SPELLING OF ITS UNDERLYING**, and this module used
+to think it was. Everything above assumes the two strings in front of it are two
+names for one continuous instrument; a contract and its stock are two
+instruments, and this file cannot tell, because ``investments.ticker_of`` reads
+the first token of "XYZ 260117C00150000 XYZ 17JAN26 150 C" as "XYZ" and a QIF
+option block states the ROOT in its ``S`` field -- so :func:`suggest` proposed
+renaming the contract to the stock and marked it confident, i.e. recorded fact.
+:func:`apply_splits` then executes such a proposal DESTRUCTIVELY: ``_rekey``
+copies what fits and DELETES the rest, so the contract's transactions, prices
+and holdings are absorbed into the stock's with nothing left to undo from.
+
+Three refusals close that, all keyed on ``investments.looks_like_option`` (a
+deliberately conservative OSI-shape test, documented there as interim): an
+option is never proposed for an identity change and never confident; a split
+whose target identity already belongs to a differently-classified security is
+refused outright; and :func:`fetch_ticker` returns None for a contract, so no
+stock price is ever filed against one. A real instrument classifier replaces the
+shape test later; the refusals are the part that must not wait for it.
 """
 from __future__ import annotations
 
@@ -167,8 +186,23 @@ def suggest(symbol: str, ticker: Optional[str] = None) -> Split:
 
     With no source ticker, the leading token is guessed and ``confident`` is
     False, so the caller must confirm -- see the module docstring. A bare token
-    could equally be a ticker already ("FIPDX") or a plan fund's whole name."""
+    could equally be a ticker already ("FIPDX") or a plan fund's whole name.
+
+    AN OPTION CONTRACT IS NEVER GIVEN A NEW IDENTITY HERE, and never confidently.
+    Both routes below would otherwise propose renaming the contract to its
+    underlying: the heuristic because ``investments.ticker_of`` reads the first
+    token of "XYZ 260117C00150000 XYZ 17JAN26 150 C" as "XYZ", and the stated
+    route because a QIF option block puts the ROOT in its ``S`` field -- which
+    turns the worst proposal in the file into recorded fact, and
+    :func:`apply_splits` executes it by deleting the contract's rows. A stated
+    root is a statement about the underlying, not about the contract's
+    identity."""
     raw = str(symbol or "").strip()
+    if investments.looks_like_option(raw):
+        # No key change and no description to write: the only safe proposal for
+        # a contract is to leave it exactly as it is. confident=False so that a
+        # caller applying only its confident splits touches nothing at all.
+        return Split(raw, raw, None, confident=False)
     if ticker is not None:
         stated = ticker.strip()
         if not stated:
@@ -209,9 +243,18 @@ def fetch_ticker(conn, symbol: str) -> Optional[str]:
        nothing in the data to show it happened.
 
     So a recorded absence suppresses only the guess, never the safe case.
+
+    Rule 0, ahead of all three: an OPTION CONTRACT has no ticker to ask about.
+    Its stated ``securities.ticker`` is the underlying's, so rule 1 would file
+    the STOCK's closing price into the contract's ``price_history`` every time
+    quotes ran -- and a contract is not worth its underlying at any point in its
+    life. None until option quoting exists, which means the contract simply has
+    no price series rather than a wrong one.
     """
     raw = str(symbol or "").strip()
     if not raw:
+        return None
+    if investments.looks_like_option(raw):
         return None
     stated = recorded_ticker(conn, raw)
     if stated:
@@ -329,11 +372,21 @@ def apply_splits(conn, splits: Iterable[Split]) -> dict:
     4. Holdings are rebuilt LAST, for every account touched -- a merge changes
        the lot replay itself, so a patched checkpoint would carry a pre-merge
        cost basis forward from every year that already had one.
+
+    Raises ``ValueError``, BEFORE touching anything, for a split whose target
+    identity already belongs to a differently-classified security -- today that
+    means an option contract and a plain security in either direction. Step 2's
+    ``INSERT OR IGNORE`` + ``DELETE`` is a merge, and a merge of two different
+    instruments is the one outcome here that no re-run can undo: the losing
+    rows are deleted, not shadowed. Refusing the whole batch is deliberate; a
+    partial application would leave the file half-merged, which is worse than
+    doing nothing and telling the caller why.
     """
     report = {"renamed": 0, "named": 0, "merged": []}
     todo = [s for s in splits if s.old]
     if not todo:
         return report
+    _refuse_cross_kind_merges(conn, todo)
     accounts: set = set()
     for s in todo:
         if s.changes_key:
@@ -353,6 +406,33 @@ def apply_splits(conn, splits: Iterable[Split]) -> dict:
         investments.rebuild_holdings(conn, account_id)
     report["merged"] = sorted(set(report["merged"]))
     return report
+
+
+def _refuse_cross_kind_merges(conn, splits: Iterable[Split]) -> None:
+    """Raise if any split would merge one KIND of instrument into another.
+
+    :func:`_rekey` is destructive by construction -- the losing rows are deleted
+    once the surviving identity has them -- so this check has to happen before
+    the first statement of the batch runs, not per-split inside the loop.
+
+    "Differently classified" is, for now, exactly "one side is an option
+    contract and the other is not" (``investments.looks_like_option``, a
+    conservative OSI-shape test). That is the collapse this whole guard exists
+    for: a QIF states the root ticker on an option block, something proposes
+    renaming ``XYZ 260117C00150000`` to ``XYZ``, and the contract's transactions,
+    prices and holdings are silently absorbed into the stock's. Only a target
+    that ALREADY EXISTS is refused here, because that is the case where rows are
+    destroyed."""
+    existing = stored_symbols(conn)
+    for s in splits:
+        if not s.changes_key or s.symbol not in existing:
+            continue
+        if investments.looks_like_option(s.old) != \
+                investments.looks_like_option(s.symbol):
+            raise ValueError(
+                f"refusing to merge {s.old!r} into {s.symbol!r}: one is an "
+                "option contract and the other is not, so this would delete a "
+                "distinct instrument's rows rather than rename a security")
 
 
 def _rekey(conn, old: str, new: str) -> int:

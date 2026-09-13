@@ -1,4 +1,4 @@
-"""Tests for the Income Chart's 'Other' rollup and drill-down (SRD 5.8d).
+"""Tests for the Income Chart's 'Other' rollup and drill-down (SRD 5.9c).
 
 The Income Chart mirrors the asset-allocation pie's readability rule: a long
 tail of tiny income categories is folded into ONE ``Other`` slice (everything

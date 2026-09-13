@@ -20,20 +20,31 @@ from PyQt5.QtCore import (QAbstractTableModel, QDate, QModelIndex, Qt, QTimer,
 from PyQt5.QtGui import QBrush, QColor
 
 from mammon import (categorize, category_tree, crypto, import_review,
-                    investments, ledger)
+                    investments, ledger, undo)
 from mammon.ui import style
 
 
-_UNCAT_WARNING_ICON = None
+_WARNING_ICON = None
 
 
-def _uncategorized_warning_icon():
-    """A small yellow warning triangle (with an exclamation) shown before
-    '--Split--' when a split still holds an uncategorized remainder. Built lazily
-    and cached -- a QPixmap needs a live QApplication, so it cannot be a module
-    constant."""
-    global _UNCAT_WARNING_ICON
-    if _UNCAT_WARNING_ICON is None:
+def warning_triangle_icon():
+    """The app's ONE warning mark: a small amber triangle with an exclamation.
+
+    Drawn in exactly one place so every use is the same shape in the same colour.
+    Two callers, and they assert the same thing -- "this number is not the whole
+    story":
+
+      * the register's Category cell, before '--Split--', when a split still
+        holds an uncategorized remainder (money the user has yet to assign);
+      * the account bar's Net Worth strip, IN PLACE OF the total, when a foreign
+        balance has no FX rate and so cannot be folded in (SRD 5.4a).
+
+    Built lazily and cached -- a QPixmap needs a live QApplication, so it cannot
+    be a module constant. Named without a leading underscore because widgets.py
+    uses it too; it was ``_uncategorized_warning_icon`` while the register was its
+    only caller, and that name would now misdescribe half of its uses."""
+    global _WARNING_ICON
+    if _WARNING_ICON is None:
         from PyQt5.QtGui import QIcon, QPixmap, QPainter, QPolygonF, QPen
         from PyQt5.QtCore import QPointF
         pm = QPixmap(16, 16)
@@ -48,8 +59,8 @@ def _uncategorized_warning_icon():
         p.drawLine(QPointF(8, 6), QPointF(8, 10))   # exclamation stroke
         p.drawPoint(QPointF(8, 12))                 # exclamation dot
         p.end()
-        _UNCAT_WARNING_ICON = QIcon(pm)
-    return _UNCAT_WARNING_ICON
+        _WARNING_ICON = QIcon(pm)
+    return _WARNING_ICON
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +102,36 @@ def fmt_cents(cents) -> str:
     return f"{sign}{c // 100:,}.{c % 100:02d}"
 
 
-def fmt_money(cents, symbol: bool = True) -> str:
-    """Integer cents -> ``$1,234.56`` (leading ``$``, sign before the symbol:
+# Common ISO 4217 currencies -> the glyph shown before the amount. Anything not
+# listed renders with its bare code as a prefix (e.g. ``SEK 1,234.56``), so a
+# never-mapped currency is still LABELLED rather than silently shown as dollars.
+# This is display formatting only -- no conversion or arithmetic happens here
+# (that is :mod:`mammon.fx`'s job); the UI stays a thin projection.
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "CAD": "CA$", "AUD": "A$", "NZD": "NZ$", "HKD": "HK$",
+    "SGD": "S$", "EUR": "€", "GBP": "£", "JPY": "¥",
+    "CNY": "CN¥", "CHF": "CHF ", "INR": "₹", "KRW": "₩",
+    "MXN": "MX$", "BRL": "R$", "RUB": "₽", "ZAR": "R", "SEK": "SEK ",
+    "NOK": "NOK ", "DKK": "DKK ", "PLN": "zł", "ILS": "₪",
+}
+
+
+def currency_symbol(code) -> str:
+    """The prefix glyph for an ISO 4217 code (``$`` for USD or a blank/None code).
+    An unmapped code returns itself with a trailing space so the amount is still
+    labelled (e.g. ``THB 500.00``). Presentation only -- no money math."""
+    if not code:
+        return "$"
+    code = str(code).strip().upper()
+    return _CURRENCY_SYMBOLS.get(code, f"{code} ")
+
+
+def fmt_money(cents, symbol: bool = True, currency=None) -> str:
+    """Integer cents -> ``$1,234.56`` (leading symbol, sign before the symbol:
     ``-$5.00``). Used for category subtotals and net worth. ``symbol=False``
-    falls back to :func:`fmt_cents`."""
+    falls back to :func:`fmt_cents`. ``currency`` chooses the leading glyph
+    (default ``$`` for USD); the value is still rendered straight from integer
+    cents -- NO conversion happens here."""
     if cents is None:
         return ""
     if not symbol:
@@ -102,7 +139,20 @@ def fmt_money(cents, symbol: bool = True) -> str:
     c = int(cents)
     sign = "-" if c < 0 else ""
     c = abs(c)
-    return f"{sign}${c // 100:,}.{c % 100:02d}"
+    return f"{sign}{currency_symbol(currency)}{c // 100:,}.{c % 100:02d}"
+
+
+def fmt_amount_ccy(cents, currency=None) -> str:
+    """A per-account amount in the account's OWN currency. The base currency (or a
+    blank one) renders bare like :func:`fmt_cents` -- the dense classic look the
+    all-USD ledger has always had -- while a FOREIGN currency is tagged with its
+    symbol/code so a non-base account's balance is never mistaken for base
+    dollars. Presentation only; the cents are unconverted."""
+    from mammon import fx
+    code = str(currency).strip().upper() if currency else ""
+    if not code or code == fx.BASE_CURRENCY:
+        return fmt_cents(cents)
+    return fmt_money(cents, currency=code)
 
 
 def fmt_date(iso, fmt: str | None = None) -> str:
@@ -288,6 +338,12 @@ class RegisterModel(QAbstractTableModel):
     # PayeeTwoLineDelegate reads it; every other cell returns "".
     SECOND_LINE_ROLE = Qt.UserRole + 1
 
+    # Custom role on the Tag cell: the (name, color) chips to paint -- the row's
+    # own tags plus its split legs' tags (deduped), each mapped to its identity
+    # color (None when uncolored). The TagDelegate (one-line) and the two-line
+    # payee tag zone both read it; every other cell returns [].
+    TAG_COLORS_ROLE = Qt.UserRole + 2
+
     committed = pyqtSignal()          # a write hit the DB; refresh siblings
     error = pyqtSignal(str)           # a write failed; surface to the user
     # A write that genuinely ALTERED or CREATED a transaction, carrying its id.
@@ -304,7 +360,16 @@ class RegisterModel(QAbstractTableModel):
         super().__init__(parent)
         self.conn = conn
         self.account_id = account_id
+        # Session-scoped undo/redo for this register. Records the inverse of each
+        # edit and replays it THROUGH the ledger (no second write path); see
+        # mammon/undo.py. Ctrl+Z / Ctrl+Y are wired to model.undo()/redo().
+        self.undo_stack = undo.UndoManager(conn)
         self._rows: list[dict] = []
+        # Tag identity colors (casefolded name -> #rrggbb) and split-leg tag names
+        # by parent txn id, both refreshed on reload so the Tag cell can paint a
+        # colored square per tag (the row's own tags unioned with its legs').
+        self._tag_colors: dict[str, str] = {}
+        self._leg_tags: dict[int, list[str]] = {}
         self._new: dict = {}          # blank quick-entry buffer
         # A not-yet-accepted "pending" review row: an editable register row a
         # NEW import-review item opens, holding {"entry": ReviewEntry, "buf":
@@ -368,6 +433,8 @@ class RegisterModel(QAbstractTableModel):
     def reload(self):
         self.beginResetModel()
         self._rows = ledger.register_rows(self.conn, self.account_id)
+        self._tag_colors = ledger.tag_colors(self.conn)
+        self._leg_tags = ledger.split_leg_tags_by_txn(self.conn, self.account_id)
         self._view = self._project()
         self._new = {}
         # QuickFill's pre-entered fields for the blank row (see quickfill_fields):
@@ -539,6 +606,13 @@ class RegisterModel(QAbstractTableModel):
     def account_name(self) -> str:
         acct = ledger.get_account(self.conn, self.account_id)
         return acct["name"] if acct else ""
+
+    def account_currency(self) -> str:
+        """This register's account native currency ('USD' when unset -- the base).
+        Read through :mod:`mammon.fx` so the normalisation lives in the domain
+        layer, not here."""
+        from mammon import fx
+        return fx.get_account_currency(self.conn, self.account_id)
 
     def is_scheduled_row(self, row) -> bool:
         """True for a pending pre-entry (``scheduled=1``)."""
@@ -842,6 +916,11 @@ class RegisterModel(QAbstractTableModel):
                 return self._second_line_text(row)
             return ""
 
+        if role == self.TAG_COLORS_ROLE:
+            if col == self.TAG and not blank and not pending:
+                return self._tag_swatches(row)
+            return []
+
         if role == Qt.DisplayRole:
             if pending:
                 txt = self._pending_text(col)
@@ -868,7 +947,7 @@ class RegisterModel(QAbstractTableModel):
             # exactly in front of '--Split--'. Blank/pending rows have no split.
             if not blank and not pending and col == self.CATEGORY:
                 if self._view[row].get("uncat_split", 0):
-                    return _uncategorized_warning_icon()
+                    return warning_triangle_icon()
             return None
 
         if role == Qt.ToolTipRole:
@@ -936,6 +1015,21 @@ class RegisterModel(QAbstractTableModel):
         if r["cleared"]:
             return "c"
         return ""
+
+    def _tag_swatches(self, row) -> list:
+        """The ``(name, color)`` chips the Tag cell paints for this row: the row's
+        own tags, then any tags its SPLIT LEGS carry (deduped case-insensitively),
+        each mapped to its identity color (``None`` when uncolored). The union
+        matches :func:`reports._lines._line_tags`, so a split's per-leg tags
+        surface on the collapsed register row without double-counting."""
+        r = self._view[row]
+        names = list(ledger.parse_tags(r.get("tag") or ""))
+        seen = {n.casefold() for n in names}
+        for n in self._leg_tags.get(r.get("id"), []):
+            if n.casefold() not in seen:
+                seen.add(n.casefold())
+                names.append(n)
+        return [(n, self._tag_colors.get(n.casefold())) for n in names]
 
     def _row_text(self, row, col) -> str:
         r = self._view[row]
@@ -1020,8 +1114,10 @@ class RegisterModel(QAbstractTableModel):
     def commit_blank_returning_id(self):
         """Commit the blank quick-entry row exactly like :meth:`commit_blank`,
         but return the id of the transaction it created -- or None when the row
-        is not ready (no date + amount) or when it produced a transfer, which
-        cannot be split. This lets the register's Split gesture treat a
+        is not ready (no date + amount). A transfer typed on the blank row
+        returns the leg in THIS account, which is splittable like any other
+        transfer (ledger.set_splits moves the transfer onto one split line).
+        This lets the register's Split gesture treat a
         half-typed NEW transaction the way it already treats a pending review
         row: persist it through the ledger first, then open the split editor on
         the row it created (Quicken splits the SAVED transaction). It reloads
@@ -1162,9 +1258,10 @@ class RegisterModel(QAbstractTableModel):
         the blank-row buffer synchronously -- a fresh connection and a racing
         Enter/closeEditor commit both see the finished row immediately, with no
         double insert -- and only the view refresh is pushed to _reload_timer."""
-        # Id of the plain transaction this creates, so the blank-row Split gesture
+        # Id of the transaction this creates, so the blank-row Split gesture
         # (commit_blank_returning_id) can open the split editor on it. A transfer
-        # leaves it None: a transfer cannot be split. reload() below does not
+        # records the leg in THIS account -- a transfer is splittable now, with
+        # the transfer becoming one LINE of the split. reload() below does not
         # touch it, so it survives to the caller.
         self._last_new_id = None
         net = abs(parse_amount(v.get("deposit"))) - abs(parse_amount(v.get("payment")))
@@ -1176,15 +1273,20 @@ class RegisterModel(QAbstractTableModel):
             payee = (v.get("payee") or "").strip() or None
             if target is not None and net != 0:
                 if net < 0:  # money out of this account
-                    ledger.create_transfer(self.conn, self.account_id, target, date,
-                                           -net, memo=v.get("memo") or None,
-                                           num=v.get("num") or None, cleared=cleared,
-                                           payee=payee)
+                    from_id, to_id = ledger.create_transfer(
+                        self.conn, self.account_id, target, date,
+                        -net, memo=v.get("memo") or None,
+                        num=v.get("num") or None, cleared=cleared,
+                        payee=payee)
+                    self._last_new_id = from_id
                 else:        # money into this account
-                    ledger.create_transfer(self.conn, target, self.account_id, date,
-                                           net, memo=v.get("memo") or None,
-                                           num=v.get("num") or None, cleared=cleared,
-                                           payee=payee)
+                    from_id, to_id = ledger.create_transfer(
+                        self.conn, target, self.account_id, date,
+                        net, memo=v.get("memo") or None,
+                        num=v.get("num") or None, cleared=cleared,
+                        payee=payee)
+                    self._last_new_id = to_id
+                self.undo_stack.record_add([from_id, to_id], transfer=True)
             else:
                 user_typed_cat = bool(category) and target is None
                 if user_typed_cat:
@@ -1206,6 +1308,8 @@ class RegisterModel(QAbstractTableModel):
                 # A category the USER typed is an override that teaches history.
                 if user_typed_cat and payee:
                     categorize.record_user_categorization(self.conn, payee, cid)
+                if self._last_new_id is not None:
+                    self.undo_stack.record_add([self._last_new_id])
         except (ValueError, KeyError) as exc:
             self.error.emit(str(exc))
             return False
@@ -1275,6 +1379,7 @@ class RegisterModel(QAbstractTableModel):
                     "A transfer's Category must be an [Account]; delete and "
                     "re-enter it to make it a plain category.")
                 return False
+        undo_before = self.undo_stack.capture(txn["id"])
         try:
             ledger.update_transaction(self.conn, txn["id"], **fields)
             if convert_target is not None:
@@ -1286,6 +1391,9 @@ class RegisterModel(QAbstractTableModel):
         except (ValueError, KeyError) as exc:
             self.error.emit(str(exc))
             return False
+        # A convert/retarget is detected as a structural change and drops the redo
+        # stack rather than recording a step it could not cleanly invert.
+        self.undo_stack.record_edit(txn["id"], undo_before)
         self.reload()
         self.committed.emit()
         return True
@@ -1294,7 +1402,47 @@ class RegisterModel(QAbstractTableModel):
         txn = self.txn_at(row)
         if not txn:
             return False
+        # A transfer deletes BOTH mirror legs, so snapshot both before deleting so
+        # Undo can recreate the whole transfer. Read the pair id from the ledger
+        # (authoritative) rather than the projected view row.
+        full = ledger.get_transaction(self.conn, txn["id"])
+        is_transfer = full is not None and full["transfer_account_id"] is not None
+        ids = [int(txn["id"])]
+        if is_transfer and full["transfer_pair_id"] is not None:
+            ids.append(int(full["transfer_pair_id"]))
+        snaps = self.undo_stack.capture_many(ids)
         ledger.delete_transaction(self.conn, txn["id"])
+        self.undo_stack.push_delete(snaps, transfer=is_transfer)
+        self.reload()
+        self.committed.emit()
+        return True
+
+    # ---- undo / redo (Ctrl+Z / Ctrl+Y, wired from the Edit menu) -------------
+    def can_undo(self) -> bool:
+        return self.undo_stack.can_undo()
+
+    def can_redo(self) -> bool:
+        return self.undo_stack.can_redo()
+
+    def undo_label(self):
+        return self.undo_stack.undo_label()
+
+    def redo_label(self):
+        return self.undo_stack.redo_label()
+
+    def undo(self) -> bool:
+        """Reverse the most recent register edit, replaying its inverse through
+        the ledger, then refresh. ``committed`` also refreshes any OTHER open
+        register, so a transfer's mirror side updates too."""
+        if not self.undo_stack.undo():
+            return False
+        self.reload()
+        self.committed.emit()
+        return True
+
+    def redo(self) -> bool:
+        if not self.undo_stack.redo():
+            return False
         self.reload()
         self.committed.emit()
         return True
@@ -1333,6 +1481,11 @@ class RegisterModel(QAbstractTableModel):
                 changed += 1
             else:
                 skipped += 1
+        # A batch is one act, not individually undoable in this version: it is a
+        # barrier that drops the redo stack (so a stale redo cannot replay across
+        # it) while leaving earlier undo history intact.
+        if changed:
+            self.undo_stack.barrier()
         self.reload()
         self.committed.emit()
         return changed, skipped
@@ -1467,6 +1620,7 @@ class RegisterModel(QAbstractTableModel):
         if not txn:
             return False
         before = self._sound_snapshot(txn["id"])
+        undo_before = self.undo_stack.capture(txn["id"])
         try:
             fn(txn)
         except (ValueError, KeyError) as exc:
@@ -1479,6 +1633,10 @@ class RegisterModel(QAbstractTableModel):
         # ignore, which costs you the signal for real saves too.
         if self._sound_snapshot(txn["id"]) != before:
             self.transactionSaved.emit(int(txn["id"]))
+        # Record the inverse for Undo. A no-op write records nothing; a transfer
+        # convert/retarget (which has no clean ledger inverse) drops the redo
+        # stack instead of pushing a bad step (see undo.record_edit).
+        self.undo_stack.record_edit(txn["id"], undo_before)
         if defer_reload:
             # One pending reload at a time. Several edits committed in the same
             # turn (or a reload that itself triggers another write) would
@@ -1531,6 +1689,58 @@ class RegisterModel(QAbstractTableModel):
 # ---------------------------------------------------------------------------
 # investment register model
 # ---------------------------------------------------------------------------
+@dataclass
+class InvestmentFilter:
+    """What the investment register's filter bar narrows to -- the investment
+    parallel of :class:`RegisterFilter`, over the investment columns.
+
+    ``text`` is a case-insensitive substring over the action, the security /
+    category, the memo AND the formatted amount, so typing part of a symbol, a
+    fee's description or ``520`` all find their rows. ``action`` matches one
+    action verb exactly (case-insensitive). Amount bounds are absolute cents over
+    the row's own stored amount (a buy and a sell of the same size both fall in a
+    range). An empty field is no constraint; :meth:`is_empty` means the whole
+    filter is a no-op."""
+
+    text: str = ""
+    date_from: str = ""            # ISO, inclusive
+    date_to: str = ""              # ISO, inclusive
+    amount_min: int | None = None  # absolute cents
+    amount_max: int | None = None
+    action: str = ""
+
+    def is_empty(self) -> bool:
+        return not (self.text.strip() or self.date_from or self.date_to
+                    or self.amount_min is not None or self.amount_max is not None
+                    or self.action.strip())
+
+    def matches(self, r: dict) -> bool:
+        needle = self.text.strip().lower()
+        if needle:
+            hay = " | ".join(
+                str(r.get(k) or "")
+                for k in ("action", "symbol", "memo", "category_label"))
+            amt = r.get("amount")
+            if amt is not None:
+                hay = f"{hay} | {fmt_cents(abs(int(amt)))}"
+            if needle not in hay.lower():
+                return False
+        if self.date_from and r["date"] < self.date_from:
+            return False
+        if self.date_to and r["date"] > self.date_to:
+            return False
+        if self.amount_min is not None or self.amount_max is not None:
+            magnitude = abs(int(r.get("amount") or 0))
+            if self.amount_min is not None and magnitude < self.amount_min:
+                return False
+            if self.amount_max is not None and magnitude > self.amount_max:
+                return False
+        want = self.action.strip().lower()
+        if want and (r.get("action") or "").strip().lower() != want:
+            return False
+        return True
+
+
 class InvestmentRegisterModel(QAbstractTableModel):
     """One investment account's activity as a table with the classic Quicken
     investment columns (the user's data/InvestmentRegister.png).
@@ -1561,6 +1771,14 @@ class InvestmentRegisterModel(QAbstractTableModel):
         self.account_id = account_id
         self._rows: list = []
         self._symbol_filter = None       # None -> show every security
+        # The VIEW: _rows (application order) projected through the current sort
+        # and free-text filter -- the exact pattern the cash RegisterModel uses.
+        # Every row-indexed method reads _view; only reload() and _project() touch
+        # _rows. (The security combo pre-filters into _rows so a filtered row still
+        # carries its correct running share balance; sort/filter layer on top.)
+        self._view: list = []
+        self._sort: tuple[int, int] = (self.DATE, Qt.AscendingOrder)
+        self._filter: InvestmentFilter | None = None
         # The not-yet-accepted review row, edited in place at the bottom of the
         # register before it is committed -- the same gesture the cash register
         # offers. {"entry": ReviewEntry, "buf": {field: text}} or None.
@@ -1622,11 +1840,11 @@ class InvestmentRegisterModel(QAbstractTableModel):
         return self._pending is not None
 
     def pending_row(self) -> int:
-        """Index of the pending row -- always last, after the real history."""
-        return len(self._rows)
+        """Index of the pending row -- always last, after the shown history."""
+        return len(self._view)
 
     def is_pending_row(self, row) -> bool:
-        return self._pending is not None and row == len(self._rows)
+        return self._pending is not None and row == len(self._view)
 
     def pending_entry(self):
         return self._pending["entry"] if self._pending else None
@@ -1684,19 +1902,187 @@ class InvestmentRegisterModel(QAbstractTableModel):
         if self._symbol_filter is not None:
             rows = [r for r in rows if r["symbol"] == self._symbol_filter]
         self._rows = rows
+        self._view = self._project()
         self.endResetModel()
+
+    # ---- sort + filter (the view's projection, parity with the cash register) --
+    def sort(self, column, order=Qt.AscendingOrder):   # QAbstractItemModel API
+        self.set_sort(column, order)
+
+    def set_sort(self, column, order=Qt.AscendingOrder) -> None:
+        """Order the displayed rows by ``column``. Date ascending is the ledger
+        order itself, so it is the identity projection; Date descending its
+        reverse. Ties in any other column fall back to (date, id), so the result
+        is stable across reloads."""
+        column = int(column)
+        order = Qt.DescendingOrder if order == Qt.DescendingOrder else Qt.AscendingOrder
+        if (column, order) == self._sort:
+            return
+        self._sort = (column, order)
+        self._reproject()
+
+    def sort_state(self) -> tuple[int, int]:
+        return self._sort
+
+    def set_filter(self, flt: "InvestmentFilter | None") -> None:
+        """Narrow the displayed rows to those ``flt`` matches (``None`` or an
+        empty filter shows everything). The pending review row is unaffected."""
+        if flt is not None and flt.is_empty():
+            flt = None
+        if flt == self._filter:
+            return
+        self._filter = flt
+        self._reproject()
+
+    def filter_state(self) -> "InvestmentFilter | None":
+        return self._filter
+
+    def view_counts(self) -> tuple[int, int]:
+        """``(shown, total)`` real rows -- the filter bar's 'Showing n of m'."""
+        return len(self._view), len(self._rows)
+
+    def _reproject(self) -> None:
+        self.beginResetModel()
+        self._view = self._project()
+        self.endResetModel()
+
+    def _project(self) -> list:
+        rows = self._rows
+        flt = self._filter
+        if flt is not None and not flt.is_empty():
+            rows = [r for r in rows if flt.matches(r)]
+        column, order = self._sort
+        if column == self.DATE:
+            return list(rows) if order == Qt.AscendingOrder else list(reversed(rows))
+        return sorted(rows, key=self._sort_key(column),
+                      reverse=(order == Qt.DescendingOrder))
+
+    def _sort_key(self, column):
+        """A total order for one column, (date, id) breaking ties. Quantity/Price/
+        Share Bal sort by their Decimal magnitude (blank counts as 0); the money
+        columns by their signed cents; Action and Security/Category by text."""
+        def dec(key):
+            def f(r):
+                v = r.get(key)
+                if v in (None, ""):
+                    return Decimal(0)
+                try:
+                    return Decimal(str(v))
+                except (InvalidOperation, ValueError):
+                    return Decimal(0)
+            return f
+
+        def cents(key):
+            return lambda r: int(r.get(key) or 0)
+
+        keys = {
+            self.ACTION: lambda r: (self._action_label(r) or "").lower(),
+            self.SECURITY: lambda r: (r.get("symbol") or r.get("category_label") or "").lower(),
+            self.QUANTITY: dec("quantity"),
+            self.PRICE: dec("price"),
+            self.SHARE_BAL: dec("share_bal"),
+            self.INV_AMT: cents("inv_amt"),
+            self.CASH_AMT: cents("cash_amt"),
+            self.CASH_BAL: cents("cash_bal"),
+        }
+        primary = keys.get(column, lambda r: r["date"])
+        return lambda r: (primary(r), r["date"], r["id"])
+
+    # ---- multi-row batch edits, void, find/replace (parity) ---------------
+    def txn_ids_at(self, rows) -> list[int]:
+        """The ``investment_transactions`` ids behind display rows, skipping the
+        pending row and any cash-only transfer leg. A cash leg's id belongs to the
+        ``transactions`` table -- a DIFFERENT id space -- so feeding it to
+        :func:`investments.get_investment_txn` would silently hit an unrelated
+        investment row (the shared-id-space hazard)."""
+        out = []
+        for row in rows:
+            t = self.txn_at(row)
+            if t and not t.get("cash_leg"):
+                out.append(int(t["id"]))
+        return out
+
+    def apply_to_investments(self, txn_ids, fn) -> tuple[int, int]:
+        """Run ``fn(txn_row)`` for each id; ``fn`` returns True when it changed the
+        row, False to report it skipped (a ValueError/KeyError counts as skipped
+        too). Returns ``(changed, skipped)``. Does NOT rebuild holdings or reload
+        -- the widget does that once, after (matching the single-edit path)."""
+        changed = skipped = 0
+        for tid in txn_ids:
+            t = investments.get_investment_txn(self.conn, tid)
+            if t is None:
+                continue
+            try:
+                ok = fn(t)
+            except (ValueError, KeyError):
+                ok = False
+            if ok:
+                changed += 1
+            else:
+                skipped += 1
+        return changed, skipped
+
+    def batch_set_memo(self, txn_ids, text: str) -> tuple[int, int]:
+        """Set the memo on many investment rows (``""`` clears it)."""
+        value = (text or "").strip() or None
+        return self.apply_to_investments(
+            txn_ids,
+            lambda t: investments.update_investment_fields(self.conn, t["id"], memo=value))
+
+    def batch_void(self, txn_ids) -> tuple[int, int]:
+        return self.apply_to_investments(
+            txn_ids, lambda t: investments.void_investment(self.conn, t["id"]))
+
+    def batch_delete(self, txn_ids) -> tuple[int, int]:
+        return self.apply_to_investments(
+            txn_ids, lambda t: investments.delete_investment(self.conn, t["id"]))
+
+    def void_row(self, row) -> bool:
+        """Quicken's Void on one investment row (see
+        :func:`investments.void_investment`)."""
+        t = self.txn_at(row)
+        if t is None or t.get("cash_leg"):
+            return False
+        return investments.void_investment(self.conn, t["id"])
+
+    def find_replace(self, field: str, find: str, replace: str) -> int:
+        """Case-insensitive substring find-and-replace over one text field
+        (``memo`` or ``symbol``) across this account's shown rows, each change
+        written through :func:`investments.update_investment_fields`. Returns the
+        number of rows changed. (The security field also has the richer, holding-
+        fusing rename in :func:`investments.plan_security_rename`; this is the memo
+        counterpart plus a plain symbol substitution.)"""
+        if field not in ("memo", "symbol"):
+            raise ValueError(f"cannot find/replace {field!r}")
+        needle = find or ""
+        if not needle:
+            return 0
+        low = needle.lower()
+        changed = 0
+        for r in list(self._rows):
+            if r.get("cash_leg"):
+                continue
+            current = r.get(field) or ""
+            if low not in current.lower():
+                continue
+            new = re.sub(re.escape(needle), lambda _m: replace, current,
+                         flags=re.IGNORECASE)
+            investments.update_investment_fields(
+                self.conn, int(r["id"]), **{field: new or None})
+            changed += 1
+        return changed
 
     def account_name(self) -> str:
         acct = ledger.get_account(self.conn, self.account_id)
         return acct["name"] if acct else ""
 
     def txn_at(self, row):
-        return self._rows[row] if 0 <= row < len(self._rows) else None
+        return self._view[row] if 0 <= row < len(self._view) else None
 
     def row_for_txn(self, txn_id) -> int:
-        """Index of the row for ``txn_id`` in the CURRENT (possibly
-        security-filtered) view, or -1 if it is not shown."""
-        for i, r in enumerate(self._rows):
+        """Index of the row for ``txn_id`` in the CURRENT (security-filtered,
+        sorted, text-filtered) view, or -1 if it is not shown."""
+        for i, r in enumerate(self._view):
             if r["id"] == txn_id:
                 return i
         return -1
@@ -1705,7 +2091,7 @@ class InvestmentRegisterModel(QAbstractTableModel):
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        return len(self._rows) + (1 if self._pending is not None else 0)
+        return len(self._view) + (1 if self._pending is not None else 0)
 
     def columnCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.HEADERS)
@@ -1762,9 +2148,9 @@ class InvestmentRegisterModel(QAbstractTableModel):
                 ct = style.cell_text_color()
                 return QBrush(QColor(ct)) if ct else None
             return None
-        if not (0 <= index.row() < len(self._rows)):
+        if not (0 <= index.row() < len(self._view)):
             return None  # stale/out-of-range index after a shrink+reload
-        r = self._rows[index.row()]
+        r = self._view[index.row()]
         col = index.column()
         if role in (Qt.DisplayRole, Qt.EditRole):
             return self._cell_text(r, col)
@@ -1799,8 +2185,15 @@ class InvestmentRegisterModel(QAbstractTableModel):
         # every other action shows verbatim as imported.
         act = r["action"] or ""
         if act.strip().lower() == "cash":
-            return "MiscInc" if (r.get("cash_amt") or 0) >= 0 else "MiscExp"
-        return act
+            label = "MiscInc" if (r.get("cash_amt") or 0) >= 0 else "MiscExp"
+        else:
+            label = act
+        # A voided row has no payee to stamp (investment_transactions has none),
+        # so the **VOID** mark lives on the memo; surface it on the Action cell --
+        # the register's parallel to the cash register's voided payee.
+        if investments.is_void_investment(r):
+            return f"{ledger.VOID_PREFIX} {label}".strip()
+        return label
 
     def _cell_text(self, r, col) -> str:
         if col == self.DATE:
@@ -1835,6 +2228,39 @@ class InvestmentRegisterModel(QAbstractTableModel):
         return ""
 
 
+def _norm_action(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def _fmv_cents(price, quantity):
+    """Fair market value in cents from a per-unit price and a quantity, or 0 when
+    the source recorded no price. Used to SEED a row that is being turned into a
+    trade: an imported coin row states what the coin was worth, which is a far
+    better starting point than an empty cell the user is blocked on."""
+    if not price:
+        return 0
+    try:
+        value = Decimal(str(price)) * abs(Decimal(str(quantity or "0")))
+    except (InvalidOperation, ValueError):
+        return 0
+    return int((value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _coin_qty(text):
+    """A typed coin quantity as a positive :class:`Decimal`, or ``None`` when the
+    cell is blank, unparseable or zero. Quantities are Decimal text everywhere in
+    the crypto layer (fractional and multi-decimal precision is the point), so
+    the blank quick-entry row parses them as Decimals, never cents."""
+    s = str(text or "").replace(",", "").strip()
+    if not s:
+        return None
+    try:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None
+    return abs(d) if d != 0 else None
+
+
 class CryptoRegisterModel(QAbstractTableModel):
     """One crypto wallet's activity as a table, the crypto twin of
     :class:`InvestmentRegisterModel`.
@@ -1848,15 +2274,93 @@ class CryptoRegisterModel(QAbstractTableModel):
     and the gas ``fee`` label; the view holds NO quantity or cents math. A swap's
     two legs render with a shared ``OUT->IN`` label so they read as one paired
     trade; a wallet transfer renders as ``[Other Wallet]`` (the mirror model, in
-    coin). READ-ONLY: crypto events are entered by import, not inline editing."""
+    coin).
 
-    (DATE, ACTION, COIN, QUANTITY, PRICE,
-     COIN_BAL, AMOUNT, CASH_BAL, FEE) = range(9)
+    BEHAVIOURAL PARITY WITH THE CASH REGISTER. Events still arrive mostly by
+    import, but the register is no longer read-only: a trailing BLANK quick-entry
+    row (:meth:`commit_blank`) enters a new event by hand through
+    :mod:`mammon.crypto`, the correctable posted columns edit inline, and the
+    widget's context menu edits/deletes a row through :meth:`apply_edit` /
+    :meth:`delete_txn`. Only the CONTENT differs from the cash register (coin
+    quantities as Decimal text, not USD cents; a wallet has no price/amount/cash
+    column); the behaviour is the same, and every write still funnels through
+    :mod:`mammon.crypto`, the sole writer of the ``crypto_*`` tables.
+
+    THE COLUMN SET DEPENDS ON THE ACCOUNT KIND, and that is the whole point of the
+    redesign. An EXCHANGE account is custodial: it holds a fiat cash sleeve, buys
+    and sells coin for dollars, and its rows genuinely carry a per-unit price, a
+    signed dollar amount and a running cash balance. A WALLET is a single address:
+    coin arrives and leaves, the network fee is paid IN THE COIN, and there is no
+    dollar leg anywhere -- so Price, Amount and Cash Bal are not merely empty for
+    it, they are meaningless, and showing them invites a reading of the register
+    that is simply false. Its increases and decreases get their own columns (the
+    source's Value_IN / Value_OUT), because on-chain those are different events
+    with different counterparties and one signed column hides that.
+
+    USD is not absent from a wallet, it is just not on the ROW: each coin is a
+    security valued at quantity x market price, and that valuation happens at the
+    holdings and net-worth layers."""
+
+    # Stable column KEYS. They are not positions: each kind lists the keys it
+    # shows, in order, and the model maps position -> key. The exchange list is
+    # deliberately keys 0..9 in order, so the constants still read as indices for
+    # an exchange account (and every existing caller keeps working).
+    (DATE, ACTION, COIN, PAYEE, QUANTITY, PRICE,
+     COIN_BAL, AMOUNT, CASH_BAL, FEE, COIN_IN, COIN_OUT, MEMO,
+     TRANSFER) = range(14)
+
     # The COIN column does double duty: a trade/income shows its coin symbol, a
-    # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair.
-    HEADERS = ["Date", "Action", "Coin / Wallet", "Quantity", "Price",
+    # wallet transfer shows [Other Wallet], a swap shows the OUT->IN pair. PAYEE is
+    # the on-chain counterparty (From on a coin credit, To on a coin debit) that
+    # crypto.register_rows carries straight through from crypto_transactions.payee.
+    _HEADER_TEXT = {
+        DATE: "Date", ACTION: "Action", COIN: "Coin / Wallet", PAYEE: "Payee",
+        QUANTITY: "Quantity", PRICE: "Price", COIN_BAL: "Coin Bal",
+        AMOUNT: "Amount", CASH_BAL: "Cash Bal", FEE: "Fee",
+        COIN_IN: "Coin In", COIN_OUT: "Coin Out", MEMO: "Memo",
+        TRANSFER: "Transfer",
+    }
+    # MEMO is APPENDED rather than slotted in beside Payee, so the ten constants
+    # above still equal their own positions in this layout and every existing
+    # caller keeps working. It has to be here at all because an exchange's source
+    # says things its columns cannot ("Sold 2 ETH for 1222.01 USD", "Withdrawal
+    # to <bank>") -- that sentence is often the only record of what a row was.
+    _EXCHANGE_COLUMNS = (DATE, ACTION, COIN, PAYEE, TRANSFER, QUANTITY, PRICE,
+                         COIN_BAL, AMOUNT, CASH_BAL, FEE, MEMO)
+    _WALLET_COLUMNS = (DATE, ACTION, COIN, PAYEE, TRANSFER, MEMO,
+                       COIN_OUT, COIN_IN, COIN_BAL, FEE)
+    # Kept for the exchange layout's callers; HEADERS is the exchange header row.
+    # Spelled out rather than derived: a class-body comprehension cannot see the
+    # class's own names.
+    HEADERS = ["Date", "Action", "Coin / Wallet", "Payee", "Quantity", "Price",
                "Coin Bal", "Amount", "Cash Bal", "Fee"]
-    _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL)
+    _NUMERIC = (QUANTITY, PRICE, COIN_BAL, AMOUNT, CASH_BAL, COIN_IN, COIN_OUT)
+
+    committed = pyqtSignal()          # a write hit the DB; refresh siblings
+    error = pyqtSignal(str)           # a write failed; surface it to the user
+
+    # What may be corrected on a row that is ALREADY POSTED. An import is not an
+    # oracle -- an address is mistyped, a coin symbol comes through wrong, a
+    # source dates a row a day off -- and a register you cannot fix is a register
+    # you cannot trust, so EVERY field the row legitimately has is editable, both
+    # here inline and through the Edit dialog. The ONLY cells that stay read-only
+    # are the DERIVED running balances (Coin Bal, Cash Bal): they are computed
+    # from the events, never stored, so there is nothing there to edit. The Coin
+    # In / Coin Out pair edits the ONE signed quantity between them, so only the
+    # side the row's direction currently uses is offered (see flags); the
+    # direction itself is changed through the Action cell, which re-signs the
+    # magnitude to match (see _write_action). PAYEE is free text; the TRANSFER
+    # gesture (naming one of your own accounts) lives in its own column and means
+    # a transfer here exactly as it does in every other register.
+    _POSTED_EDITABLE = (DATE, ACTION, COIN, PAYEE, TRANSFER, MEMO,
+                        COIN_OUT, COIN_IN, FEE)
+    # An EXCHANGE row shows the fiat trade instead of the coin-in/out pair, so its
+    # editable set is the signed Quantity, the per-unit Price and the fiat Amount
+    # rather than Coin In / Coin Out. Everything else matches the wallet: an
+    # imported coin-only row can be turned into a full trade by filling Price and
+    # Amount, and a mis-recorded direction is flipped through Action.
+    _POSTED_EDITABLE_EXCHANGE = (DATE, ACTION, COIN, PAYEE, TRANSFER,
+                                 QUANTITY, PRICE, AMOUNT, FEE, MEMO)
 
     def __init__(self, conn, account_id, parent=None):
         super().__init__(parent)
@@ -1864,7 +2368,679 @@ class CryptoRegisterModel(QAbstractTableModel):
         self.account_id = account_id
         self._rows: list = []
         self._symbol_filter = None        # None -> show every coin
+        self.is_wallet = crypto.is_wallet_account(
+            crypto.get_account(conn, account_id))
+        self._columns = (self._WALLET_COLUMNS if self.is_wallet
+                         else self._EXCHANGE_COLUMNS)
+        # The not-yet-accepted review row, shown at the bottom of the register
+        # before it is committed -- the same gesture the cash and investment
+        # registers offer. {"entry": ReviewEntry, "buf": {field: text}} or None.
+        self._pending = None
+        # The blank quick-entry row's typed values, {field: text}. Always present
+        # (rowCount adds one trailing blank row) so a new crypto transaction can
+        # be entered by hand, exactly as the cash register's blank row allows.
+        self._new: dict = {}
         self.reload()
+
+    # ---- pending review row ------------------------------------------------
+    # What a user may CORRECT on a chain row, and nothing more. Date, coin,
+    # quantity and fee are facts the chain reported -- editing them would be
+    # inventing history, and the review list is meant to be ground truth. What is
+    # genuinely a judgement is the ACTION (the chain cannot tell a plain receive
+    # from a staking reward, an airdrop or mined coin), the PAYEE (an address is
+    # the truthful default, but a name the user recognises is more useful), and
+    # the MEMO. Those three are exactly what import_review._save_crypto accepts
+    # as overrides.
+    _PENDING_EDITABLE = (ACTION, PAYEE, TRANSFER, MEMO)
+    # An EXCHANGE row carries fiat the source may have got wrong (a trade's cash
+    # leg, a deposit), so its AMOUNT is correctable too. A wallet's is not: there
+    # is no amount on a wallet row to correct.
+    _PENDING_EDITABLE_EXCHANGE = (ACTION, PAYEE, TRANSFER, MEMO, AMOUNT)
+
+    # The trailing BLANK quick-entry row -- the cash register's manual-entry
+    # gesture, brought to the crypto register. Its editable cells are the ones a
+    # user fills to state a brand-new event; the running balances (Coin Bal, Cash
+    # Bal) are DERIVED and never typed, so they stay read-only even here. A wallet
+    # types its increase or decrease into Coin In / Coin Out (coin-native, no USD
+    # on the row); an exchange types a signed Quantity/Price/Amount trade.
+    _BLANK_EDITABLE = (DATE, ACTION, COIN, PAYEE, TRANSFER, MEMO,
+                       COIN_OUT, COIN_IN, FEE)
+    _BLANK_EDITABLE_EXCHANGE = (DATE, ACTION, COIN, PAYEE, TRANSFER,
+                                QUANTITY, PRICE, AMOUNT, FEE, MEMO)
+
+    def set_pending(self, entry) -> None:
+        """Open the not-yet-accepted row at the bottom for a NEW review entry,
+        seeded from what the importer read off the chain.
+
+        The PAYEE is auto-filled from the learned rename tree exactly as the cash
+        register's pending row is (payee resolved first): when the user has
+        already renamed this counterparty before, the friendly name appears here
+        instead of the raw address. With nothing learned yet the address stands
+        as the honest default -- the tree only ever fills from CORRECTIONS, so it
+        never invents a name for an address the user has not taught it."""
+        m = entry.mapped
+        self.beginResetModel()
+        self._pending = {"entry": entry, "buf": {
+            "action": (m.action or "RECEIVE").upper(),
+            "payee": import_review.predict_crypto_payee(self.conn, m),
+            "memo": m.memo or "",
+            "transfer": "",
+            "amount": fmt_cents(abs(m.amount_cents or 0)) if m.amount_cents else "",
+        }}
+        self.endResetModel()
+
+    def _pending_editable(self):
+        return (self._PENDING_EDITABLE if self.is_wallet
+                else self._PENDING_EDITABLE_EXCHANGE)
+
+    def clear_pending(self) -> None:
+        if self._pending is None:
+            return
+        self.beginResetModel()
+        self._pending = None
+        self.endResetModel()
+
+    def has_pending(self) -> bool:
+        return self._pending is not None
+
+    def pending_row(self) -> int:
+        """Index of the pending row -- after the real history, before the blank
+        quick-entry row (which is always last, exactly as the cash register lays
+        its pending and blank rows out)."""
+        return len(self._rows) if self._pending is not None else -1
+
+    def is_pending_row(self, row) -> bool:
+        return self._pending is not None and row == len(self._rows)
+
+    # ---- blank quick-entry row -------------------------------------------
+    def blank_row(self) -> int:
+        """Index of the trailing blank quick-entry row -- always last, after the
+        real history and any pending review line."""
+        return len(self._rows) + (1 if self._pending is not None else 0)
+
+    def is_blank_row(self, row) -> bool:
+        return row == self.blank_row()
+
+    def _blank_editable(self):
+        return (self._BLANK_EDITABLE if self.is_wallet
+                else self._BLANK_EDITABLE_EXCHANGE)
+
+    def pending_entry(self):
+        return self._pending["entry"] if self._pending else None
+
+    def pending_values(self) -> dict:
+        """The edited fields, as :func:`import_review.save_new` takes them. No
+        quantity, price or amount: a wallet row's numbers come from the chain and
+        are not editable, and there is no fiat leg to state."""
+        if self._pending is None:
+            return {}
+        buf = self._pending["buf"]
+        values = {
+            "action": (buf.get("action") or "").strip().upper(),
+            "payee": (buf.get("payee") or "").strip(),
+            "memo": (buf.get("memo") or "").strip() or None,
+            # Consumed by the widget AFTER the row is saved: a transfer needs a
+            # real transaction id on both sides before the two can be linked.
+            "transfer_account": (buf.get("transfer") or "").strip() or None,
+        }
+        if not self.is_wallet:
+            # The fiat leg keeps the SIGN the import derived: an edit changes the
+            # magnitude, and money out of the sleeve stays money out.
+            original = self._pending["entry"].mapped.amount_cents or 0
+            cents = parse_amount(buf.get("amount"))
+            values["amount_cents"] = -abs(cents) if original < 0 else cents
+        return values
+
+    def pending_actions(self) -> list:
+        """The actions the pending row may take, given the DIRECTION the chain
+        already fixed. A coin-out row can only be a send; a coin-in row is where
+        the real choice lives (receive / reward / interest / airdrop / mining /
+        fork), because the chain shows coin arriving and cannot say why."""
+        if self._pending is None:
+            return []
+        act = (self._pending["entry"].mapped.action or "").strip().upper()
+        if not self.is_wallet:
+            # An exchange's vocabulary is the full one: a row can be a trade, a
+            # transfer between the user's venues, in-kind income, or a bare cash
+            # movement -- and which it is is exactly what the source's product
+            # names leave ambiguous. Offer the actions of the SAME direction, so
+            # a coin-out row cannot be turned into a deposit by a mis-click.
+            if act in crypto.CASH_ACTIONS:
+                return sorted(crypto.CASH_ACTIONS)
+            if act in crypto.REMOVE_ACTIONS:
+                return sorted(crypto.REMOVE_ACTIONS)
+            return sorted(crypto.ADD_ACTIONS)
+        if act in crypto.WALLET_DEBIT_ACTIONS:
+            return sorted(crypto.WALLET_DEBIT_ACTIONS)
+        return sorted(crypto.WALLET_CREDIT_ACTIONS)
+
+    _TRANSFER_RE = re.compile(r"^\s*\[(?P<name>.+?)\]\s*$")
+
+    def _write_posted(self, index, value) -> bool:
+        """Commit one correction to an already-posted event.
+
+        Every write goes through :func:`mammon.crypto.update_event` (or
+        :func:`link_as_transfer`), so ``crypto.py`` stays the sole writer of the
+        ``crypto_*`` tables and the transfer-mirror invariants keep being
+        enforced in exactly one place.
+
+        The reload is DEFERRED and failures are reported through :attr:`error`
+        rather than a message box, for the same reason: both a model reset and a
+        modal would run inside the editor's teardown -- the ``setModelData`` heap
+        hazard CLAUDE.md records -- freeing the editor the frame still holds."""
+        if not (0 <= index.column() < len(self._columns)):
+            return False
+        col = self._columns[index.column()]
+        if col not in (self._POSTED_EDITABLE if self.is_wallet
+                       else self._POSTED_EDITABLE_EXCHANGE):
+            return False
+        row = self.txn_at(index.row())
+        if row is None:
+            return False
+        txn_id = int(row["id"])
+        text = str(value or "").strip()
+        try:
+            if col == self.PAYEE:
+                # Free text, exactly as in the cash register. A payee is a NAME,
+                # not a link; resolving an account here was the wrong field.
+                crypto.update_event(self.conn, txn_id, payee=text or None)
+            elif col == self.DATE:
+                # value is a QDate from the calendar editor (or typed text);
+                # _to_iso normalises both to ISO the domain layer stores.
+                iso = _to_iso(value)
+                if iso:
+                    crypto.update_event(self.conn, txn_id, date=iso)
+            elif col == self.COIN:
+                crypto.update_event(self.conn, txn_id, symbol=text.upper() or None)
+            elif col == self.QUANTITY:
+                # A signed column, but the sign is the ACTION's, not the user's:
+                # a magnitude is typed and the direction re-signs it, exactly as
+                # the Edit dialog does, so quantity can never disagree with action.
+                signed = self._signed_qty(row, text)
+                if signed is not None:
+                    crypto.update_event(self.conn, txn_id, quantity=signed)
+            elif col in (self.COIN_IN, self.COIN_OUT):
+                # The two wallet columns are one signed quantity; the column the
+                # user typed into fixes the sign (In = +, Out = -). Only the
+                # active side is editable (see flags), so this keeps direction.
+                mag = _coin_qty(text)
+                if mag is not None:
+                    signed = -mag if col == self.COIN_OUT else mag
+                    crypto.update_event(self.conn, txn_id, quantity=str(signed))
+            elif col == self.PRICE:
+                crypto.update_event(self.conn, txn_id, price=text or None)
+            elif col == self.FEE:
+                fsym, fqty = self._parse_fee(text, row["symbol"])
+                crypto.update_event(self.conn, txn_id,
+                                    fee_symbol=fsym, fee_quantity=fqty)
+            elif col == self.TRANSFER:
+                self._write_transfer(row, txn_id, text)
+            elif col == self.AMOUNT:
+                # UNLINK FIRST. The cash leg in the other account was created
+                # from this row's amount and is found by it, so changing the
+                # amount before removing it leaves the old leg unfindable -- and
+                # re-linking then adds a SECOND one, double-counting the money.
+                other = row["transfer_account_id"]
+                if other is not None:
+                    crypto.unlink_transfer(self.conn, txn_id)
+                crypto.update_event(self.conn, txn_id,
+                                    amount=self._signed_amount(row, text))
+                if other is not None:
+                    crypto.link_as_transfer(self.conn, txn_id, int(other))
+            elif col == self.MEMO:
+                crypto.update_event(self.conn, txn_id, memo=text or None)
+            elif col == self.ACTION:
+                self._write_action(row, txn_id, text)
+        except Exception as exc:                    # a domain refusal, surfaced
+            self.error.emit(str(exc))
+            return False
+        QTimer.singleShot(0, self._reload_and_notify)
+        return True
+
+    def _signed_amount(self, row, text):
+        """An edited fiat amount, keeping the sign the ACTION implies: a purchase
+        or withdrawal is money out, a sale or deposit money in (same table as the
+        dialog's own ``_signed_amount``). ``None`` clears it."""
+        cents = parse_amount(text)
+        if not str(text or "").strip():
+            return None
+        act = _norm_action(row["action"])
+        if act in ("BUY", "BUYX", "WITHDRAW"):
+            return -abs(cents)
+        if act in ("SELL", "SELLX", "DEPOSIT"):
+            return abs(cents)
+        return cents
+
+    def _signed_qty(self, row, text):
+        """An edited coin quantity as signed Decimal TEXT, the sign taken from the
+        row's ACTION (a remove is negative, an add positive) so the stored sign
+        can never contradict the direction. ``None`` when the cell is blank."""
+        mag = _coin_qty(text)
+        if mag is None:
+            return None
+        act = _norm_action(row["action"])
+        return str(-mag if act in crypto.REMOVE_ACTIONS else mag)
+
+    def _write_action(self, row, txn_id, text) -> None:
+        """Set the action, and keep the row's SIGNED numbers consistent with it.
+
+        Changing the action can REVERSE the movement's direction -- SEND becomes
+        RECEIVE, BUY becomes SELL. When it does, the stored quantity keeps its
+        magnitude but takes the new direction's sign, and a trade's fiat amount
+        flips with it (a buy is money out, a sale money in). Coin In / Coin Out
+        render from the quantity's sign and the cash column from the amount's, so
+        without this an action-only edit would leave the row saying one thing in
+        its Action cell and the opposite in its coin/cash cells. That
+        inconsistency is exactly why the direction used to be un-editable at all;
+        re-signing here is what makes SEND <-> RECEIVE safe to allow.
+
+        Deliberately NOT enforced against the Transfer field. A trade-with-a-
+        transfer is ONE concept spread over two cells, and a register is edited
+        one cell at a time -- refusing an X action for want of a transfer while
+        also refusing the transfer for want of a trade is a deadlock the user
+        cannot get out of. So an incomplete state is allowed to exist between two
+        keystrokes; a row turning INTO a trade with no proceeds is seeded from
+        price x quantity rather than left at nothing for the user to be blocked
+        on. They can correct it -- the Amount cell is editable for that reason."""
+        act = (text or "").strip().upper()
+        old = _norm_action(row["action"])
+        flipping = ((old in crypto.REMOVE_ACTIONS) != (act in crypto.REMOVE_ACTIONS))
+        if row["transfer_account_id"] is not None and act not in crypto.CROSS_ACTIONS:
+            # Leaving the X family withdraws the claim that the cash went
+            # elsewhere, so the link goes with it.
+            crypto.unlink_transfer(self.conn, txn_id)
+        fields = {"action": act}
+        if flipping and row["quantity"] not in (None, ""):
+            fields["quantity"] = str(-Decimal(str(row["quantity"])))
+        if act in ("BUY", "SELL", "BUYX", "SELLX"):
+            if row["amount"]:
+                mag = abs(int(row["amount"]))
+                fields["amount"] = -mag if act.startswith("BUY") else mag
+            else:
+                seeded = _fmv_cents(row["price"], row["quantity"])
+                if seeded:
+                    fields["amount"] = -seeded if act.startswith("BUY") else seeded
+        elif act in crypto.CASH_ACTIONS and row["amount"]:
+            # A bare cash movement flips the SAME way: a deposit is money in, a
+            # withdrawal money out. Its magnitude is kept, its sign re-derived.
+            mag = abs(int(row["amount"]))
+            fields["amount"] = -mag if act == "WITHDRAW" else mag
+        crypto.update_event(self.conn, txn_id, **fields)
+
+    def _write_transfer(self, row, txn_id, text) -> None:
+        """Name the OTHER account this coin moved to or from -- or clear it.
+
+        Coin moving between two accounts the user controls is not a disposal: it
+        realizes no gain and its cost basis rides along. So this field does not
+        store a string, it performs the link (:func:`crypto.link_as_transfer`),
+        which adopts the counter-leg the other account already holds rather than
+        minting a duplicate. Blanking it withdraws the CLAIM that the two rows
+        are one movement; both rows stay, because both movements happened.
+
+        Brackets are accepted but not required -- the cash register's Category
+        cell needs them to tell an account from a category, and this column holds
+        nothing but accounts."""
+        name = self._TRANSFER_RE.sub(r"\g<name>", text).strip()
+        # A row is linked when it has EITHER a paired crypto leg or a cash leg.
+        # A cash leg has no transfer_pair_id -- its other half lives in
+        # `transactions`, so there is no crypto id to pair with -- and testing
+        # only for the pair left those links impossible to clear or change.
+        linked = (row["transfer_pair_id"] is not None
+                  or row["transfer_account_id"] is not None)
+        if not name:
+            if linked:
+                crypto.unlink_transfer(self.conn, txn_id)
+            return
+        other = self._account_id_for_name(name)
+        if other is None:
+            raise ValueError(
+                "No account named %r. This field names one of YOUR accounts, so "
+                "the money or coin is recorded as moving between them rather "
+                "than leaving your books." % name)
+        if linked:
+            crypto.unlink_transfer(self.conn, txn_id)
+        crypto.link_as_transfer(self.conn, txn_id, other)
+
+    def transfer_choices(self, row=None) -> list:
+        """``[Account]`` entries for every OTHER account -- byte-identical to the
+        transfer half of the cash register's :meth:`RegisterModel.category_choices`.
+
+        Every account, not just the crypto ones. Coin leaves an exchange for a
+        bank as readily as it moves between two wallets, and offering only crypto
+        accounts made the common case -- a withdrawal to checking -- unsayable.
+        Bracketed, for the same reason and in the same shape: the user is typing
+        the gesture they already know from every other register."""
+        return [f"[{a['name']}]"
+                for a in ledger.list_accounts(self.conn, include_closed=True)
+                if int(a["id"]) != int(self.account_id)]
+
+    def _account_name(self, account_id):
+        acct = ledger.get_account(self.conn, account_id)
+        return (acct["name"] if acct else "") or None
+
+    def _reload_and_notify(self):
+        self.reload()
+        self.committed.emit()
+
+    # ---- blank quick-entry row: rendering, buffering and commit ----------
+    def _blank_text(self, col) -> str:
+        """One cell of the blank quick-entry row -- whatever the user has typed so
+        far. Dates render in the user's chosen format; everything else is the raw
+        buffered text (a coin quantity keeps full Decimal precision)."""
+        if col == self.DATE:
+            iso = self._new.get("date", "")
+            return fmt_date(iso) if iso else ""
+        key = {self.ACTION: "action", self.COIN: "coin", self.PAYEE: "payee",
+               self.TRANSFER: "transfer", self.MEMO: "memo",
+               self.COIN_IN: "coin_in", self.COIN_OUT: "coin_out",
+               self.QUANTITY: "quantity", self.PRICE: "price",
+               self.AMOUNT: "amount", self.FEE: "fee"}.get(col)
+        return self._new.get(key, "") if key else ""
+
+    def _set_blank(self, index, value) -> bool:
+        """Buffer one typed cell of the blank quick-entry row. No DB write happens
+        here -- the row commits through :meth:`commit_blank` on Enter, so a
+        half-typed multi-field crypto event never posts itself the way a two-field
+        cash row can."""
+        if not (0 <= index.column() < len(self._columns)):
+            return False
+        col = self._columns[index.column()]
+        if col not in self._blank_editable():
+            return False
+        key = {self.DATE: "date", self.ACTION: "action", self.COIN: "coin",
+               self.PAYEE: "payee", self.TRANSFER: "transfer", self.MEMO: "memo",
+               self.COIN_IN: "coin_in", self.COIN_OUT: "coin_out",
+               self.QUANTITY: "quantity", self.PRICE: "price",
+               self.AMOUNT: "amount", self.FEE: "fee"}.get(col)
+        if key is None:
+            return False
+        if col == self.DATE:
+            self._new[key] = _to_iso(value)
+        else:
+            text = str(value or "").strip()
+            self._new[key] = text.upper() if key == "action" else text
+        row = index.row()
+        # The action decides which coin column a wallet quantity renders in, so
+        # redraw the whole row rather than the one cell.
+        self.dataChanged.emit(self.index(row, 0),
+                              self.index(row, len(self._columns) - 1))
+        return True
+
+    def blank_values(self) -> dict:
+        """The blank row's typed fields (inspection and tests)."""
+        return dict(self._new)
+
+    def _blank_ready(self) -> bool:
+        """Whether the blank row carries enough to state a real event. A wallet
+        needs a date, a coin and a non-zero Coin In or Coin Out; an exchange needs
+        a date, an action and either an amount (a cash movement) or a coin +
+        quantity (a trade or in-kind row)."""
+        v = self._new
+        if not v.get("date"):
+            return False
+        if self.is_wallet:
+            return bool(v.get("coin")
+                        and (_coin_qty(v.get("coin_in"))
+                             or _coin_qty(v.get("coin_out"))))
+        act = (v.get("action") or "").strip().upper()
+        if not act:
+            return False
+        if act in crypto.CASH_ACTIONS:
+            return bool(str(v.get("amount") or "").strip())
+        return bool(v.get("coin") and _coin_qty(v.get("quantity")))
+
+    def commit_blank(self) -> bool:
+        """Record the blank quick-entry row as a new crypto event and reset it.
+
+        Every write goes through :mod:`mammon.crypto` -- the SOLE writer of the
+        ``crypto_*`` tables -- so no second write path is introduced and the
+        transfer/holdings invariants stay enforced in one place. Returns False,
+        leaving the buffer intact, when the row is not ready or a domain rule
+        refuses it (surfaced through :attr:`error`)."""
+        if not self._blank_ready():
+            return False
+        try:
+            txn_id = self._create_from_blank()
+        except Exception as exc:                    # a domain refusal, surfaced
+            self.error.emit(str(exc))
+            return False
+        if not txn_id:
+            return False
+        crypto.rebuild_holdings(self.conn, self.account_id)
+        self._new = {}
+        self.reload()
+        self.committed.emit()
+        return True
+
+    @staticmethod
+    def _parse_fee(text, default_symbol):
+        """Split a typed fee cell (``"0.001 ETH"`` or a bare ``"0.001"``) into a
+        (symbol, quantity) pair. A bare number takes the row's own coin. Returns
+        (None, None) when blank or unparseable."""
+        s = str(text or "").strip()
+        if not s:
+            return None, None
+        parts = s.split()
+        qty = _coin_qty(parts[0])
+        if qty is None:
+            return None, None
+        sym = parts[1].strip().upper() if len(parts) > 1 else (default_symbol or None)
+        return sym, str(qty)
+
+    def _create_from_blank(self) -> int:
+        """Turn the blank row's buffer into a crypto event through the right
+        :mod:`mammon.crypto` writer, and link a named transfer afterwards (both
+        sides must be real rows before they can be paired). Returns the new txn
+        id, or 0 when there is nothing to write."""
+        v = self._new
+        date = v["date"]
+        symbol = (v.get("coin") or "").strip().upper()
+        payee = (v.get("payee") or "").strip() or None
+        memo = (v.get("memo") or "").strip() or None
+        action = (v.get("action") or "").strip().upper()
+        fee_sym, fee_qty = self._parse_fee(v.get("fee"), symbol)
+        txn_id = 0
+        if self.is_wallet:
+            qin = _coin_qty(v.get("coin_in"))
+            qout = _coin_qty(v.get("coin_out"))
+            if qin:
+                act = action if action in crypto.WALLET_CREDIT_ACTIONS else "RECEIVE"
+                txn_id = crypto.record_wallet_credit(
+                    self.conn, self.account_id, date, symbol, str(qin),
+                    payee=payee, action=act, memo=memo)
+            elif qout:
+                act = action if action in crypto.WALLET_DEBIT_ACTIONS else "SEND"
+                txn_id = crypto.record_wallet_debit(
+                    self.conn, self.account_id, date, symbol, str(qout),
+                    payee=payee, action=act, fee_symbol=fee_sym,
+                    fee_quantity=fee_qty, memo=memo)
+        else:
+            amount_cents = (parse_amount(v.get("amount"))
+                            if str(v.get("amount") or "").strip() else None)
+            price = (v.get("price") or "").strip() or None
+            if action in crypto.CASH_ACTIONS:
+                signed = (-abs(amount_cents) if action == "WITHDRAW"
+                          else abs(amount_cents or 0))
+                txn_id = crypto.record_cash(
+                    self.conn, self.account_id, date, signed,
+                    action=action, payee=payee, memo=memo)
+            else:
+                qty = _coin_qty(v.get("quantity"))
+                if not qty:
+                    return 0
+                if action == "BUY":
+                    cost = (abs(amount_cents) if amount_cents is not None
+                            else _fmv_cents(price, str(qty)))
+                    txn_id = crypto.record_buy(
+                        self.conn, self.account_id, date, symbol, str(qty), cost,
+                        price=price, fee_symbol=fee_sym, fee_quantity=fee_qty,
+                        memo=memo)
+                elif action == "SELL":
+                    proceeds = (abs(amount_cents) if amount_cents is not None
+                                else _fmv_cents(price, str(qty)))
+                    txn_id = crypto.record_sell(
+                        self.conn, self.account_id, date, symbol, str(qty),
+                        proceeds, price=price, fee_symbol=fee_sym,
+                        fee_quantity=fee_qty, memo=memo)
+                else:
+                    # Any other add/remove action (income, transfer leg, ...):
+                    # the low-level writer takes the signed quantity directly.
+                    signed = (-qty if action in crypto.REMOVE_ACTIONS else qty)
+                    txn_id = crypto.record_event(
+                        self.conn, self.account_id, date, action, symbol=symbol,
+                        quantity=str(signed), price=price, amount=amount_cents,
+                        payee=payee, memo=memo, fee_symbol=fee_sym,
+                        fee_quantity=fee_qty)
+        transfer = (v.get("transfer") or "").strip()
+        if txn_id and transfer:
+            other = self._account_id_for_name(transfer)
+            if other is not None:
+                crypto.link_as_transfer(self.conn, int(txn_id), other)
+        return int(txn_id or 0)
+
+    # ---- context-menu edit / delete (through crypto.py) ------------------
+    def delete_txn(self, txn_id) -> bool:
+        """Delete a posted event (both legs of a transfer or all legs of a swap,
+        per :func:`crypto.delete_event`) and refresh. The register's context-menu
+        Delete, the crypto twin of the cash register's."""
+        try:
+            crypto.delete_event(self.conn, int(txn_id))
+            crypto.rebuild_holdings(self.conn, self.account_id)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return False
+        self.reload()
+        self.committed.emit()
+        return True
+
+    def apply_edit(self, txn_id, fields: dict) -> bool:
+        """Apply the context-menu Edit dialog's changes through
+        :func:`crypto.update_event` (the sole writer), then rebuild holdings and
+        refresh. The scalar ``fields`` are already restricted to update_event's
+        editable keys by the dialog.
+
+        ``transfer`` is the exception: it is not a stored column but the LINK
+        gesture (name one of your own accounts), so it is pulled out and applied
+        through the same :meth:`_write_transfer` the inline Transfer cell uses --
+        still :mod:`mammon.crypto`, still no second write path. It is only acted
+        on when it actually CHANGED, so an untouched dialog never re-links (which
+        would needlessly rebuild the paired cash leg)."""
+        fields = dict(fields)
+        transfer = fields.pop("transfer", None)
+        try:
+            crypto.update_event(self.conn, int(txn_id), **fields)
+            if transfer is not None:
+                row = crypto.get_event(self.conn, int(txn_id))
+                if row is not None:
+                    current = self._account_name(row["transfer_account_id"]) or ""
+                    want = self._TRANSFER_RE.sub(
+                        r"\g<name>", str(transfer or "")).strip()
+                    if want.lower() != current.strip().lower():
+                        self._write_transfer(row, int(txn_id), transfer)
+            crypto.rebuild_holdings(self.conn, self.account_id)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return False
+        self.reload()
+        self.committed.emit()
+        return True
+
+    def _account_id_for_name(self, name):
+        """ANY account with this NAME, or ``None``. Matched case-insensitively,
+        because the user is typing a name they can SEE in the sidebar, not an
+        identifier. Not restricted to crypto accounts -- see
+        :meth:`transfer_choices`."""
+        want = self._TRANSFER_RE.sub(r"\g<name>", str(name or "")).strip().lower()
+        for a in ledger.list_accounts(self.conn, include_closed=True):
+            if (a["name"] or "").strip().lower() == want:
+                return int(a["id"])
+        return None
+
+    def actions_for_row(self, row) -> list:
+        """The actions offered at ``row`` -- the pending line's, a posted row's,
+        or the blank quick-entry line's.
+
+        A POSTED row may be flipped to the OPPOSITE direction now (SEND ->
+        RECEIVE, BUY -> SELL): the user reported that a mis-recorded direction
+        was uncorrectable, and it should be. The one boundary kept is coin vs
+        cash -- a coin row cannot become a bare DEPOSIT and vice versa, because
+        that swaps a quantity for a fiat amount that isn't there. Within the coin
+        vocabulary every direction is offered, and :meth:`_write_action` re-signs
+        the quantity (and a trade's amount) so the flip stays consistent."""
+        if self.is_blank_row(row):
+            # A fresh manual entry may become anything the account kind allows: a
+            # wallet moves coin only (credit or debit), an exchange has the full
+            # vocabulary (trade, transfer, in-kind income, cash movement).
+            if self.is_wallet:
+                return sorted(crypto.WALLET_CREDIT_ACTIONS
+                              | crypto.WALLET_DEBIT_ACTIONS)
+            return sorted(crypto.ACTIONS)
+        if self.is_pending_row(row):
+            return self.pending_actions()
+        r = self.txn_at(row)
+        if r is None:
+            return []
+        act = (r["action"] or "").strip().upper()
+        if self.is_wallet:
+            # A wallet holds coin only; its full direction pair is send/receive
+            # plus the in-kind income credits the chain cannot name for itself.
+            # The row's OWN action is always kept in the list (a transfer or swap
+            # leg carries one outside that set), so the inline combo -- which,
+            # unlike the dialog, cannot inject a missing current value -- always
+            # opens with the row's action selected rather than silently on RECEIVE.
+            choices = set(crypto.WALLET_CREDIT_ACTIONS
+                          | crypto.WALLET_DEBIT_ACTIONS)
+            if act:
+                choices.add(act)
+            return sorted(choices)
+        if act in crypto.CASH_ACTIONS:
+            return sorted(crypto.CASH_ACTIONS)
+        return sorted(crypto.ADD_ACTIONS | crypto.REMOVE_ACTIONS)
+
+    def _pending_text(self, col) -> str:
+        """One cell of the pending row. The chain-supplied fields render exactly
+        as a posted row would; the three editable ones come from the buffer."""
+        m = self._pending["entry"].mapped
+        buf = self._pending["buf"]
+        if col == self.DATE:
+            return fmt_date(m.date)
+        if col == self.ACTION:
+            return buf.get("action", "")
+        if col == self.COIN:
+            return m.symbol or ""
+        if col == self.PAYEE:
+            return buf.get("payee", "")
+        if col == self.MEMO:
+            return buf.get("memo", "")
+        if col == self.TRANSFER:
+            return buf.get("transfer", "")
+        if col in (self.COIN_IN, self.COIN_OUT, self.QUANTITY):
+            qty = (m.quantity or "").strip()
+            if not qty:
+                return ""
+            out = buf.get("action", "").upper() in crypto.WALLET_DEBIT_ACTIONS
+            if col == self.QUANTITY:
+                return fmt_qty(("-" + qty) if out else qty)
+            if out != (col == self.COIN_OUT):
+                return ""
+            return fmt_qty(qty)
+        if col == self.FEE:
+            return (f"{fmt_qty(m.fee_quantity)} {m.fee_symbol}".strip()
+                    if m.fee_quantity else "")
+        if col == self.PRICE:
+            return fmt_qty(m.price) if m.price else ""
+        if col == self.AMOUNT:
+            return buf.get("amount", "")
+        return ""
+
+    def column_index(self, key) -> int:
+        """Where a column KEY sits in this account's layout, or -1 when the kind
+        does not show it. The view configures widths through this rather than
+        through the constants, so a wallet cannot be handed an exchange column."""
+        try:
+            return self._columns.index(key)
+        except ValueError:
+            return -1
 
     def set_symbol_filter(self, symbol):
         """Restrict the register to one coin (``None`` shows all). The running
@@ -1897,29 +3073,125 @@ class CryptoRegisterModel(QAbstractTableModel):
 
     # ---- QAbstractTableModel API -----------------------------------------
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._rows)
+        if parent.isValid():
+            return 0
+        # + the pending review line (when open) + the always-present trailing
+        # blank quick-entry row, laid out exactly as the cash register's are.
+        return len(self._rows) + (1 if self._pending is not None else 0) + 1
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.HEADERS)
+        return 0 if parent.isValid() else len(self._columns)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self.HEADERS[section]
+            if 0 <= section < len(self._columns):
+                return self._HEADER_TEXT[self._columns[section]]
         return None
 
+    def _coin_side_active(self, r, col) -> bool:
+        """Whether the Coin In / Coin Out cell ``col`` is the POPULATED side for
+        row ``r`` -- the same sign test :meth:`_cell_text` renders by, so the
+        editable side is exactly the one showing a number. Editing it changes the
+        magnitude; the DIRECTION (which side is used) is the Action's to change."""
+        q = r.get("quantity") if r is not None else None
+        if q is None or str(q).strip() == "":
+            return False
+        try:
+            out = Decimal(str(q)) < 0
+        except (InvalidOperation, ValueError):
+            return False
+        return out == (col == self.COIN_OUT)
+
     def flags(self, index):
-        # Read-only: crypto events are entered by import, not inline editing.
+        # Every field a crypto row legitimately has is editable -- an import is
+        # not an oracle (see _POSTED_EDITABLE). Only the DERIVED running balances
+        # stay read-only, and of the Coin In / Coin Out pair only the side the
+        # row's direction currently uses (the other renders blank). The PENDING
+        # review row keeps its narrower judgement-only set (_PENDING_EDITABLE).
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        base = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if self.is_blank_row(index.row()):
+            # The blank quick-entry row: the cells a user fills to state a new
+            # event are editable; the derived running balances are not.
+            if (0 <= index.column() < len(self._columns)
+                    and self._columns[index.column()] in self._blank_editable()):
+                return base | Qt.ItemIsEditable
+            return base
+        if not self.is_pending_row(index.row()):
+            posted = (self._POSTED_EDITABLE if self.is_wallet
+                      else self._POSTED_EDITABLE_EXCHANGE)
+            if not (0 <= index.column() < len(self._columns)):
+                return base
+            col = self._columns[index.column()]
+            if col not in posted:
+                return base
+            if col in (self.COIN_IN, self.COIN_OUT):
+                # Only the side the row's direction uses is editable; the empty
+                # side is a rendering of the same quantity, not its own cell.
+                if not self._coin_side_active(self.txn_at(index.row()), col):
+                    return base
+            return base | Qt.ItemIsEditable
+        if not (0 <= index.column() < len(self._columns)):
+            return base
+        if self._columns[index.column()] in self._pending_editable():
+            return base | Qt.ItemIsEditable
+        return base
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+        if not index.isValid() or not (0 <= index.row() < self.rowCount()):
+            return None
+        if not (0 <= index.column() < len(self._columns)):
+            return None
+        col = self._columns[index.column()]
+        if self.is_blank_row(index.row()):
+            if role in (Qt.DisplayRole, Qt.EditRole):
+                # The date EDITOR (DateDelegate) parses EditRole as ISO, so hand
+                # it the raw ISO date; the cell still DISPLAYS the user's format.
+                if role == Qt.EditRole and col == self.DATE:
+                    return self._new.get("date", "")
+                return self._blank_text(col)
+            if role == Qt.ToolTipRole:
+                return self._blank_text(col) or None
+            if role == Qt.TextAlignmentRole and col in self._NUMERIC:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ForegroundRole:
+                ct = style.cell_text_color()
+                if ct:
+                    return QBrush(QColor(ct))
+            return None
+        if self.is_pending_row(index.row()):
+            if role in (Qt.DisplayRole, Qt.EditRole):
+                if role == Qt.EditRole and col == self.DATE:
+                    return self._pending["entry"].mapped.date or ""
+                return self._pending_text(col)
+            if role == Qt.ToolTipRole:
+                return self._pending_text(col) or None
+            if role == Qt.TextAlignmentRole and col in self._NUMERIC:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ForegroundRole:
+                ct = style.cell_text_color()
+                if ct:
+                    return QBrush(QColor(ct))
             return None
         r = self._rows[index.row()]
-        col = index.column()
         if role in (Qt.DisplayRole, Qt.EditRole):
+            if role == Qt.EditRole and col == self.DATE:
+                return r["date"] or ""
             return self._cell_text(r, col)
+        if role == Qt.ToolTipRole:
+            if col == self.PAYEE and r.get("payee"):
+                # Name WHICH end of the movement the counterparty is, so a
+                # direction flip's effect on its meaning is visible: coin coming
+                # in names its sender (From), coin going out its recipient (To).
+                role_ = crypto.payee_role(r.get("action"))
+                label = {"from": "From", "to": "To"}.get(role_)
+                if label:
+                    return f"{label}: {r['payee']}"
+            # A coin quantity carries up to 18 decimals, so a column sized for
+            # the ordinary case still elides the occasional long one. The full
+            # value is always one hover away rather than lost behind an ellipsis.
+            return self._cell_text(r, col) or None
         if role == Qt.TextAlignmentRole and col in self._NUMERIC:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
@@ -1933,26 +3205,91 @@ class CryptoRegisterModel(QAbstractTableModel):
                 return QBrush(QColor(ct))
         return None
 
+    def setData(self, index, value, role=Qt.EditRole):
+        """Writes land in one of two places and nowhere else: the PENDING row's
+        buffer, or -- through :mod:`mammon.crypto` -- an already-posted event.
+        Never on the review entry, which is the source's ground truth."""
+        if role != Qt.EditRole or not index.isValid():
+            return False
+        if self.is_blank_row(index.row()):
+            return self._set_blank(index, value)
+        if not self.is_pending_row(index.row()):
+            return self._write_posted(index, value)
+        if not (0 <= index.column() < len(self._columns)):
+            return False
+        col = self._columns[index.column()]
+        if col not in self._pending_editable():
+            return False
+        key = {self.ACTION: "action", self.PAYEE: "payee",
+               self.MEMO: "memo", self.AMOUNT: "amount",
+               self.TRANSFER: "transfer"}[col]
+        text = str(value or "").strip()
+        self._pending["buf"][key] = text.upper() if key == "action" else text
+        row = index.row()
+        # The action decides which side the quantity renders on, so redraw the
+        # whole row rather than the one cell.
+        self.dataChanged.emit(self.index(row, 0),
+                              self.index(row, len(self._columns) - 1))
+        return True
+
     def _cell_text(self, r, col) -> str:
         if col == self.DATE:
             return fmt_date(r["date"])
         if col == self.ACTION:
             return r["action"] or ""
         if col == self.COIN:
-            # A trade/income shows its coin; a transfer shows [Other Wallet]; a
-            # swap shows the OUT->IN pair (crypto.register_rows.label).
-            return r.get("label") or r["symbol"] or ""
+            # The COIN column names the COIN. It used to double as the transfer
+            # target, which meant a transfer row could not state its own symbol --
+            # and left the register with no transfer field at all, unlike every
+            # other account type. A swap still shows its OUT->IN pair here,
+            # because that genuinely is a statement about coins.
+            if r.get("swap_group_id") is not None:
+                return r.get("label") or r["symbol"] or ""
+            return r["symbol"] or ""
+        if col == self.TRANSFER:
+            # The other account, when this row is one leg of a transfer, rendered
+            # `[Account]` exactly as the cash register renders one. The brackets
+            # are not needed to disambiguate here -- this column holds nothing but
+            # accounts -- but the user reads and types this field in every other
+            # register, and consistency beats concision.
+            name = r.get("transfer_name") or ""
+            return f"[{name}]" if name else ""
+        if col == self.PAYEE:
+            # The on-chain counterparty (From on a credit, To on a debit).
+            return r.get("payee") or ""
+        if col == self.MEMO:
+            return r.get("memo") or ""
         if col == self.QUANTITY:
             # Stored SIGNED (an OUT leg is negative), shown verbatim.
             return fmt_qty(r["quantity"]) if r["quantity"] is not None else ""
+        if col in (self.COIN_IN, self.COIN_OUT):
+            # The wallet layout splits the signed quantity into the two columns
+            # the source exports it in (Value_IN / Value_OUT), so a receive and a
+            # send never share a column. Sign comes off the stored quantity, which
+            # crypto.record_wallet_debit writes negative.
+            q = r.get("quantity")
+            if q is None or str(q).strip() == "":
+                return ""
+            try:
+                out = Decimal(str(q)) < 0
+            except (InvalidOperation, ValueError):
+                return ""
+            if out != (col == self.COIN_OUT):
+                return ""
+            return fmt_qty(abs(Decimal(str(q))))
         if col == self.PRICE:
             return fmt_qty(r["price"]) if r["price"] else ""
         if col == self.COIN_BAL:
             # None on rows that move no coin (Quicken leaves the balance blank).
             return fmt_qty(r["coin_bal"]) if r.get("coin_bal") is not None else ""
         if col == self.AMOUNT:
-            # Fiat only moves on a Buy/Sell; blank for coin-only rows.
-            return fmt_cents(r["cash_amt"]) if r.get("cash_amt") else ""
+            # The TRADE's fiat value, which is not the same as its effect on this
+            # account's cash. An X row's proceeds went straight out, so its
+            # sleeve effect is zero -- but the sale still happened for a sum, and
+            # blanking the cell made a SELLX look like it sold for nothing.
+            # `cash_amt`/`cash_bal` remain the sleeve story; this is the row's.
+            amt = r.get("amount")
+            return fmt_cents(amt) if amt else ""
         if col == self.CASH_BAL:
             return fmt_cents(r.get("cash_bal") or 0)
         if col == self.FEE:
@@ -2049,6 +3386,8 @@ class AccountsModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows = [
             {"id": a["id"], "name": a["name"], "type": a["type"],
+             # each account's native currency, so a foreign balance renders in it
+             "currency": a["currency"],
              # investment accounts show their market valuation (cash + securities)
              "balance": investments.display_balance(self.conn, a["id"])}
             for a in ledger.list_accounts(self.conn)
@@ -2056,7 +3395,26 @@ class AccountsModel(QAbstractTableModel):
         self.endResetModel()
 
     def net_worth(self) -> int:
-        return ledger.net_worth(self.conn)
+        """Net worth in the BASE currency. Foreign-currency accounts are folded in
+        through :mod:`mammon.fx` (the domain layer owns every conversion and the
+        cents math). A non-zero foreign balance with no recorded FX rate is left
+        OUT of the total rather than folded in at a dishonest 1:1 -- the total is
+        then honestly incomplete, not silently overstated by the raw foreign
+        number. An all-USD ledger converts through the identity and is unchanged."""
+        from mammon import fx
+        return fx.net_worth_currencies(self.conn).total_cents
+
+    def unconverted_currencies(self) -> list:
+        """The currencies whose balances could NOT be folded into net worth for
+        want of an FX rate (base first, then A->Z, as ``fx`` reports them).
+
+        Empty means the total is complete. Non-empty means :meth:`net_worth` is a
+        partial figure, which is why the account bar shows a warning mark instead
+        of it: the per-currency subtotals are each complete, and only the roll-up
+        is impossible. ``mammon.fx`` decides this -- the UI layer holds no
+        conversion logic of its own."""
+        from mammon import fx
+        return list(fx.net_worth_currencies(self.conn).unconverted)
 
     def rows(self) -> list[dict]:
         """The account rows (id/name/type/balance) for the account bar."""
@@ -2089,7 +3447,7 @@ class AccountsModel(QAbstractTableModel):
             if col == self.TYPE:
                 return r["type"]
             if col == self.BALANCE:
-                return fmt_cents(r["balance"])
+                return fmt_amount_ccy(r["balance"], r.get("currency"))
         if role == Qt.TextAlignmentRole and col == self.BALANCE:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
@@ -2098,4 +3456,95 @@ class AccountsModel(QAbstractTableModel):
             ct = style.cell_text_color()  # legible item text in dark mode; None in light
             if ct:
                 return QBrush(QColor(ct))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# net worth broken out per coin / per currency (the crypto-era view)
+# ---------------------------------------------------------------------------
+class NetWorthByAssetModel(QAbstractTableModel):
+    """Net worth as a per-asset grid: one COLUMN per coin/currency plus a trailing
+    Total column, a NATIVE row (coin quantity, or native cents for a fiat bucket)
+    and a USD row (each converted to the base currency via price history + fx).
+
+    A THIN projection of :func:`mammon.fx.net_worth_by_asset` -- it holds no SQL
+    and no coin/cents math, only formatting for display. The domain function keeps
+    the crypto holdings from being double-counted (they are the same halves
+    ``display_balance`` already sums), so the Total equals the account bar's."""
+
+    NATIVE, USD = range(2)
+    VHEADERS = ["Native", "USD"]
+
+    def __init__(self, conn, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self._lines: list = []
+        self._total = 0
+        self.reload()
+
+    def reload(self):
+        from mammon import fx
+        self.beginResetModel()
+        try:
+            bd = fx.net_worth_by_asset(self.conn)
+            self._lines = list(bd.lines)
+            self._total = bd.total_usd_cents
+        except fx.FxRateUnavailable:
+            # A missing FX rate is surfaced as an empty breakdown; the account
+            # bar's own net-worth label falls back to the naive base sum.
+            self._lines = []
+            self._total = 0
+        self.endResetModel()
+
+    def total_cents(self) -> int:
+        return self._total
+
+    def _is_total_col(self, col) -> bool:
+        return col == len(self._lines)
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 2
+
+    def columnCount(self, parent=QModelIndex()):
+        # one column per asset, plus the trailing Total column
+        return 0 if parent.isValid() else len(self._lines) + 1
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            if self._is_total_col(section):
+                return "Total"
+            return self._lines[section].asset if 0 <= section < len(self._lines) else None
+        return self.VHEADERS[section] if 0 <= section < len(self.VHEADERS) else None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role not in (Qt.DisplayRole, Qt.EditRole):
+            if role == Qt.ForegroundRole:
+                ct = style.cell_text_color()
+                if ct:
+                    return QBrush(QColor(ct))
+            return None
+        if self._is_total_col(col):
+            # No cross-coin native sum is meaningful; only the USD grand total is.
+            return fmt_cents(self._total) if row == self.USD else ""
+        if not (0 <= col < len(self._lines)):
+            return None
+        line = self._lines[col]
+        if row == self.NATIVE:
+            if line.is_coin:
+                return fmt_qty(line.quantity) if line.quantity is not None else ""
+            return fmt_cents(line.native_cents or 0)
+        if row == self.USD:
+            return fmt_cents(line.usd_cents)
         return None

@@ -7,10 +7,20 @@ WHY this is the whole DB surface (the parser knows nothing):
 - SINGLE WRITER. ``mammon.crypto`` is the sole writer of the ``crypto_*`` tables
   (mirroring ``ledger`` for cash and ``investments`` for equities). This module
   therefore NEVER runs ``INSERT INTO crypto_transactions`` itself -- every write
-  goes through ``crypto.record_send`` / ``record_income`` /
-  ``record_wallet_transfer``, so the transfer-mirror and lot invariants stay
-  enforced in exactly one place. Adding a second writer is the main way to break
-  the codebase (CLAUDE.md).
+  goes through ``crypto``'s event writers (``record_wallet_credit`` /
+  ``record_wallet_debit`` on a coin-native ``kind='wallet'`` account,
+  ``record_send`` / ``record_income`` on an ``kind='exchange'`` account, and
+  ``record_wallet_transfer`` for an own-wallet move), so the transfer-mirror and
+  lot invariants stay enforced in exactly one place. Adding a second writer is
+  the main way to break the codebase (CLAUDE.md).
+
+- TWO ACCOUNT KINDS. A ``kind='wallet'`` account is coin-native (the redesign):
+  a Value_IN row is a coin credit with no fiat leg, a Value_OUT row a coin debit
+  with the gas as a coin-native fee leg (never USD), the on-chain counterparty
+  rides ``payee``, and USD lives only at the net-worth layer. A ``kind='exchange'``
+  account keeps the fiat-sleeve FMV model (cost basis, realized gain, cash)
+  described by the four rules below. ``import_crypto_records`` dispatches on the
+  account kind; the wallet path is :func:`_import_wallet_records`.
 
 The four import rules the real 2020 ETH export forced (all applied here):
 
@@ -47,7 +57,8 @@ from pathlib import Path
 from typing import Optional
 
 from mammon import crypto
-from mammon.importers.crypto_csv import CryptoRecord, parse_etherscan
+from mammon.importers.coinbase_csv import ExchangeRecord, looks_like_coinbase, parse_coinbase
+from mammon.importers.crypto_csv import CryptoRecord, looks_like_etherscan, parse_etherscan
 
 
 @dataclass
@@ -94,6 +105,13 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
     if not crypto.is_crypto_account(acct):
         raise ValueError(f"account {account_id} is not a crypto wallet-account")
 
+    # A 'wallet'-kind account is coin-native (the redesign): a Value_IN row is a
+    # coin CREDIT with no fiat leg and a Value_OUT row a coin DEBIT with the gas as
+    # a coin-native fee leg (never a USD amount/basis). An 'exchange'-kind account
+    # keeps the fiat-sleeve FMV model below (cost basis, realized gain, cash).
+    if crypto.is_wallet_account(acct):
+        return _import_wallet_records(conn, records, account_id, rebuild=rebuild)
+
     registry = _wallet_registry(conn)
     result = CryptoImportResult()
     result.account_ids.add(account_id)
@@ -138,17 +156,97 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
                 fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
             result.account_ids.update((frm, to))
         elif rec.direction == "out":
+            # The counterparty IS the payee on an exchange row too: when the user
+            # moves coin from their own paper wallet to an exchange, the exchange
+            # side has to show that wallet's address.
             crypto.record_send(
                 conn, account_id, rec.date, rec.symbol, qty, fmv,
+                payee=rec.to_addr or None,
                 fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                 fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
         else:  # direction == "in"
             crypto.record_income(
                 conn, account_id, rec.date, "RECEIVE", rec.symbol, qty, fmv,
+                payee=rec.from_addr or None,
                 tx_hash=rec.tx_hash, memo=rec.memo or None)
 
         result.imported += 1
         if gas_is_users:
+            result.gas_legs += 1
+
+    if rebuild:
+        for aid in result.account_ids:
+            crypto.rebuild_holdings(conn, aid)
+    return result
+
+
+def _import_wallet_records(conn: sqlite3.Connection, records: list[CryptoRecord],
+                           account_id: int, *, rebuild: bool = True) -> CryptoImportResult:
+    """Book a coin-native wallet export onto ``account_id`` (a ``kind='wallet'``
+    account), the ShrsIn/ShrsOut analogue with NO fiat leg:
+
+    - a ``Value_IN`` row -> :func:`crypto.record_wallet_credit` (coin in), the
+      on-chain ``From`` riding ``payee``; no fee (the sender, not the user, paid
+      the gas);
+    - a ``Value_OUT`` row -> :func:`crypto.record_wallet_debit` (coin out), the
+      ``To`` riding ``payee`` and the gas booked as a coin-native ``fee_symbol`` /
+      ``fee_quantity`` leg -- NEVER a USD ``fee_amount``. No USD proceeds/basis
+      means no realized gain, correct for a coin-native wallet;
+    - an own-wallet move (the OTHER address is a registered account of the user's)
+      stays a coin mirror :func:`crypto.record_wallet_transfer`, also coin-native
+      (``fee_amount=None``).
+
+    Gas attribution needs no address registry here: an Etherscan by-address export
+    puts the wallet on the ``From`` of every ``Value_OUT`` row, so a coin-out row
+    IS a row the user sent. ``price``/``amount``/``basis`` stay NULL -- USD lives
+    only at the net-worth layer. Re-import is a no-op via the same
+    ``(account_id, tx_hash)`` dedup as the exchange path."""
+    registry = _wallet_registry(conn)
+    result = CryptoImportResult()
+    result.account_ids.add(account_id)
+
+    for rec in records:
+        if not rec.is_success:
+            result.skipped_failed += 1
+            continue
+        if rec.tx_hash and _already_imported(conn, account_id, rec.tx_hash):
+            result.duplicates += 1
+            continue
+
+        qty = Decimal(rec.quantity)
+        fee_qty = Decimal(rec.fee_quantity) if rec.fee_quantity else Decimal(0)
+        # Gas is the user's only on a row the wallet SENT (a coin-out row).
+        book_fee = rec.direction == "out" and fee_qty > 0
+        fee_symbol = rec.fee_symbol if book_fee else None
+        fee_quantity = rec.fee_quantity if book_fee else None
+
+        # An own-wallet move needs the OTHER address to be a registered account.
+        other_addr = rec.to_addr if rec.direction == "out" else rec.from_addr
+        other_id = registry.get(other_addr)
+        is_own_transfer = other_id is not None and other_id != account_id
+
+        if is_own_transfer:
+            frm, to = ((account_id, other_id) if rec.direction == "out"
+                       else (other_id, account_id))
+            crypto.record_wallet_transfer(
+                conn, frm, to, rec.date, rec.symbol, qty,
+                fee_symbol=fee_symbol, fee_quantity=fee_quantity,
+                fee_amount=None, tx_hash=rec.tx_hash, memo=rec.memo or None)
+            result.account_ids.update((frm, to))
+        elif rec.direction == "out":
+            crypto.record_wallet_debit(
+                conn, account_id, rec.date, rec.symbol, qty,
+                payee=rec.to_addr or None, fee_symbol=fee_symbol,
+                fee_quantity=fee_quantity, tx_hash=rec.tx_hash,
+                memo=rec.memo or None)
+        else:  # direction == "in": a coin credit, counterparty = the From address
+            crypto.record_wallet_credit(
+                conn, account_id, rec.date, rec.symbol, qty,
+                payee=rec.from_addr or None, tx_hash=rec.tx_hash,
+                memo=rec.memo or None)
+
+        result.imported += 1
+        if book_fee:
             result.gas_legs += 1
 
     if rebuild:
@@ -177,6 +275,46 @@ def _decode(raw: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("latin-1", errors="replace")
+
+
+def parse_export_file(path) -> tuple[str, list]:
+    """Read a crypto export at ``path``; return ``(shape, records)``.
+
+    PURE with respect to the database -- it only reads a file -- so the UI can
+    parse first and route the rows into the import-review queue instead of
+    writing them.
+
+    Routed by the file's own CONTENT, never by the account it is being imported
+    into. The two shapes are genuinely different documents: a block-explorer
+    by-address export (``"wallet"``) states coin moving to and from an ADDRESS,
+    while a custodial exchange's transaction history (``"exchange"``) states
+    trades, cash deposits and per-venue transfers. Deciding by account kind
+    instead means a user who exports the wrong one -- or who keeps coin at an
+    exchange AND in a wallet -- gets a parser that cannot read their file and an
+    error blaming the file. Raises ``ValueError`` naming BOTH shapes when the
+    text is neither."""
+    text = _decode(Path(path).read_bytes())
+    if looks_like_coinbase(text):
+        return "exchange", parse_coinbase(text)
+    if looks_like_etherscan(text):
+        return "wallet", parse_etherscan(text)
+    # Neither known signature matched, so INFER the layout. A proven parser beats
+    # an inference, which is why the two above are tried first; but writing a
+    # parser per venue does not scale, and the generic reader handles the shapes
+    # neither of them knows -- a Coinbase Pro account statement, say, where one
+    # trade is three rows sharing a trade id.
+    from mammon.importers import crypto_tabular
+    try:
+        layout, records = crypto_tabular.read_records(text)
+    except ValueError as exc:
+        raise ValueError(
+            "could not read this as a crypto export. It is not a "
+            "block-explorer by-address export (no Transaction Hash column) nor "
+            "a Coinbase transaction history (no Transaction Type column), and "
+            "the columns could not be inferred: %s" % exc) from None
+    if not records:
+        return "exchange", []
+    return "exchange", records
 
 
 def import_etherscan_file(conn: sqlite3.Connection, path, account_id: int, *,

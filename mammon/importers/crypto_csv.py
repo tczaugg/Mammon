@@ -20,11 +20,16 @@ WHY this is its own parser and record type, separate from ``csvimp.py`` /
 
 Export schema (Etherscan per-address CSV), columns in order::
 
-    Txhash, Blockno, UnixTimestamp, DateTime, From, To, ContractAddress,
-    Value_IN(ETH), Value_OUT(ETH), CurrentValue @ $<rate>/Eth, TxnFee(ETH),
-    TxnFee(USD), Historical $Price/Eth, Status, ErrCode
+    Transaction Hash, Blockno, UnixTimestamp, DateTime (UTC), From, To,
+    ContractAddress, Value_IN(ETH), Value_OUT(ETH), CurrentValue @ $<rate>/Eth,
+    TxnFee(ETH), TxnFee(USD), Historical $Price/Eth, Status, ErrCode, Method
 
-Two things in that header are load-bearing and easy to get wrong:
+Exports through roughly 2023 name the first two columns ``Txhash`` and
+``DateTime`` and omit ``Method``; both vocabularies are read (see
+:func:`_is_hash_col`). Columns are located BY NAME, never by position, so a new
+trailing column cannot shift the fee off its own column.
+
+Three things in that header are load-bearing and easy to get wrong:
 
 - ``CurrentValue @ $<rate>/Eth`` embeds the export-time rate in its NAME and
   values every row at that one rate -- it is NEVER the historical basis. This
@@ -38,6 +43,12 @@ Two things in that header are load-bearing and easy to get wrong:
   and the sense in :attr:`CryptoRecord.direction` (``"in"`` acquire / ``"out"``
   dispose); it does NOT decide gas attribution or acquire/dispose semantics --
   that needs the account's own wallet address, which the parser does not have.
+
+- The hash column is the file's SIGNATURE as well as its dedup key, so matching
+  it narrowly is worse than matching any other column narrowly: a header the scan
+  does not recognise makes the whole file read as EMPTY rather than as
+  mis-mapped. It is the one column whose accepted spellings must be kept broad
+  and in a single place.
 
 Synthetic-fixture note: real exports are PII (wallet addresses, tx hashes). This
 parser is exercised only against synthetic ANON fixtures under
@@ -127,6 +138,27 @@ def _find_col(header: list[str], *predicates) -> Optional[int]:
     return None
 
 
+def _is_hash_col(n: str) -> bool:
+    """Whether a normalised header name is the on-chain hash column.
+
+    ETHERSCAN RENAMES ITS COLUMNS, and this one is load-bearing twice over: it is
+    the exact-dedup key AND the signature that identifies the file as an
+    by-address export at all. Exports through ~2023 head it ``Txhash``; current
+    ones say ``Transaction Hash`` (and ``DateTime (UTC)`` in place of
+    ``DateTime``). Matching only the old spelling rejected a real 2025 export
+    outright -- the file parsed as nothing, and the import fell back to reporting
+    it as an unreadable delimited file. Every accepted spelling lives HERE, so the
+    header scan and the column lookup cannot drift apart."""
+    return n in ("txhash", "transaction hash", "txn hash") or n == "hash"
+
+
+def _is_datetime_col(n: str) -> bool:
+    """The human-readable timestamp column: ``DateTime`` or ``DateTime (UTC)``.
+    Only a FALLBACK -- the unambiguous ``UnixTimestamp`` is preferred -- but it is
+    the whole date when a variant omits the stamp."""
+    return n.startswith("datetime")
+
+
 def looks_like_etherscan(text: str) -> bool:
     """A cheap signature test: does ``text`` look like an Etherscan by-address
     native-coin export? Used to route a CSV without guessing off its extension."""
@@ -134,18 +166,20 @@ def looks_like_etherscan(text: str) -> bool:
         header = _locate_header(text)
     except ValueError:
         return False
-    return (_find_col(header, lambda n: n == "txhash") is not None
+    return (_find_col(header, _is_hash_col) is not None
             and _find_col(header, lambda n: n.startswith("value_in")) is not None
             and _find_col(header, lambda n: n.startswith("historical")) is not None)
 
 
 def _locate_header(text: str) -> list[str]:
-    """The header row -- the first row carrying a ``Txhash`` column. Etherscan
-    puts it first, but scanning tolerates a leading preamble line."""
+    """The header row -- the first row carrying the on-chain hash column
+    (``Txhash`` on older exports, ``Transaction Hash`` on current ones).
+    Etherscan puts it first, but scanning tolerates a leading preamble line."""
     for row in csv.reader(io.StringIO(text)):
-        if any((c or "").strip().lower() == "txhash" for c in row):
+        if any(_is_hash_col((c or "").strip().lower()) for c in row):
             return row
-    raise ValueError("no Etherscan header row (no 'Txhash' column) found")
+    raise ValueError(
+        "no Etherscan header row (no 'Transaction Hash' / 'Txhash' column) found")
 
 
 # ---------------------------------------------------------------------------
@@ -166,15 +200,16 @@ def parse_etherscan(text: str, default_account: Optional[str] = None) -> list[Cr
     header = None
     start = 0
     for i, row in enumerate(rows):
-        if any((c or "").strip().lower() == "txhash" for c in row):
+        if any(_is_hash_col((c or "").strip().lower()) for c in row):
             header, start = row, i + 1
             break
     if header is None:
-        raise ValueError("no Etherscan header row (no 'Txhash' column) found")
+        raise ValueError(
+            "no Etherscan header row (no 'Transaction Hash' / 'Txhash' column) found")
 
-    i_hash = _find_col(header, lambda n: n == "txhash")
+    i_hash = _find_col(header, _is_hash_col)
     i_unix = _find_col(header, lambda n: n == "unixtimestamp")
-    i_dt = _find_col(header, lambda n: n == "datetime")
+    i_dt = _find_col(header, _is_datetime_col)
     i_from = _find_col(header, lambda n: n == "from")
     i_to = _find_col(header, lambda n: n == "to")
     i_contract = _find_col(header, lambda n: n.replace(" ", "") == "contractaddress")
@@ -187,7 +222,7 @@ def parse_etherscan(text: str, default_account: Optional[str] = None) -> list[Cr
     i_err = _find_col(header, lambda n: n == "errcode")
 
     missing = [name for name, idx in (
-        ("Txhash", i_hash), ("Value_IN", i_in), ("Value_OUT", i_out),
+        ("Transaction Hash", i_hash), ("Value_IN", i_in), ("Value_OUT", i_out),
         ("Historical $Price/Eth", i_hist), ("From", i_from), ("To", i_to),
     ) if idx is None]
     if missing:

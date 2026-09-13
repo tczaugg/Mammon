@@ -1940,10 +1940,10 @@ def test_banking_reconcile_keeps_start_end_variant(qapp, conn, accounts):
     assert "deposits" in dlg.summary_label.text()
 
 
-# ---- print register (Settings > Print Register) ----------------------------
+# ---- print register (gear menu > Print Register) ----------------------------
 def test_print_register_renders_pdf_and_menu_action(qapp, conn, accounts, tmp_path):
     from mammon.ui import printing
-    from mammon.ui.widgets import MainWindow
+    from mammon.ui.widgets import RegisterWidget
 
     chk, _ = accounts                            # opening 100_00
     ledger.add_transaction(conn, chk, "2026-01-05", -25_00, payee="Store")
@@ -1963,13 +1963,11 @@ def test_print_register_renders_pdf_and_menu_action(qapp, conn, accounts, tmp_pa
     data = pdf.read_bytes()
     assert data[:5] == b"%PDF-" and len(data) > 500   # a real, non-empty PDF
 
-    # 'Print Register...' is wired into the Settings submenu.
-    win = MainWindow(conn)
-    settings = next(m.menu() for m in win.menuBar().actions()
-                    if m.text().replace("&", "") == "Settings")
-    labels = {a.text().replace("…", "").strip() for a in settings.actions()}
+    # 'Print Register...' moved off the Settings menu onto each register's gear.
+    reg = RegisterWidget(conn, chk)
+    labels = {a.text().replace("…", "").strip() for a in reg.gear_menu.actions()}
     assert "Print Register" in labels
-    win.close()
+    assert reg.toolbar.act_print in reg.gear_menu.actions()
 
 
 # ---- two-line register rows + one/two-line toggle (P2i) ---------------------
@@ -4157,7 +4155,7 @@ def test_loan_wizard_reloads_and_edits_existing(qapp, conn):
     # first-payment date reproduces (origination + one interval)
     assert date_edit_iso(wiz.first_payment) == "2024-02-01"
     assert wiz.rates_table.rowCount() == 1
-    assert wiz._cell_text(wiz.rates_table, 0, 0) == "2024-02-01"
+    assert wiz._date_cell_iso(wiz.rates_table, 0, 0) == "2024-02-01"
     assert wiz.extras_table.rowCount() == 1
     assert wiz._extra_category(0) == "Escrow"
 
@@ -4210,8 +4208,8 @@ def test_loan_wizard_extras_carry_effective_dates(qapp, conn):
     # reopening the wizard reloads the dated rows into the extras table
     wiz2 = LoanSetupWizard(conn, account_id=aid)
     assert wiz2.extras_table.rowCount() == 2
-    assert wiz2._cell_text(wiz2.extras_table, 0, 2) == "2024-02-01"
-    assert wiz2._cell_text(wiz2.extras_table, 1, 2) == "2025-01-01"
+    assert wiz2._date_cell_iso(wiz2.extras_table, 0, 2) == "2024-02-01"
+    assert wiz2._date_cell_iso(wiz2.extras_table, 1, 2) == "2025-01-01"
 
 
 def test_loan_wizard_new_total_payment_persists_and_defaults(qapp, conn):
@@ -4422,7 +4420,7 @@ def test_loan_setup_moved_out_of_settings_menu(qapp, tmp_path):
                     if m.text().replace("&", "") == "Settings")
     labels = {a.text().replace("…", "").strip() for a in settings.actions()}
     assert "Loan Setup" not in labels        # relocated to the loan register
-    assert "Reconcile to Statement" in labels  # other entries remain
+    assert "Display Preferences" in labels     # other entries remain
     win.close()
     conn.close()
 
@@ -5053,6 +5051,8 @@ def _fake_client(available=True, results=None):
 
 
 def test_tools_menu_has_accounts_and_toolbar_lacks_it(qapp, conn, accounts):
+    """The account roster and 'new account' live on their own Accounts menu,
+    not scattered across File/Tools."""
     from mammon.ui.widgets import MainWindow
     win = MainWindow(conn, webslinger=_fake_client())
 
@@ -5060,8 +5060,56 @@ def test_tools_menu_has_accounts_and_toolbar_lacks_it(qapp, conn, accounts):
         return next(m.menu() for m in win.menuBar().actions()
                     if m.text().replace("&", "") == title)
 
-    assert "Accounts…" in [a.text() for a in menu("Tools").actions()]
-    assert "Accounts…" not in [a.text() for a in menu("File").actions()]
+    accounts_labels = [a.text() for a in menu("Accounts").actions()]
+    assert "Account List…" in accounts_labels
+    assert "New Account…" in accounts_labels
+    assert "Accounts…" not in [a.text() for a in menu("Tools").actions()]
+    assert "Account List…" not in [a.text() for a in menu("Tools").actions()]
+    assert "New Account…" not in [a.text() for a in menu("File").actions()]
+    win.close()
+
+
+def test_view_menu_has_calendar_and_investment_center_placeholder(qapp, conn, accounts):
+    """Financial Calendar moved off Tools onto View, alongside a disabled
+    Investment Center placeholder for the not-yet-built holdings landing page."""
+    from mammon.ui.widgets import MainWindow
+    win = MainWindow(conn, webslinger=_fake_client())
+
+    def menu(title):
+        return next(m.menu() for m in win.menuBar().actions()
+                    if m.text().replace("&", "") == title)
+
+    view_labels = [a.text() for a in menu("View").actions()]
+    assert "Financial Calendar" in view_labels
+    assert "Investment Center…" in view_labels
+    ic = next(a for a in menu("View").actions() if a.text() == "Investment Center…")
+    assert ic.isEnabled() is False
+
+    assert "Financial Calendar" not in [a.text() for a in menu("Tools").actions()]
+    win.close()
+
+
+def test_format_preferences_menu_round_trips_the_date_format(qapp, conn, accounts):
+    """Date format moved off the Display Preferences dialog onto its own
+    Settings > Format Preferences submenu (an exclusive choice of formats,
+    not a combo box)."""
+    from mammon.ui.widgets import MainWindow
+    win = MainWindow(conn, webslinger=_fake_client())
+
+    settings = next(m.menu() for m in win.menuBar().actions()
+                     if m.text().replace("&", "") == "Settings")
+    fmt_menu = next(a.menu() for a in settings.actions()
+                     if a.text().replace("&", "") == "Format Preferences")
+    labels = [a.text() for a in fmt_menu.actions()]
+    for fmt in prefs.DATE_FORMATS:
+        assert fmt in labels
+
+    current = next(a for a in fmt_menu.actions() if a.isChecked())
+    assert current.text() == prefs.date_format()
+
+    other = next(a for a in fmt_menu.actions() if a.text() != current.text())
+    other.trigger()
+    assert prefs.date_format() == other.text()
     win.close()
 
 
@@ -5201,6 +5249,53 @@ def test_download_gate_enabled_when_fully_configured(qapp, conn):
     reg = win.open_register(chk)
     assert reg.toolbar.act_download.isEnabled() is True
     win.close()
+
+
+def test_the_app_runs_with_no_webslinger_at_all(qapp, conn, tmp_path, monkeypatch):
+    """The supported no-webSlinger CONOP: the app RUNS, and every automated
+    surface degrades to a manual one.
+
+    webSlinger is the only optional component in Mammon (it is not a Python
+    package -- it is an external MCP tool launched over stdio), so running
+    without it has to work: download transactions from the bank by hand and
+    import the files, enter home valuations and balances manually. Every other
+    test of this injects a fake client or None; this one boots the window on a
+    genuinely UNCONFIGURED real client -- no $MAMMON_WEBSLINGER_MCP_CMD and a
+    config path that does not exist -- because that is the path a real user on a
+    fresh machine takes, and a failure there would mean the app does not start at
+    all rather than merely lacking a feature."""
+    from mammon.ui.widgets import MainWindow
+    from mammon.webslinger import McpWebSlingerClient
+    monkeypatch.delenv("MAMMON_WEBSLINGER_MCP_CMD", raising=False)
+    client = McpWebSlingerClient(config_path=str(tmp_path / "nope.json"))
+    assert client.available() is False          # genuinely unconfigured, not a fake
+
+    chk = ledger.create_account(conn, "AF Checking", "checking")
+    ledger.add_transaction(conn, chk, "2026-01-05", -25_00, payee="Safeway")
+    win = MainWindow(conn, webslinger=client)
+    try:
+        # 1. The window built and the ledger is on screen: nothing about a missing
+        #    automation tool may keep the app from opening its own data.
+        assert win.accounts.model.rowCount() >= 1
+        reg = win.open_register(chk)
+        assert reg is not None and reg.model.rowCount() >= 1
+        # 2. Download stays CLICKABLE (bug 6cfb82e4) so its handler can explain
+        #    what is missing -- a greyed button explains nothing.
+        assert reg.toolbar.act_download.isEnabled() is True
+        # 3. Clicking it reports the problem instead of raising. This is the
+        #    "appropriate error message" the manual workflow relies on.
+        seen = _capture_download_modal(monkeypatch)
+        from PyQt5.QtWidgets import QMessageBox
+        warned = []
+        monkeypatch.setattr(
+            QMessageBox, "warning",
+            staticmethod(lambda parent, title, text, *a, **k: warned.append((title, text))))
+        win._download_account(chk)              # must not raise
+        told = seen + warned
+        assert told, "clicking Download with no webSlinger said nothing at all"
+        assert any(t.strip() for _title, t in told)
+    finally:
+        win.close()
 
 
 def test_download_button_always_enabled_even_when_unconfigured(qapp, conn):
@@ -5530,8 +5625,8 @@ def test_import_qif_menu_single_account_investment_routes_via_review_pipeline(
            "D02/01'26\nNBuy\nYAAPL\nQ10\nI150.00\nT1500.00\n^\n")
     p = tmp_path / "roll.qif"
     p.write_text(qif, encoding="utf-8")
-    monkeypatch.setattr(QFileDialog, "getOpenFileName",
-                        staticmethod(lambda *a, **k: (str(p), "")))
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(p)], "")))
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     win = MainWindow(conn)
@@ -6233,8 +6328,8 @@ def test_import_qif_menu_single_account_routes_to_review(qapp, conn, tmp_path, m
     from mammon import import_review
     p = tmp_path / "checking.qif"
     p.write_text(_QIF_MENU_SINGLE, encoding="utf-8")
-    monkeypatch.setattr(QFileDialog, "getOpenFileName",
-                        staticmethod(lambda *a, **k: (str(p), "")))
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(p)], "")))
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     win = MainWindow(conn)
@@ -6257,8 +6352,8 @@ def test_import_qif_menu_multi_account_imports_directly(qapp, conn, tmp_path, mo
              "!Type:Bank\nD01/15'26\nL[AF Checking]\nT40.00\n^\n")
     p = tmp_path / "both.qif"
     p.write_text(qif, encoding="utf-8")
-    monkeypatch.setattr(QFileDialog, "getOpenFileName",
-                        staticmethod(lambda *a, **k: (str(p), "")))
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(p)], "")))
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     win = MainWindow(conn)
@@ -6269,6 +6364,140 @@ def test_import_qif_menu_multi_account_imports_directly(qapp, conn, tmp_path, mo
         "SELECT transfer_pair_id FROM transactions WHERE transfer_account_id IS NOT NULL"
     ).fetchall()
     assert len(rows) == 2 and all(r["transfer_pair_id"] is not None for r in rows)
+    win.close()
+
+
+# ---------------------------------------------------------------------------
+# MULTI-FILE QIF import: a full Quicken history comes out a YEAR AT A TIME, so
+# the File menu takes the whole set at once and imports it in sorted order.
+# ---------------------------------------------------------------------------
+def _qif_menu_year(year, payee, amount):
+    """A two-account QIF for one year (multi-account -> the direct bulk route)."""
+    return (
+        "!Account\nNAF Checking\nTBank\n^\n"
+        f"!Type:Bank\nD03/03'{year[2:]}\nT-{amount}\nP{payee}\nLGroceries\n^\n"
+        "!Account\nNAF Savings\nTBank\n^\n"
+        f"!Type:Bank\nD03/04'{year[2:]}\nL[AF Checking]\nT25.00\n^\n"
+    )
+
+
+def test_qif_import_order_is_alphanumeric_by_file_name():
+    """The set's import order is a pure function of the names, so a user can
+    guarantee it by naming files with four-digit years."""
+    from mammon.ui.widgets import MainWindow
+    out = MainWindow._qif_import_order([
+        r"C:\x\Mammon_1998.QIF", r"C:\x\Mammon_1995_1996.QIF", r"C:\x\Mammon_1997.QIF"])
+    assert [p.rsplit("\\", 1)[1] for p in out] == [
+        "Mammon_1995_1996.QIF", "Mammon_1997.QIF", "Mammon_1998.QIF"]
+
+
+def test_import_qif_menu_accepts_several_files_and_imports_them_in_order(
+        qapp, conn, tmp_path, monkeypatch):
+    """Multi-select imports the whole set in ONE action, oldest file FIRST even
+    when the dialog hands the paths back newest-first -- and every file lands.
+    (A per-file cutover watermark would have let the 1998 file shut the 1997 one
+    out and reported its rows as duplicates.)"""
+    from PyQt5.QtWidgets import QFileDialog, QMessageBox
+    from mammon.ui.widgets import MainWindow
+    older = tmp_path / "Mammon_1997.QIF"
+    older.write_text(_qif_menu_year("1997", "Old Grocer", "10.00"), encoding="utf-8")
+    newer = tmp_path / "Mammon_1998.QIF"
+    newer.write_text(_qif_menu_year("1998", "New Grocer", "12.00"), encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a, **k: ([str(newer), str(older)], "")))
+    said = {}
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda *a, **k: said.setdefault("msg", a[2] if len(a) > 2 else "")))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    win = MainWindow(conn)
+    win._import_qif_dialog()
+    dates = [r["date"] for r in conn.execute("SELECT date FROM transactions")]
+    assert any(d.startswith("1997") for d in dates), "the older file was skipped"
+    assert any(d.startswith("1998") for d in dates), "the newer file was skipped"
+    # One report, naming the order actually used so a mis-sorted set is visible.
+    assert "Mammon_1997.QIF, Mammon_1998.QIF" in said.get("msg", "")
+    win.close()
+
+
+class _FakeProgress:
+    """Stands in for QProgressDialog: records what the user would have seen."""
+
+    def __init__(self, cancel_after=None):
+        self.labels = []
+        self.values = []
+        self.closed = False
+        self._cancel_after = cancel_after
+
+    def wasCanceled(self):
+        return (self._cancel_after is not None
+                and len(self.labels) >= self._cancel_after)
+
+    def setLabelText(self, text):
+        self.labels.append(text)
+
+    def setValue(self, v):
+        self.values.append(v)
+
+    def close(self):
+        self.closed = True
+
+
+def test_multi_file_import_reports_progress_per_file(qapp, conn, tmp_path, monkeypatch):
+    """The import runs on the GUI thread, so without this the window greys out
+    with nothing to say for itself. Each file names itself and its position as it
+    starts, and the dialog is closed when the run ends."""
+    from PyQt5.QtWidgets import QFileDialog, QMessageBox
+    from mammon.ui.widgets import MainWindow
+    a = tmp_path / "Mammon_1997.QIF"
+    a.write_text(_qif_menu_year("1997", "Old Grocer", "10.00"), encoding="utf-8")
+    b = tmp_path / "Mammon_1998.QIF"
+    b.write_text(_qif_menu_year("1998", "New Grocer", "12.00"), encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a_, **k: ([str(b), str(a)], "")))
+    said = {}
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda *a_, **k: said.setdefault("msg", a_[2] if len(a_) > 2 else "")))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a_, **k: None))
+    win = MainWindow(conn)
+    fake = _FakeProgress()
+    monkeypatch.setattr(win, "_qif_progress", lambda total: fake)
+    win._import_qif_dialog()
+    assert fake.labels == ["Importing Mammon_1997.QIF  (1 of 2)",
+                           "Importing Mammon_1998.QIF  (2 of 2)"]
+    assert fake.values[-1] == 2 and fake.closed
+    # The report carries the per-file record the user asked for.
+    assert "Mammon_1997.QIF: +" in said.get("msg", "")
+    assert "Mammon_1998.QIF: +" in said.get("msg", "")
+    win.close()
+
+
+def test_cancelling_a_multi_file_import_keeps_what_already_landed(
+        qapp, conn, tmp_path, monkeypatch):
+    """Cancel takes effect BETWEEN files: the set stops, and the files already
+    imported stay (each commits its own rows). A 32-file migration you cannot
+    stop is its own problem."""
+    from PyQt5.QtWidgets import QFileDialog, QMessageBox
+    from mammon.ui.widgets import MainWindow
+    a = tmp_path / "Mammon_1997.QIF"
+    a.write_text(_qif_menu_year("1997", "Old Grocer", "10.00"), encoding="utf-8")
+    b = tmp_path / "Mammon_1998.QIF"
+    b.write_text(_qif_menu_year("1998", "New Grocer", "12.00"), encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        staticmethod(lambda *a_, **k: ([str(a), str(b)], "")))
+    said = {}
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda *a_, **k: said.setdefault("msg", a_[2] if len(a_) > 2 else "")))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a_, **k: None))
+    win = MainWindow(conn)
+    monkeypatch.setattr(win, "_qif_progress", lambda total: _FakeProgress(cancel_after=1))
+    win._import_qif_dialog()
+    dates = [r["date"] for r in conn.execute("SELECT date FROM transactions")]
+    assert any(d.startswith("1997") for d in dates), "the first file was rolled back"
+    assert not any(d.startswith("1998") for d in dates), "cancel did not stop the set"
+    assert "Cancelled after" in said.get("msg", "")
     win.close()
 
 
@@ -6802,14 +7031,23 @@ def test_sound_respects_the_settings_switch(qapp, conn, accounts, tmp_path):
     sounds.reset_for_tests()
 
 
-def test_display_preferences_round_trips_the_sound_switch(qapp, conn):
-    from mammon.ui.widgets import DisplayPreferencesDialog
+def test_sound_preferences_menu_round_trips_the_sound_switch(qapp, conn):
+    """Sound moved off the Display Preferences dialog onto its own Settings >
+    Sound Preferences submenu (a checkable action, not a dialog field)."""
+    from mammon.ui.widgets import MainWindow
 
-    dlg = DisplayPreferencesDialog()
-    assert dlg.sound.isChecked() is prefs.DEFAULT_SOUND
-    dlg.sound.setChecked(False)
-    prefs.set_display_prefs(dlg.values())
+    win = MainWindow(conn)
+    settings = next(m.menu() for m in win.menuBar().actions()
+                     if m.text().replace("&", "") == "Settings")
+    sound_menu = next(a.menu() for a in settings.actions()
+                       if a.text().replace("&", "") == "Sound Preferences")
+    act = next(a for a in sound_menu.actions()
+               if a.text().replace("&", "") == "Play Sound on Transaction Save")
+
+    assert act.isChecked() is prefs.DEFAULT_SOUND
+    act.trigger()
     assert prefs.sound_enabled() is False
+    win.close()
 
 
 # ---- one date format, everywhere -------------------------------------------

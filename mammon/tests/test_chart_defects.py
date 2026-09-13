@@ -1,4 +1,4 @@
-"""Regressions for two reported chart defects (SRD 5.8d chart-readability).
+"""Regressions for two reported chart defects (SRD 5.9c chart-readability).
 
 Defect 7 -- the category pies (Spending by Category / Income by Category, and
 the shared Asset Allocation pie) drew from a 10-colour palette that wrapped with

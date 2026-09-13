@@ -82,9 +82,11 @@ def test_new_target_seeds_from_today_and_reads_on_target(qapp, conn, world):
 def test_editing_a_target_percent_redraws_the_drift(qapp, conn, world):
     dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Mix")
     dlg.new_target()
-    # Pull equities down to 50: now 20 points overweight, and the row says sell.
+    # Cash is settled, so lock it: pulling equities down to 50 then lands
+    # entirely on bonds (40), the column still totals 100, and equities read 20
+    # points overweight, so the row says sell.
+    dlg.set_locked("cash", True)
     dlg.set_target_pct("domestic_stock", 50)
-    dlg.set_target_pct("bond", 40)
     # The numbers are correct at once; the TABLE is rebuilt off the signal
     # stack (see set_target_pct), so the redraw lands on the next turn.
     qapp.processEvents()
@@ -107,13 +109,30 @@ def test_editing_a_target_percent_redraws_the_drift(qapp, conn, world):
 def test_a_target_that_does_not_total_100_is_shown_not_normalized(qapp, conn, world):
     dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Partial")
     tid = dlg.new_target()
-    # Zeroing a class drops its target line AND its row -- the case that makes
-    # the deferred rebuild load-bearing rather than theoretical.
-    dlg.set_target_pct("cash", 0)                    # 70 + 20, totals 90
+    # The EDITOR can no longer build a total like this -- it rebalances the
+    # unlocked classes -- but a line written straight through the domain (or by
+    # a build that predates the locks) still can, and it is SHOWN, not quietly
+    # normalized into a plausible, wrong target.
+    rebalance.set_line(conn, tid, "cash", 0)         # 70 + 20, totals 90
+    dlg.refresh()
     qapp.processEvents()
     assert rebalance.target_total(conn, tid) == Decimal("90")
     assert "adds up to 90.0%" in dlg.status.text()
     assert not dlg.report.target_is_complete
+    dlg.deleteLater()
+
+
+def test_zeroing_a_class_in_the_editor_keeps_the_total_at_100(qapp, conn, world):
+    """Zeroing a class drops its target line -- the case that makes the deferred
+    rebuild load-bearing rather than theoretical -- and what it gave up is
+    spread over the other unlocked classes rather than lost from the total."""
+    dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "No cash")
+    tid = dlg.new_target()
+    dlg.set_target_pct("cash", 0)
+    qapp.processEvents()
+    lines = rebalance.target_lines(conn, tid)
+    assert "cash" not in lines
+    assert rebalance.target_total(conn, tid) == Decimal("100")
     dlg.deleteLater()
 
 

@@ -664,14 +664,25 @@ class PriceHistoryCanvas(FigureCanvasQTAgg):
     dollars per share -- exactly as :func:`mammon.investments.price_history`
     returns them. An empty list renders a placeholder instead of an empty chart
     (like the other canvases), so the caller can hand it a symbol with no
-    recorded prices without a crash."""
+    recorded prices without a crash.
 
-    def __init__(self, symbol, points, parent=None):
+    ``currency`` is the native currency of the ACCOUNT the security or coin is
+    held in (securities carry no currency of their own -- the account does, see
+    :func:`mammon.fx.get_account_currency`). A price plotted for a CAD account
+    is in CAD, and a chart that stamps a dollar sign on it invites the reader to
+    add it to USD totals; so the axis is LABELLED with the currency, the title
+    names it, and the tick formatter prints the ``$`` only for USD. It stays
+    OPTIONAL and defaults to USD formatting so a caller with no account context
+    (and the two-argument construction in the tests) keeps working."""
+
+    def __init__(self, symbol, points, parent=None, currency=None):
         fig = Figure(figsize=(6.4, 4.8), tight_layout=True)
         super().__init__(fig)
         if parent is not None:
             self.setParent(parent)
         ax = fig.add_subplot(111)
+        ccy = (currency or "USD").strip().upper() or "USD"
+        self.currency = ccy
         points = list(points or [])
         if not points:
             ax.text(0.5, 0.5, f"No recorded prices for {symbol}",
@@ -694,16 +705,23 @@ class PriceHistoryCanvas(FigureCanvasQTAgg):
         ax.plot(idx, ys, color=_BLUE, linewidth=1.8, marker="o", markersize=3)
         ax.fill_between(idx, ys, min(ys), color=_BLUE, alpha=0.12)
         self._draw_uncertainty(ax, idx, ys, bounds)
-        # Price is dollars per share (not cents): format the axis with two decimals.
-        ax.yaxis.set_major_formatter(
-            FuncFormatter(lambda v, _pos: f"${v:,.2f}"))
+        # Price is currency units per share (not cents): two decimals, and the
+        # '$' ONLY when the holding account is in USD -- a CAD price wearing a
+        # bare dollar sign reads as USD.
+        if ccy == "USD":
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda v, _pos: f"${v:,.2f}"))
+        else:
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda v, _pos: f"{v:,.2f} {ccy}"))
+        ax.set_ylabel(f"Price ({ccy})", fontsize=9)
 
         step = max(1, len(xs) // 8)
         ticks = list(range(0, len(xs), step))
         ax.set_xticks(ticks)
         ax.set_xticklabels([fmt_date(xs[i]) for i in ticks], rotation=45,
                            ha="right", fontsize=8)
-        ax.set_title(f"Price History - {symbol}", fontsize=10)
+        ax.set_title(f"Price History - {symbol} ({ccy})", fontsize=10)
         ax.grid(True, axis="y", alpha=0.25)
 
     @staticmethod

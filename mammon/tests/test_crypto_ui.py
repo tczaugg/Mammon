@@ -79,7 +79,14 @@ class _FakeSource:
 
 
 def _cell(model, row, col):
-    return model.data(model.index(row, col), Qt.DisplayRole)
+    """One cell, addressed by column KEY.
+
+    The keys are not positions. A wallet and an exchange show DIFFERENT columns,
+    so ``model.column_index`` is the supported way to locate one -- the constants
+    happened to equal their positions in the exchange layout until a Transfer
+    column was added after Payee, and treating that coincidence as an API is what
+    made these tests read the wrong cells."""
+    return model.data(model.index(row, model.column_index(col)), Qt.DisplayRole)
 
 
 def _row_where(model, **match):
@@ -208,12 +215,17 @@ def test_register_renders_wallet_transfer_as_mirror(qapp, conn, busy_wallet):
     wallet, cold, *_ = busy_wallet
     m = CryptoRegisterModel(conn, wallet)
     out_row = _row_where(m, action="TRANSFER_OUT")
-    # The transfer mirror renders as [Other Wallet], consuming no category.
-    assert _cell(m, out_row, m.COIN) == "[Cold Wallet]"
+    # The other wallet is named in its OWN column, as a cash register names a
+    # transfer account in the field after the payee. It used to be rendered in
+    # the COIN column instead, which meant a transfer row could not say which
+    # coin moved -- and left the register with no transfer field at all.
+    assert _cell(m, out_row, m.TRANSFER) == "[Cold Wallet]"
+    assert _cell(m, out_row, m.COIN) == "ETH"
     # The mirror leg lives in the OTHER account and points back here.
     mc = CryptoRegisterModel(conn, cold)
     in_row = _row_where(mc, action="TRANSFER_IN")
-    assert _cell(mc, in_row, mc.COIN) == "[Hot Wallet]"
+    assert _cell(mc, in_row, mc.TRANSFER) == "[Hot Wallet]"
+    assert _cell(mc, in_row, mc.COIN) == "ETH"
 
 
 def test_register_renders_gas_as_same_coin_fee_leg(qapp, conn, busy_wallet):
@@ -236,9 +248,11 @@ def test_crypto_register_widget_builds(qapp, conn, busy_wallet):
     w = CryptoRegisterWidget(conn, wallet)
     assert isinstance(w.model, CryptoRegisterModel)
     # buy + swap-out + swap-in + transfer-out + send (the transfer-IN leg lives
-    # in the cold wallet, not here).
-    assert w.model.rowCount() == 5
-    # Read-only register: no inline editor ever opens.
+    # in the cold wallet, not here), PLUS the trailing blank quick-entry row that
+    # brings manual entry to parity with the cash register.
+    assert w.model.rowCount() == 6
+    assert w.model.is_blank_row(w.model.rowCount() - 1)
+    # No editor is open on first build (the blank row exists but is not editing).
     assert w.has_open_editor() is False
     # The valuation header reads through the crypto domain layer.
     assert "Total:" in w.valuation_label.text()

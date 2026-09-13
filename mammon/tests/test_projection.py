@@ -87,3 +87,76 @@ def test_reversed_range_and_empty_accounts(conn, accounts):
     p = projection.project(conn, [chk], "2026-01-10", "2026-01-01")
     assert p.start == "2026-01-01" and p.end == "2026-01-10" and len(p.days) == 10
     assert projection.projected_events(conn, [], "2026-01-01", "2026-01-31") == []
+
+
+# --- a reminder and a prediction of the same bill are one event ------------
+#
+# Reported from the calendar: one entry for a card payment in the month that
+# already had the payment posted, two in the next month. The definition's
+# stored payee text no longer matches the bank text on the rows (a rename
+# landed after the definition was written), so predict_recurring's "covered"
+# guard misses it, and is_entered only hides a prediction in a month that has
+# a posted row. projected_events reconciles the two sources at the merge.
+
+def _drifted_card_world(conn):
+    """A monthly card payment whose ledger rows and whose definition normalize
+    to DIFFERENT payee keys, with history enough to be predicted."""
+    chk = ledger.create_account(conn, "Checking", "checking", opening_balance=5000_00)
+    for month in (6, 7, 8, 9, 10):
+        ledger.add_transaction(conn, chk, f"2026-{month:02d}-01", -250_00,
+                               payee="Examplebank Card Pmt 4821")
+    # The definition the user wrote, under the renamed display payee.
+    scheduled.add_scheduled(conn, chk, payee="Example Bank Card", amount=-250_00,
+                            frequency="monthly", next_date="2026-11-01")
+    return chk
+
+
+def test_prediction_does_not_duplicate_a_reminder_whose_payee_drifted(conn):
+    from mammon import predictions
+
+    chk = _drifted_card_world(conn)
+    today = "2026-10-15"
+    # The guard that was supposed to prevent this really does miss: the
+    # definition's key and the rows' key are different strings.
+    assert predictions.payee_key("Example Bank Card") != \
+        predictions.payee_key("Examplebank Card Pmt 4821")
+    pred = [p for p in predictions.predict_recurring(conn, today, account_ids=[chk])
+            if p.amount == -250_00]
+    assert len(pred) == 1 and pred[0].next_date == "2026-11-01"
+
+    # October: the payment is posted, so exactly one event -- this always held.
+    oct_events = projection.projected_events(conn, [chk], "2026-10-01", "2026-10-31",
+                                             today=today)
+    card = [e for e in oct_events if e.amount == -250_00]
+    assert [(e.date, e.source) for e in card] == [("2026-10-01", "entered")]
+
+    # November: nothing posted yet. The reminder survives, the prediction of
+    # the same bill on the same day is dropped (this used to be two rows).
+    nov_events = projection.projected_events(conn, [chk], "2026-11-01", "2026-11-30",
+                                             today=today)
+    card = [e for e in nov_events if e.amount == -250_00]
+    assert [(e.date, e.source) for e in card] == [("2026-11-01", "scheduled")]
+    assert not [e for e in nov_events if e.source == "predicted"]
+
+
+def test_prediction_near_a_reminder_survives_when_neither_payee_nor_amount_match(conn):
+    """The negative control: two genuinely different bills on one day, and a
+    prediction that merely shares an amount with a reminder a fortnight away."""
+    chk = ledger.create_account(conn, "Checking", "checking", opening_balance=5000_00)
+    # Predicted: a monthly membership on the 1st.
+    for month in (6, 7, 8, 9, 10):
+        ledger.add_transaction(conn, chk, f"2026-{month:02d}-01", -45_00,
+                               payee="Neighborhood Gym")
+    # Reminder: a different payee, a different amount, the same day.
+    scheduled.add_scheduled(conn, chk, payee="Example Landlord", amount=-900_00,
+                            frequency="monthly", next_date="2026-11-01")
+    # Reminder: the SAME amount as the prediction, but three weeks away.
+    scheduled.add_scheduled(conn, chk, payee="Example Storage", amount=-45_00,
+                            frequency="monthly", next_date="2026-11-22")
+    events = projection.projected_events(conn, [chk], "2026-11-01", "2026-11-30",
+                                         today="2026-10-15")
+    assert [(e.date, e.payee, e.amount, e.source) for e in events] == [
+        ("2026-11-01", "Example Landlord", -900_00, "scheduled"),
+        ("2026-11-01", "Neighborhood Gym", -45_00, "predicted"),
+        ("2026-11-22", "Example Storage", -45_00, "scheduled"),
+    ]

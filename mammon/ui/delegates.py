@@ -7,8 +7,9 @@ from PyQt5.QtCore import (QDate, QEvent, QPersistentModelIndex, QRect, QSize,
                           QStringListModel, Qt, QTimer)
 from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
-    QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QHeaderView,
-    QInputDialog, QLineEdit, QMessageBox, QStyledItemDelegate, QWidget,
+    QApplication, QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QHeaderView,
+    QInputDialog, QLineEdit, QMessageBox, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QWidget,
 )
 
 from mammon.ui import style
@@ -80,21 +81,39 @@ def parent_autocomplete(typed: str, completion: str) -> str:
     return ":".join(parts[:level] + [seg]) + ":"
 
 
+# The focus reasons that genuinely mean "the editor just opened", so the shown
+# value should be selected for replacement. A WHITELIST on purpose -- see
+# select_all_on_focus for why "everything but the mouse" loses typed characters.
+_FRESH_OPEN = (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason,
+               Qt.OtherFocusReason)
+
+
 def select_all_on_focus(reason) -> bool:
     """Whether an editor gaining focus for the Qt focus ``reason`` should SELECT
     ALL its text -- so the first keystroke REPLACES the highlighted value (True) --
-    or leave the caret where it is so typing APPENDS (False).
+    or leave the caret and any selection alone so typing APPENDS (False).
 
-    Tab, backtab, shortcut and the programmatic focus a view gives a freshly opened
-    editor all mean the user did not aim a caret at a spot, so the highlighted value
-    is replaced -- matching the click-to-edit path (RegisterWidget._edit_cell),
-    which select-alls too. The ONE case that appends is a mouse click, which places
-    the caret where the user pressed. Previously EVERY keyboard/Tab open appended
-    while a click replaced, so Tab and click disagreed on the same field (BUG 2);
-    keying the choice on the focus reason makes Tab behave like click.
+    Only the reasons in ``_FRESH_OPEN`` select-all: Tab/backtab, a shortcut, and
+    ``OtherFocusReason`` -- the programmatic ``setFocus`` a view gives a freshly
+    created editor. Those mean the user did not aim a caret at a spot, so the
+    highlighted value is replaced, matching the click-to-edit path
+    (RegisterWidget._edit_cell). A mouse click (``MouseFocusReason``) appends at the
+    caret it placed. This is BUG 2: previously EVERY keyboard/Tab open appended
+    while a click replaced, so Tab and click disagreed on the same field.
+
+    A WHITELIST, not "everything but the mouse", because a re-focus that is NOT a
+    fresh open must not re-select. Typing a brand-new payee whose prefix matches no
+    known name makes QCompleter hide its popup, and Qt then delivers a FocusIn
+    carrying ``PopupFocusReason`` back to the line edit; the old blacklist
+    select-all'd there, so after two or three characters the typed prefix turned
+    blue (selected) and the next keystroke replaced everything typed so far --
+    characters lost entering a never-seen payee. ``ActiveWindowFocusReason``
+    (alt-tab out mid-entry and back) and ``MenuBarFocusReason`` shared the defect.
+    None of those mean a fresh open, so they fall through to APPEND and leave the
+    caret and selection untouched.
 
     A pure function of the reason so it is unit-testable headless."""
-    return reason != Qt.MouseFocusReason
+    return reason in _FRESH_OPEN
 
 
 def apply_focus_selection(line_edit, reason) -> None:
@@ -162,6 +181,14 @@ def make_date_edit(parent=None, iso: str = "", *, blank_ok: bool = False):
     the calendar) and cannot hold a non-date, so nothing downstream has to defend
     against one. ``blank_ok`` allows an empty value via a sentinel minimum date,
     for the few optional dates.
+
+    With no ``iso`` an unbound field opens on TODAY and stays typeable -- never
+    the Qt sentinel minimum (1752-09-14), which renders as blank AND refuses
+    keystrokes. A ``blank_ok`` field also defaults to today; the sentinel is only
+    ever reached by the user clearing the field, and ``date_edit_iso`` maps that
+    back to "". A caller that needs a field blank ON OPEN -- a date FILTER, where
+    today would hide all history -- opts in explicitly with
+    ``setDate(edit.minimumDate())`` after building it; an entry field never should.
     """
     from mammon.ui.models import qt_date_format
     edit = QDateEdit(parent) if parent is not None else QDateEdit()
@@ -499,6 +526,163 @@ def classification_zones(rect):
     return {"category": cat, "memo": memo, "tag": tag}
 
 
+def _text_width(fm, text) -> int:
+    """Width of ``text`` in ``fm``, across Qt versions (horizontalAdvance is the
+    non-deprecated spelling of the old width())."""
+    adv = getattr(fm, "horizontalAdvance", None)
+    return adv(text) if adv else fm.width(text)
+
+
+def paint_tag_swatches(painter, rect, swatches, *, text_color) -> None:
+    """Paint ``square name`` pairs left to right inside ``rect`` for a list of
+    ``(name, color)`` tuples -- a filled color square then the tag name, or the
+    name alone when the tag has no color. Shared by the one-line
+    :class:`TagDelegate` and the two-line payee tag zone so both draw the same
+    chips. Clips to ``rect``; a name that would overflow is elided."""
+    if not swatches:
+        return
+    fm = painter.fontMetrics()
+    side = max(6, min(10, rect.height() - 2))
+    x = rect.left()
+    y = rect.top()
+    h = rect.height()
+    right = rect.right()
+    for name, color in swatches:
+        if x >= right:
+            break
+        if color:
+            box = QRect(x, y + (h - side) // 2, side, side)
+            painter.fillRect(box, QColor(color))
+            painter.setPen(QColor(style.line_color()))
+            painter.drawRect(box)
+            x += side + 3
+        avail = right - x
+        if avail <= 0:
+            break
+        shown = fm.elidedText(name, Qt.ElideRight, avail)
+        painter.setPen(text_color)
+        painter.drawText(QRect(x, y, avail, h),
+                         int(Qt.AlignLeft | Qt.AlignVCenter), shown)
+        x += _text_width(fm, shown) + 8
+
+
+class TagDelegate(QStyledItemDelegate):
+    """The one-line register Tag cell: a small colored square before each tag
+    name. Colors are the tag's own identity color (``ledger.tag_colors``, surfaced
+    by ``RegisterModel.TAG_COLORS_ROLE``), and the chip set is the UNION of the
+    row's own tags and its split legs' tags -- so a split whose legs are tagged
+    shows each leg color on the collapsed row, without double-counting. With no
+    tags it is the plain default delegate, so an uncolored register is unchanged.
+    (In two-line mode the Tag COLUMN is hidden and the tag paints on the payee's
+    second line instead, so this delegate and that path never both fire.)"""
+
+    def paint(self, painter, option, index):
+        swatches = index.data(RegisterModel.TAG_COLORS_ROLE) or []
+        if not swatches:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""                       # base paints background/selection only
+        widget = opt.widget
+        st = widget.style() if widget else QApplication.style()
+        st.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        selected = bool(opt.state & QStyle.State_Selected)
+        text_color = (opt.palette.highlightedText().color() if selected
+                      else opt.palette.text().color())
+        cell = st.subElementRect(QStyle.SE_ItemViewItemText, opt, widget)
+        painter.save()
+        paint_tag_swatches(painter, cell, swatches, text_color=text_color)
+        painter.restore()
+
+
+class TransferAccountDelegate(QStyledItemDelegate):
+    """Pick a transfer account by typing, with autocomplete -- the same editor the
+    cash register's category/transfer cell uses, fed ONLY account names.
+
+    Consistency is the point. In the cash register a payee is free text and the
+    NEXT field resolves a category or an ``[Account]`` transfer target with
+    autocomplete. A crypto register had no such field at all, so the transfer
+    target had nowhere to live and ended up smuggled into the coin column.
+    Reusing :func:`make_category_combo` means this field completes, matches
+    case-insensitively and behaves exactly as its cash counterpart -- the same
+    request the loan wizard's "Paid from" got ("consistent with the others, but
+    no categories").
+
+    Choices come live from the model, so an account created since the register
+    opened is offered without rebuilding the delegate. Blank clears the link."""
+
+    def createEditor(self, parent, option, index):
+        model = index.model()
+        choices = (model.transfer_choices(index.row())
+                   if hasattr(model, "transfer_choices") else [])
+        return make_category_combo(parent, choices)
+
+    def setEditorData(self, editor, index):
+        txt = str(index.data(Qt.EditRole) or "")
+        i = editor.findText(txt)
+        if i >= 0:
+            editor.setCurrentIndex(i)
+        else:
+            editor.setEditText(txt)
+        select_editor_for_append(editor)
+
+    def setModelData(self, editor, model, index):
+        _accept_active_completion(editor)
+        model.setData(index, editor.currentText().strip(), Qt.EditRole)
+
+
+class ChoiceDelegate(QStyledItemDelegate):
+    """Edit a cell by picking from a FIXED list, supplied per-cell by a callable.
+
+    Used where the field is a closed vocabulary the domain layer validates and a
+    typo is not a correction but a crash: a crypto wallet row's action must be one
+    of ``crypto.WALLET_CREDIT_ACTIONS`` / ``WALLET_DEBIT_ACTIONS``, and
+    ``record_wallet_credit`` raises on anything else. A free-text editor would let
+    the user type ``RECIEVE`` and only find out at accept, with the row already
+    selected and the review list advanced. The list is fetched at editor-open
+    time (not at construction) because it depends on the row -- a coin-out row can
+    only ever be a send.
+
+    Not editable: the whole point is that the value cannot be off-vocabulary."""
+
+    def __init__(self, choices, parent=None):
+        super().__init__(parent)
+        self._choices = choices        # callable(index) -> list[str]
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.addItems([str(c) for c in (self._choices(index) or [])])
+        return combo
+
+    def setEditorData(self, editor, index):
+        current = str(index.data(Qt.EditRole) or "")
+        i = editor.findText(current)
+        if i >= 0:
+            editor.setCurrentIndex(i)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.EditRole)
+
+
+class FocusSelectDelegate(QStyledItemDelegate):
+    """A plain text-cell editor whose Tab / keyboard / programmatic open SELECTS
+    ALL its text (so the first keystroke REPLACES) while a mouse click leaves the
+    caret where it lands -- :class:`_FocusSelectLineEdit`'s behaviour, the very
+    one the cash register's Payee/Memo editors rely on.
+
+    Used for the crypto register's free-text and coin-quantity cells (Coin,
+    Payee, Memo and the Decimal-text Quantity / Price / Coin In / Coin Out / Fee)
+    so Tab and click behave there EXACTLY as they do in the cash register. The
+    default delegate's bare QLineEdit gives neither the focus-select nor the
+    click-to-append distinction, which is one of the field-behaviour differences
+    this register had. Reading/writing is the default EditRole round-trip; only
+    the editor widget changes."""
+
+    def createEditor(self, parent, option, index):
+        return _FocusSelectLineEdit(parent)
+
+
 class DateDelegate(QStyledItemDelegate):
     """Edit a date cell with a calendar popup, in the user's chosen date format.
     The cell DISPLAYS that format while the model stores/edits ISO YYYY-MM-DD, so
@@ -774,19 +958,27 @@ class PayeeTwoLineDelegate(QStyledItemDelegate):
         fm = QFontMetrics(font)
         painter.save()
         painter.setFont(font)
+        muted = QColor(style.muted_color())
         for field, r in self.second_line_rects(option.rect).items():
             if r.width() <= 0:
                 continue
             # a box around every field (filled or not) -- the user's request
             painter.setPen(QColor(style.line_color()))
             painter.drawRect(r.adjusted(0, 0, -1, -1))
+            inner = r.adjusted(self.TEXT_PAD, 0, -self.TEXT_PAD, 0)
+            if field == "tag":
+                # A colored square before each tag name (the row's own tags plus
+                # its split legs', via TAG_COLORS_ROLE), matching the one-line
+                # TagDelegate; the square replaces the old '#' marker.
+                swatches = index.sibling(
+                    index.row(), self._COL["tag"]).data(
+                        RegisterModel.TAG_COLORS_ROLE) or []
+                paint_tag_swatches(painter, inner, swatches, text_color=muted)
+                continue
             text = str(index.sibling(index.row(), self._COL[field]).data(Qt.DisplayRole) or "")
-            if field == "tag" and text:
-                text = f"#{text}"
             if not text:
                 continue
-            inner = r.adjusted(self.TEXT_PAD, 0, -self.TEXT_PAD, 0)
-            painter.setPen(QColor(style.muted_color()))
+            painter.setPen(muted)
             painter.drawText(inner, int(Qt.AlignLeft | Qt.AlignVCenter),
                              fm.elidedText(text, Qt.ElideRight, max(0, inner.width())))
         painter.restore()
