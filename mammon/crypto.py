@@ -44,7 +44,7 @@ allocation pie. The wallet address lives in the existing
 ``asset_class = 'crypto'`` carries the allocation classification.
 
 Two crypto account KINDS share that type, recorded explicitly in
-``accounts.crypto_kind`` (migration 61; SRD §5.8) -- BOTH multi-token and valued
+``accounts.crypto_kind`` (migration 61; SRD §5.8h) -- BOTH multi-token and valued
 like securities (a quantity per token, priced at market):
 
 - ``'wallet'`` -- a single address / paper wallet holding coins/ERC-20 tokens
@@ -111,7 +111,7 @@ from mammon import ledger, investments
 CRYPTO_ACCOUNT_TYPE = "crypto"
 CRYPTO_ASSET_CLASS = "crypto"
 
-# The two crypto account KINDS (SRD §5.8; both share accounts.type='crypto' and are
+# The two crypto account KINDS (SRD §5.8h; both share accounts.type='crypto' and are
 # BOTH multi-token, valued like securities -- a quantity per token, priced at market).
 # They differ only in whether an internal fiat cash sleeve exists:
 #   * WALLET   -- a single address / paper wallet holding coins/ERC-20 tokens ONLY.
@@ -261,6 +261,16 @@ def _validate_date(date: str) -> None:
     """Fail loudly on a non-ISO date rather than storing garbage the replay
     (which slices ``substr(date,1,4)`` for the year) would silently mishandle."""
     _dt.date.fromisoformat(date)
+
+
+def _valid_time(time) -> Optional[str]:
+    """``HH:MM:SS`` for a stated time of day, None for none. Anything else fails
+    loudly: the register orders a day's events by this text, so a stored
+    ``9:05`` would sort after ``14:00``."""
+    text = str(time or "").strip()
+    if not text:
+        return None
+    return _dt.time.fromisoformat(text).strftime("%H:%M:%S")
 
 
 def pair_symbol(symbol: str) -> str:
@@ -629,8 +639,10 @@ def _boundary_year(conn, account_id: int, as_of: Optional[str]) -> int:
 
 def _list_txns_in_range(conn, account_id: int,
                         after: Optional[str], through: Optional[str]) -> list:
-    """Crypto transactions in application order (date, id) with dates in
-    ``(after, through]`` -- either bound may be ``None`` for open-ended."""
+    """Crypto transactions in application order (date, time, id) with dates in
+    ``(after, through]`` -- either bound may be ``None`` for open-ended. A crypto
+    event states the moment it happened, so a day's events replay in that order;
+    one with no recorded time (migration 70) sorts ahead of the timed ones."""
     sql = "SELECT * FROM crypto_transactions WHERE account_id=?"
     params: list = [account_id]
     if after is not None:
@@ -639,7 +651,7 @@ def _list_txns_in_range(conn, account_id: int,
     if through is not None:
         sql += " AND date<=?"
         params.append(through)
-    sql += " ORDER BY date, id"
+    sql += " ORDER BY date, COALESCE(time, ''), id"
     return conn.execute(sql, tuple(params)).fetchall()
 
 
@@ -837,14 +849,19 @@ def record_event(conn, account_id: int, date: str, action: str, *,
                  fee_symbol=None, fee_quantity=None, fee_amount=None,
                  transfer_account_id=None, transfer_pair_id=None, swap_group_id=None,
                  tx_hash=None, memo=None, payee=None, fitid=None, import_id=None,
-                 commit: bool = True) -> int:
+                 time=None, commit: bool = True) -> int:
     """The low-level insert -- one row per single-asset delta. Quantities/prices
     are encoded to exponent-free Decimal TEXT; cents are stored as-is (signed).
     Invalidates checkpoints from ``date`` forward; does NOT rebuild holdings (the
     caller does, after a batch of edits). Use the ``record_buy`` / ``record_sell``
     / ``record_swap`` / ``record_wallet_transfer`` / ``record_income`` wrappers
-    for the common events; this is the escape hatch."""
+    for the common events; this is the escape hatch.
+
+    ``time`` is the event's time of day (``HH:MM:SS``, on the same clock as
+    ``date``) when the source states one; it orders a day's events (SRD
+    5.8j). None means unknown."""
     _validate_date(date)
+    time = _valid_time(time)
     act = _norm(action)
     if act not in ACTIONS:
         raise ValueError(f"unknown crypto action {action!r}; one of {sorted(ACTIONS)}")
@@ -852,8 +869,8 @@ def record_event(conn, account_id: int, date: str, action: str, *,
         "INSERT INTO crypto_transactions"
         "(account_id, date, action, symbol, quantity, price, amount, basis,"
         " fee_symbol, fee_quantity, fee_amount, transfer_account_id,"
-        " transfer_pair_id, swap_group_id, tx_hash, memo, payee, import_id, fitid)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " transfer_pair_id, swap_group_id, tx_hash, memo, payee, import_id, fitid, time)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             account_id, date, act, symbol or None,
             _qty_text(_D(quantity)) if quantity not in (None, "") else None,
@@ -865,6 +882,7 @@ def record_event(conn, account_id: int, date: str, action: str, *,
             int(fee_amount) if fee_amount is not None else None,
             transfer_account_id, transfer_pair_id, swap_group_id,
             tx_hash or None, memo or None, payee or None, import_id, fitid or None,
+            time,
         ),
     )
     _invalidate_holdings_checkpoints_from(conn, account_id, date)
@@ -873,9 +891,41 @@ def record_event(conn, account_id: int, date: str, action: str, *,
     return cur.lastrowid
 
 
+def fill_missing_time(conn, account_id: int, tx_hash: str, time) -> int:
+    """Stamp ``time`` on this account's events for ``tx_hash`` that have none,
+    and on the other leg of any transfer among them. Returns rows changed.
+
+    Rows imported before the ``time`` column existed (migration 70) carry only a
+    date. Re-importing the same export is how they get their time back: the
+    hash identifies the event exactly, the source states when it happened, and
+    a time already recorded is never overwritten. The day's order can change, so
+    the holdings snapshots are invalidated from that date as for any write."""
+    time = _valid_time(time)
+    if not time or not tx_hash:
+        return 0
+    rows = conn.execute(
+        "SELECT id, account_id, date, transfer_pair_id FROM crypto_transactions "
+        "WHERE account_id=? AND tx_hash=? AND time IS NULL",
+        (account_id, tx_hash)).fetchall()
+    ids = {r["id"] for r in rows} | {r["transfer_pair_id"] for r in rows
+                                     if r["transfer_pair_id"] is not None}
+    changed = 0
+    for tid in sorted(ids):
+        row = conn.execute("SELECT account_id, date FROM crypto_transactions "
+                           "WHERE id=? AND time IS NULL", (tid,)).fetchone()
+        if row is None:
+            continue
+        changed += conn.execute("UPDATE crypto_transactions SET time=? WHERE id=?",
+                                (time, tid)).rowcount
+        _invalidate_holdings_checkpoints_from(conn, row["account_id"], row["date"])
+    if changed:
+        conn.commit()
+    return changed
+
+
 def record_buy(conn, account_id: int, date: str, symbol: str, quantity, cost, *,
                price=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
-               memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+               memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """Buy ``quantity`` of ``symbol`` for ``cost`` cents (fiat out). Establishes a
     lot; the fiat debits the account's internal cash sleeve (``amount<0``)."""
     q = abs(_D(quantity))
@@ -886,12 +936,12 @@ def record_buy(conn, account_id: int, date: str, symbol: str, quantity, cost, *,
     return record_event(conn, account_id, date, "BUY", symbol=symbol, quantity=q,
                         price=price, amount=-cost_cents, fee_symbol=fee_symbol,
                         fee_quantity=fee_quantity, fee_amount=fee_amount,
-                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id, time=time)
 
 
 def record_sell(conn, account_id: int, date: str, symbol: str, quantity, proceeds, *,
                 price=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
-                memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+                memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """Sell ``quantity`` of ``symbol`` for ``proceeds`` cents (fiat in). Books
     realized gain from the lots per the account's method."""
     q = abs(_D(quantity))
@@ -902,12 +952,12 @@ def record_sell(conn, account_id: int, date: str, symbol: str, quantity, proceed
     return record_event(conn, account_id, date, "SELL", symbol=symbol, quantity=-q,
                         price=price, amount=proceeds_cents, fee_symbol=fee_symbol,
                         fee_quantity=fee_quantity, fee_amount=fee_amount,
-                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+                        memo=memo, tx_hash=tx_hash, fitid=fitid, import_id=import_id, time=time)
 
 
 def record_send(conn, account_id: int, date: str, symbol: str, quantity, fmv, *,
                 payee=None, fee_symbol=None, fee_quantity=None, fee_amount=None,
-                memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+                memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """Send ``quantity`` of ``symbol`` to a third party -- a disposal at ``fmv``
     cents fair-market value (books realized gain vs the relieved basis). A network
     fee (gas) rides the ``fee_*`` fields. ``payee`` is the on-chain ``To``
@@ -926,12 +976,12 @@ def record_send(conn, account_id: int, date: str, symbol: str, quantity, fmv, *,
     return record_event(conn, account_id, date, "SEND", symbol=symbol, quantity=-q,
                         price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                         fee_amount=fee_amount, memo=memo, payee=payee,
-                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id, time=time)
 
 
 def record_income(conn, account_id: int, date: str, action: str, symbol: str,
                   quantity, fmv, *, payee=None, memo=None, tx_hash=None,
-                  fitid=None, import_id=None) -> int:
+                  fitid=None, import_id=None, time=None) -> int:
     """Credit ``quantity`` of ``symbol`` as in-kind income (RECEIVE / REWARD /
     INTEREST / AIRDROP / MINING / FORK) at ``fmv`` cents fair-market value. Basis
     = FMV; the income actions accrue FMV to the checkpoint ``income`` total (FORK
@@ -948,11 +998,11 @@ def record_income(conn, account_id: int, date: str, action: str, symbol: str,
             price = (Decimal(fmv_cents) / _HUNDRED) / q
     return record_event(conn, account_id, date, act, symbol=symbol, quantity=q,
                         price=price, basis=fmv_cents, memo=memo, payee=payee,
-                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id, time=time)
 
 
 # ---------------------------------------------------------------------------
-# Coin-native WALLET writers (SRD §5.8; the ShrsIn/ShrsOut analogue). A wallet
+# Coin-native WALLET writers (SRD §5.8h; the ShrsIn/ShrsOut analogue). A wallet
 # moves coin with NO fiat leg -- a quantity arrives or leaves, valued at market
 # like a security -- so ``price``/``amount``/``basis`` stay NULL and the counterparty
 # address IS the payee. These route through ``record_event``, so :mod:`mammon.crypto`
@@ -978,7 +1028,7 @@ REMOVE_ACTIONS = _REMOVE_ACTIONS
 
 def record_wallet_credit(conn, account_id: int, date: str, symbol: str, quantity, *,
                          payee=None, action: str = "RECEIVE", price=None, basis=None,
-                         memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+                         memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """A coin-native INCREASE (the ShrsIn analogue): ``quantity`` of ``symbol``
     arrives with NO fiat leg. ``payee`` is the on-chain ``From`` counterparty and
     populates the register's Payee directly (there is no separate "counterparty"
@@ -996,13 +1046,13 @@ def record_wallet_credit(conn, account_id: int, date: str, symbol: str, quantity
     q = abs(_D(quantity))
     return record_event(conn, account_id, date, act, symbol=symbol, quantity=q,
                         price=price, basis=basis, memo=memo, payee=payee,
-                        tx_hash=tx_hash, fitid=fitid, import_id=import_id)
+                        tx_hash=tx_hash, fitid=fitid, import_id=import_id, time=time)
 
 
 def record_wallet_debit(conn, account_id: int, date: str, symbol: str, quantity, *,
                         payee=None, action: str = "SEND", price=None,
                         fee_symbol=None, fee_quantity=None,
-                        memo=None, tx_hash=None, fitid=None, import_id=None) -> int:
+                        memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """A coin-native DECREASE (the ShrsOut analogue): ``quantity`` of ``symbol``
     leaves with NO fiat proceeds. ``payee`` is the on-chain ``To`` recipient. An
     optional network fee is a COIN-NATIVE leg on this SAME row -- ``fee_symbol`` /
@@ -1018,12 +1068,12 @@ def record_wallet_debit(conn, account_id: int, date: str, symbol: str, quantity,
     return record_event(conn, account_id, date, act, symbol=symbol, quantity=-q,
                         price=price, fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                         memo=memo, payee=payee, tx_hash=tx_hash, fitid=fitid,
-                        import_id=import_id)
+                        import_id=import_id, time=time)
 
 
 def record_cash(conn, account_id: int, date: str, amount_cents: int, *,
                 action: Optional[str] = None, payee=None, memo=None,
-                tx_hash=None, fitid=None, import_id=None) -> int:
+                tx_hash=None, fitid=None, import_id=None, time=None) -> int:
     """Move FIAT in or out of an exchange account's internal cash sleeve, with no
     coin leg at all -- a bank deposit, a withdrawal, or dollars arriving from
     another venue.
@@ -1043,12 +1093,12 @@ def record_cash(conn, account_id: int, date: str, amount_cents: int, *,
                          f"one of {sorted(_CASH_ACTIONS)}")
     return record_event(conn, account_id, date, act, amount=cents, payee=payee,
                         memo=memo, tx_hash=tx_hash, fitid=fitid,
-                        import_id=import_id)
+                        import_id=import_id, time=time)
 
 
 def record_fee(conn, account_id: int, date: str, symbol: str, quantity, *,
                usd_value=None, memo=None, tx_hash=None, fitid=None,
-               import_id=None) -> int:
+               import_id=None, time=None) -> int:
     """A STANDALONE network/gas fee row (use this only when the fee is not carried
     on a parent action's ``fee_*`` fields -- e.g. a periodic fee sweep). Removes
     ``quantity`` of ``symbol`` as a plain expense; ``usd_value`` (cents) is stored
@@ -1056,13 +1106,13 @@ def record_fee(conn, account_id: int, date: str, symbol: str, quantity, *,
     q = abs(_D(quantity))
     return record_event(conn, account_id, date, "FEE", symbol=symbol, quantity=-q,
                         fee_amount=usd_value, memo=memo, tx_hash=tx_hash,
-                        fitid=fitid, import_id=import_id)
+                        fitid=fitid, import_id=import_id, time=time)
 
 
 def record_swap(conn, account_id: int, date: str, symbol_out: str, quantity_out,
                 symbol_in: str, quantity_in, fmv, *, fee_symbol=None,
                 fee_quantity=None, fee_amount=None, memo=None, tx_hash=None,
-                fitid=None, import_id=None) -> tuple[int, int]:
+                fitid=None, import_id=None, time=None) -> tuple[int, int]:
     """A coin-for-coin swap: dispose ``quantity_out`` of ``symbol_out`` and
     acquire ``quantity_in`` of ``symbol_in``, both valued at ``fmv`` cents (the
     agreed USD value of the trade). Written as TWO linked single-asset legs
@@ -1083,10 +1133,10 @@ def record_swap(conn, account_id: int, date: str, symbol_out: str, quantity_out,
                           quantity=-qo, price=price_out, fee_symbol=fee_symbol,
                           fee_quantity=fee_quantity, fee_amount=fee_amount,
                           memo=memo, tx_hash=tx_hash, fitid=fitid,
-                          import_id=import_id, commit=False)
+                          import_id=import_id, time=time, commit=False)
     in_id = record_event(conn, account_id, date, "SWAP_IN", symbol=symbol_in,
                          quantity=qi, price=price_in, basis=fmv_cents, memo=memo,
-                         tx_hash=tx_hash, import_id=import_id, commit=False)
+                         tx_hash=tx_hash, import_id=import_id, time=time, commit=False)
     conn.execute(
         "UPDATE crypto_transactions SET swap_group_id=? WHERE id IN (?,?)",
         (out_id, out_id, in_id),
@@ -1115,7 +1165,7 @@ def record_wallet_transfer(conn, from_account_id: int, to_account_id: int,
                            date: str, symbol: str, quantity, *, basis=None,
                            fee_symbol=None, fee_quantity=None, fee_amount=None,
                            memo=None, tx_hash=None, fitid=None,
-                           import_id=None) -> tuple[int, int]:
+                           import_id=None, time=None) -> tuple[int, int]:
     """Move ``quantity`` of ``symbol`` between the user's OWN wallets, using the
     EXISTING transfer mirror model re-expressed for coin quantity: two rows
     (TRANSFER_OUT in ``from``, TRANSFER_IN in ``to``) linked by
@@ -1139,11 +1189,11 @@ def record_wallet_transfer(conn, from_account_id: int, to_account_id: int,
                           transfer_account_id=to_account_id, basis=basis,
                           fee_symbol=fee_symbol, fee_quantity=fee_quantity,
                           fee_amount=fee_amount, memo=memo, tx_hash=tx_hash,
-                          fitid=fitid, import_id=import_id, commit=False)
+                          fitid=fitid, import_id=import_id, time=time, commit=False)
     in_id = record_event(conn, to_account_id, date, "TRANSFER_IN", symbol=symbol,
                          quantity=q, transfer_account_id=from_account_id,
                          basis=basis, memo=memo, tx_hash=tx_hash,
-                         import_id=import_id, commit=False)
+                         import_id=import_id, time=time, commit=False)
     conn.execute("UPDATE crypto_transactions SET transfer_pair_id=? WHERE id=?",
                  (in_id, out_id))
     conn.execute("UPDATE crypto_transactions SET transfer_pair_id=? WHERE id=?",
@@ -1650,9 +1700,17 @@ def get_event(conn, txn_id: int):
                         (txn_id,)).fetchone()
 
 
+def _sleeve_cash(t) -> int:
+    """What one event moves in THIS account's fiat sleeve: the signed amount on
+    a trade that settled here or a bare deposit/withdrawal, else 0."""
+    a = _norm(_row_value(t, "action"))
+    return int(_row_value(t, "amount") or 0) if a in _SLEEVE_CASH_ACTIONS else 0
+
+
 def list_events(conn, account_id: int) -> list:
     return conn.execute(
-        "SELECT * FROM crypto_transactions WHERE account_id=? ORDER BY date, id",
+        "SELECT * FROM crypto_transactions WHERE account_id=? "
+        "ORDER BY date, COALESCE(time, ''), id",
         (account_id,)).fetchall()
 
 
@@ -1665,7 +1723,8 @@ def symbols_used(conn, account_id: int) -> list:
 
 
 def register_rows(conn, account_id: int) -> list[dict]:
-    """The account's crypto events in application order (date, id), each augmented
+    """The account's crypto events in register order (date, time, cash high to
+    low, id), each augmented
     with the running-balance / label fields the register shows -- so the register
     UI stays a THIN projection and all quantity/cents math is tested HERE, not in
     :mod:`mammon.ui` (the crypto twin of :func:`investments.register_rows`). Each
@@ -1700,7 +1759,13 @@ def register_rows(conn, account_id: int) -> list[dict]:
             opening = int(acct["opening_balance"] or 0)
         except (KeyError, IndexError):
             opening = 0
-    events = list_events(conn, account_id)
+    # Register order (SRD 5.1b): date, then TIME -- crypto states the moment --
+    # then the cash effect high to low, so on a tie the money arrives before it
+    # is spent, then entry order. Replay keeps real chronology without the cash
+    # tie-break (_list_txns_in_range); the day's closing balances are the same.
+    events = sorted(list_events(conn, account_id), key=lambda t: (
+        _row_value(t, "date") or "", _row_value(t, "time") or "",
+        -_sleeve_cash(t), int(_row_value(t, "id") or 0)))
 
     # swap_group_id -> {out, in} symbols, so BOTH legs render the same pair label.
     swap_pairs: dict = {}
@@ -1757,8 +1822,7 @@ def register_rows(conn, account_id: int) -> list[dict]:
             # the sleeve untouched; every coin-native / income action leaves
             # `amount` NULL. `crypto_cash` reads the SAME set, so the running Cash
             # Bal here and the account's valuation cash cannot drift.
-            camt = (int(_row_value(t, "amount") or 0)
-                    if a in _SLEEVE_CASH_ACTIONS else 0)
+            camt = _sleeve_cash(t)
             cash += camt
 
             # The linked account is its OWN field, not a label smuggled into the
@@ -2020,6 +2084,98 @@ def display_balance(conn, account_id: int, as_of: Optional[str] = None,
         return investments.display_balance(conn, account_id, as_of, prices)
     eff = as_of if as_of is not None else valuation_as_of(conn)
     return account_valuation(conn, account_id, eff, prices).total
+
+
+# ---------------------------------------------------------------------------
+# Renaming a coin, and prices filed under the wrong symbol
+# ---------------------------------------------------------------------------
+def apply_coin_renames(conn, account_id: int, pairs) -> int:
+    """Apply ``[(old, new)]`` coin symbols within one wallet. Returns rows renamed.
+
+    The crypto twin of :func:`investments.apply_security_renames`, and it has to
+    be its own function because a coin lives in different tables: the events and
+    their gas legs, the review queue's coin rows, and -- outside this account --
+    the coin's PRICE series, which is stored under the ``SYM-USD`` pair
+    (:func:`pair_symbol`) so a coin can never collide with a stock of the same
+    ticker. Holdings and the year-end snapshots are DERIVED and are rebuilt
+    rather than patched, exactly as a security rename rebuilds them."""
+    renamed = 0
+    touched = False
+    for old, new in pairs:
+        old = (old or "").strip()
+        new = (new or "").strip()
+        if not old or not new or old == new:
+            continue
+        cur = conn.execute(
+            "UPDATE crypto_transactions SET symbol=? WHERE account_id=? AND symbol=?",
+            (new, account_id, old))
+        renamed += cur.rowcount
+        conn.execute(
+            "UPDATE crypto_transactions SET fee_symbol=? WHERE account_id=? AND fee_symbol=?",
+            (new, account_id, old))
+        conn.execute(
+            "UPDATE review_items SET symbol=? WHERE account_id=? AND symbol=? AND is_crypto=1",
+            (new, account_id, old))
+        conn.execute(
+            "UPDATE review_items SET fee_symbol=? WHERE account_id=? AND fee_symbol=? "
+            "AND is_crypto=1", (new, account_id, old))
+        # The price series follows the coin, once: it is keyed by pair symbol and
+        # shared by every wallet, so it is moved whatever account asked.
+        conn.execute("UPDATE OR REPLACE price_history SET symbol=? WHERE symbol=?",
+                     (pair_symbol(new), pair_symbol(old)))
+        touched = touched or bool(cur.rowcount)
+    if touched or renamed:
+        conn.commit()
+        rebuild_holdings(conn, account_id)
+    return renamed
+
+
+def misfiled_prices(conn, account_id: Optional[int] = None) -> dict:
+    """``{coin: rows}`` for coins whose prices sit under the BARE symbol instead
+    of the ``SYM-USD`` pair the valuation reads.
+
+    How a ledger gets here: the securities manager sees ``ETH`` and ``ETH-USD``
+    as two spellings of one security and merges them, which files Ethereum's
+    prices under a symbol nothing prices a coin by -- the holding then values at
+    zero in the account, in net worth and in the allocation. Only counted when
+    the bare symbol is NOT a security in its own right (no investment
+    transaction or holding uses it), because ``ETH`` is also a real stock
+    ticker, and moving a stock's prices would be the same mistake in reverse."""
+    coins = {r[0] for r in conn.execute(
+        "SELECT DISTINCT symbol FROM crypto_holdings WHERE symbol IS NOT NULL"
+        + ("" if account_id is None else " AND account_id=?"),
+        () if account_id is None else (account_id,))}
+    coins |= {r[0] for r in conn.execute(
+        "SELECT DISTINCT symbol FROM crypto_transactions WHERE symbol IS NOT NULL"
+        + ("" if account_id is None else " AND account_id=?"),
+        () if account_id is None else (account_id,))}
+    out = {}
+    for coin in sorted(c for c in coins if (c or "").strip()):
+        if conn.execute("SELECT 1 FROM investment_transactions WHERE symbol=? LIMIT 1",
+                        (coin,)).fetchone():
+            continue
+        if conn.execute("SELECT 1 FROM holdings WHERE symbol=? LIMIT 1", (coin,)).fetchone():
+            continue
+        n = conn.execute("SELECT COUNT(*) FROM price_history WHERE symbol=?",
+                         (coin,)).fetchone()[0]
+        if n:
+            out[coin] = int(n)
+    return out
+
+
+def adopt_misfiled_prices(conn, coin: str) -> int:
+    """Move ``coin``'s prices from the bare symbol to its ``SYM-USD`` pair, so the
+    valuation finds them again. Returns rows moved. A price already recorded
+    under the pair for that date wins -- it was filed correctly."""
+    coin = (coin or "").strip()
+    if not coin:
+        return 0
+    moved = conn.execute(
+        "UPDATE OR IGNORE price_history SET symbol=? WHERE symbol=?",
+        (pair_symbol(coin), coin)).rowcount
+    conn.execute("DELETE FROM price_history WHERE symbol=?", (coin,))
+    conn.commit()
+    return int(moved)
 
 
 # ---------------------------------------------------------------------------

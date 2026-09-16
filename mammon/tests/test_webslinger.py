@@ -509,12 +509,12 @@ def test_a_lookup_table_beside_the_rows_is_not_gathered():
     so only the row SHAPE can be tested.
     """
     payload = {"output_data": {
-        "subAccountList": [{"id": 6239395, "shortName": "Household Checking"},
-                           {"id": 5896620, "shortName": "Checking"}],
+        "subAccountList": [{"id": 1234567, "shortName": "Household Checking"},
+                           {"id": 7654321, "shortName": "Checking"}],
         "Checking": [
             {"transactionId": "A1", "postedDate": "2026-09-02",
              "amount": "42.10", "isDebit": True,
-             "statementDescription": "COSTCO WHSE #1118"},
+             "statementDescription": "ANON WAREHOUSE #0000"},
         ]}}
     rows = webslinger._extract_records(payload)
     assert [r["transactionId"] for r in rows] == ["A1"]

@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import List, Optional
 
+from mammon import instruments
+
 
 @dataclass
 class NormalizedTxn:
@@ -107,6 +109,10 @@ class ImportResult:
     # review rather than silently overwriting the computed holdings. Each is a dict
     # {symbol, date, field, computed, reported} from investments.reconcile_positions.
     position_discrepancies: List = field(default_factory=list)
+    # Every investment account the file carried rows for (inserted or
+    # duplicate), so the caller can audit what the import could not settle
+    # (reports/import_audit.py) once a whole SET of files has landed.
+    investment_account_ids: List[int] = field(default_factory=list)
 
     def summary(self) -> str:
         chg = (f", {len(self.payment_changes)} payment-change"
@@ -215,6 +221,44 @@ def iso_shift(iso_date: str, days: int) -> str:
     return d.isoformat()
 
 
+_CLOCK_RE = re.compile(r"(?:^|[\sT])(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*([AaPp][Mm])?"
+                       r"\s*(?:Z|UTC|[+-]\d{2}:?\d{2})?$")
+
+
+def stamp_time(value) -> Optional[str]:
+    """The time of day a source timestamp states, as ``HH:MM:SS``, or None when
+    it states only a date (or nothing readable).
+
+    Read on the SAME clock the row's date is read on, so a date and its time
+    always agree: a unix stamp (seconds, or milliseconds) is UTC, which is how
+    every crypto importer already derives the date from one; a written stamp
+    (``2021-03-01 14:05:07 UTC``, ``2021-03-01T14:05:07Z``, ``2/15/2020 2:05 PM``)
+    keeps its own clock. A crypto event happens at a moment, and a day's events
+    are ordered by it (SRD 5.8j); dropping it left them in insertion order."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        n = int(s)
+        if 10 ** 12 <= n <= 4 * 10 ** 12:
+            n //= 1000
+        if 10 ** 9 <= n <= 4 * 10 ** 9:
+            return _dt.datetime.fromtimestamp(n, _dt.timezone.utc).strftime("%H:%M:%S")
+        return None
+    m = _CLOCK_RE.search(s)
+    if not m:
+        return None
+    hour, minute, second = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    meridiem = (m.group(4) or "").lower()
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = (0 if hour == 12 else hour) + (12 if meridiem == "pm" else 0)
+    if hour > 23 or minute > 59 or second > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
 def normalize_payee(payee: str) -> str:
     """A loose canonical form for fuzzy matching (case, spacing, trailing
     store/reference numbers removed). Not stored on the txn -- the original
@@ -317,19 +361,48 @@ def _trim6(d: Decimal) -> str:
     return s or "0"
 
 
-def derive_investment_amounts(shares, price, total):
+def _contract_multiplier(multiplier):
+    """How many underlying units one unit of ``quantity`` controls.
+
+    ``None`` (the default everywhere that is not an option) means one: a share
+    is one share. :data:`instruments.UNKNOWN`, or anything unreadable, comes
+    back as None here meaning UNSTATED, and the caller must then derive
+    nothing."""
+    if multiplier is None:
+        return Decimal(1)
+    if multiplier is instruments.UNKNOWN:
+        return None
+    m = _to_decimal(multiplier)
+    if m is None or m <= 0:
+        return None
+    return m
+
+
+def derive_investment_amounts(shares, price, total, multiplier=None):
     """Reconcile an investment row's (shares, price-per-share, total) triple.
 
     Accepts any TWO of the three (as raw strings/numbers) and derives the third via
-    ``shares * price = total`` (magnitudes; a per-share price is inherently
-    non-negative). When all three are present the given ``total`` is kept -- its
-    sign is the signed cash amount -- and only a consistency flag is computed, with
-    rounding tolerated to about a penny per share. Returns
+    ``shares * price * multiplier = total`` (magnitudes; a per-share price is
+    inherently non-negative). When all three are present the given ``total`` is
+    kept -- its sign is the signed cash amount -- and only a consistency flag is
+    computed, with rounding tolerated to about a penny per underlying unit. Returns
     ``(quantity_text, price_text, total_cents, consistent)`` where ``quantity_text``
     / ``price_text`` are '' and ``total_cents`` is ``None`` when neither read nor
     derivable. GIVEN shares/price keep their source text verbatim; only a DERIVED
     value is quantized to 6 dp (so a repeating division like 3.05 / 0.102 does not
     carry 28 digits).
+
+    **``multiplier`` is the one thing between this arithmetic and a 100x error.**
+    For a share it is 1 and omitting it is correct. For an option contract the
+    quantity is a CONTRACT COUNT and the price a per-share premium, so 2
+    contracts at 1.75 is $350, not $3.50 -- and every one of the three branches
+    above is wrong by exactly the multiplier without it.
+
+    When the multiplier is UNSTATED (:data:`instruments.UNKNOWN`, as an adjusted
+    or mini root leaves it) NOTHING is derived and NOTHING is flagged: the
+    source's own total is recorded verbatim and ``consistent`` stays True,
+    because an inconsistency that cannot be distinguished from an unknown
+    multiplier is not a finding to put in front of a user.
     """
     q = _to_decimal(shares)
     p = _to_decimal(price)
@@ -337,18 +410,23 @@ def derive_investment_amounts(shares, price, total):
     q_text = decimal_text(shares)   # '' when shares is blank/unparseable
     p_text = decimal_text(price)
     consistent = True
+    m = _contract_multiplier(multiplier)
+    if m is None:
+        total_cents = (None if t is None
+                       else int((t * 100).quantize(_CENTS, rounding=ROUND_HALF_UP)))
+        return q_text, p_text, total_cents, True
     if q is not None and p is not None:
-        product = q * p
+        product = q * p * m
         if t is None:
             t = product
         else:
-            tol = (abs(q) * Decimal("0.01")) + Decimal("0.01")
+            tol = (abs(q) * m * Decimal("0.01")) + Decimal("0.01")
             if abs(abs(t) - abs(product)) > tol:
                 consistent = False
     elif q is not None and t is not None and q != 0:
-        p_text = _trim6(abs(t) / abs(q))
+        p_text = _trim6(abs(t) / (abs(q) * m))
     elif p is not None and t is not None and p != 0:
-        q_text = _trim6(abs(t) / p)
+        q_text = _trim6(abs(t) / (p * m))
     total_cents = None if t is None else int((t * 100).quantize(_CENTS, rounding=ROUND_HALF_UP))
     return q_text, p_text, total_cents, consistent
 

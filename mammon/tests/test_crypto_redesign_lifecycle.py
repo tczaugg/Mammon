@@ -1,4 +1,4 @@
-"""End-to-end lifecycle test for the crypto redesign (SRD §5.8; design locked in
+"""End-to-end lifecycle test for the crypto redesign (SRD §5.8h; design locked in
 review 55a2d8a0).
 
 ONE scenario, exercised entirely through the :mod:`mammon.crypto` domain API -- the

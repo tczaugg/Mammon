@@ -575,7 +575,7 @@ def test_sellx_is_offered_and_means_the_cash_left(qapp, conn, exchange):
     -- one concept, never two states meaning the same thing."""
     from PyQt5.QtCore import Qt
     from mammon.ui.models import CryptoRegisterModel
-    bank = ledger.create_account(conn, "America 1st Ck", "checking")
+    bank = ledger.create_account(conn, "ANON Credit Union", "checking")
     crypto.record_buy(conn, exchange, "2017-01-01", "ETH", 1, 20000)
     sell = crypto.record_sell(conn, exchange, "2018-03-05", "ETH", 1, 84309)
     crypto.rebuild_holdings(conn, exchange)
@@ -585,7 +585,7 @@ def test_sellx_is_offered_and_means_the_cash_left(qapp, conn, exchange):
     row = next(r for r in range(m.rowCount()) if m.txn_at(r)["id"] == sell)
     assert "SELLX" in m.actions_for_row(row)
 
-    m.setData(m.index(row, cols.index("Transfer")), "[America 1st Ck]",
+    m.setData(m.index(row, cols.index("Transfer")), "[ANON Credit Union]",
               Qt.EditRole)
     m.reload()
     assert m.data(m.index(row, cols.index("Action"))) == "SELLX"
@@ -612,7 +612,7 @@ def test_a_coin_row_can_be_corrected_into_a_sale_either_way_round(qapp, conn,
     rather than left at nothing for the user to be blocked on."""
     from PyQt5.QtCore import Qt
     from mammon.ui.models import CryptoRegisterModel
-    bank = ledger.create_account(conn, "America 1st Ck", "checking")
+    bank = ledger.create_account(conn, "ANON Credit Union", "checking")
     # Exactly the shape an older import produced: coin out, no proceeds.
     txn = crypto.record_event(conn, exchange, "2018-03-05", "SEND", symbol="ETH",
                               quantity=-1, price="859.70")
@@ -625,7 +625,7 @@ def test_a_coin_row_can_be_corrected_into_a_sale_either_way_round(qapp, conn,
     m.reload()
     assert m.data(m.index(0, cols.index("Action"))) == "SELLX"
     # ...and naming the destination completes it.
-    assert m.setData(m.index(0, cols.index("Transfer")), "[America 1st Ck]",
+    assert m.setData(m.index(0, cols.index("Transfer")), "[ANON Credit Union]",
                      Qt.EditRole)
     m.reload()
     assert ledger.account_balance(conn, bank) == 85970      # seeded from price
@@ -645,12 +645,12 @@ def test_the_amount_column_shows_the_trade_not_the_sleeve_effect(qapp, conn,
     effect made a SELLX look like it sold for nothing."""
     from PyQt5.QtCore import Qt
     from mammon.ui.models import CryptoRegisterModel
-    ledger.create_account(conn, "America 1st Ck", "checking")
+    ledger.create_account(conn, "ANON Credit Union", "checking")
     crypto.record_sell(conn, exchange, "2018-03-05", "ETH", 1, 84309)
     crypto.rebuild_holdings(conn, exchange)
     m = CryptoRegisterModel(conn, exchange)
     cols = [m.headerData(c, 1) for c in range(m.columnCount())]
-    m.setData(m.index(0, cols.index("Transfer")), "[America 1st Ck]", Qt.EditRole)
+    m.setData(m.index(0, cols.index("Transfer")), "[ANON Credit Union]", Qt.EditRole)
     m.reload()
     assert m.data(m.index(0, cols.index("Action"))) == "SELLX"
     assert m.data(m.index(0, cols.index("Amount"))) == "843.09"

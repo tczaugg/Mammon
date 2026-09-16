@@ -34,7 +34,10 @@ dependencies = [
     # (`python -m mammon.mcp_server`), required for the same reason as yfinance:
     # as an extra it was absent from the documented install, so a documented
     # entry point simply did not work. Imported lazily, in mcp_server.py only.
-    "mcp>=1.2",
+    # Capped below 2: mcp_server.py imports mcp.server.fastmcp, which 2.0
+    # removed, so an uncapped install today resolves to a server that dies at
+    # import. Moving to 2.x means porting build_server first.
+    "mcp>=1.2,<2",
     # At-rest encryption. Required because it ships PREBUILT WHEELS for every
     # platform this app targets -- Windows (amd64/win32/arm64), Linux
     # (manylinux_2_28 x86_64/aarch64/i686 and musllinux_1_2) and macOS (arm64,

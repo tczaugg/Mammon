@@ -98,13 +98,14 @@ def test_projected_balances_dialog_lists_events_with_running_balance(qapp, conn,
     rows = [(t.item(r, dlg.PAYEE).text(), t.item(r, dlg.AMOUNT).text(),
              t.item(r, dlg.BALANCE).text(), t.item(r, dlg.SOURCE).text())
             for r in range(t.rowCount())]
-    # Both accounts summed: the sweep nets out (one leg each side).
+    # Both accounts summed: the sweep is internal to the set, so NEITHER leg is
+    # listed (see test_projection_internal_transfers) and the balances below --
+    # which never saw it, it netted out -- are untouched.
     assert rows[0] == ("Late Co", "-10.00", "890.00", "Scheduled")
     assert rows[1] == ("Power Co", "-60.00", "830.00", "Entered (pending)")
     assert rows[2] == ("Cafe", "-40.00", "790.00", "Entered")
     assert rows[3] == ("Employer", "2,000.00", "2,790.00", "Scheduled")
-    sweep = [r for r in rows if r[0] == "Auto-save"]
-    assert {r[1] for r in sweep} == {"-500.00", "500.00"}
+    assert [r for r in rows if r[0] == "Auto-save"] == []
     assert "lowest 790.00" in dlg.summary.text()
     assert dlg.chart is not None
     # One account: only checking's side of the sweep, and the low point moves.

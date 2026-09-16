@@ -5,8 +5,9 @@ totals, assembled read-only over :mod:`mammon.investments`.
 
 Covers the pure report (per-holding fields, totals, account/hidden/sold filters,
 unpriced and closed positions, return-of-capital roll-up, ``as_of`` price capping
-and a ``prices`` override), the ReportWindow projector/spec seam, and the
-read-only MCP tool (dollar strings, no leaked columns, works under query_only).
+and a ``prices`` override), the ReportWindow projector/spec seam, its row
+right-click price-history entry (the register's chart, reached from the report),
+and the read-only MCP tool (dollar strings, no leaked columns, works under query_only).
 Synthetic data only -- no PII.
 """
 from __future__ import annotations
@@ -259,10 +260,12 @@ def test_report_window_projector_and_spec(conn, world):
     assert rw.INVESTMENT_PERFORMANCE_SPEC.show_accounts is True
 
     # The report has its own header: the account/holding label, the ticker, and
-    # three distinct numeric columns -- Amount, Gain/Loss $ and Gain/Loss %. No
-    # generic "Section" header, and the gain is broken out, not buried in the label.
+    # its numeric columns -- Amount, Dividends, Gain/Loss $, Gain/Loss % and the
+    # annual rate. No generic "Section" header, and the gain is broken out, not
+    # buried in the label.
     assert rw.INVESTMENT_PERFORMANCE_SPEC.columns == [
-        "Account", "Ticker", "Amount", "Gain/Loss $", "Gain/Loss %"]
+        "Account", "Ticker", "Amount", "Dividends", "Gain/Loss $", "Gain/Loss %",
+        "Annual Return %"]
     assert "Section" not in rw.INVESTMENT_PERFORMANCE_SPEC.columns
 
     report = rw.INVESTMENT_PERFORMANCE_SPEC.run(conn, _Filter())
@@ -275,10 +278,12 @@ def test_report_window_projector_and_spec(conn, world):
     assert not any(r.label.startswith("CLOSED") for r in rows)
 
     # A sample row maps cell-for-cell onto the header: account, ticker with share
-    # count, market value, gain/loss dollars and gain/loss percent (text, signed).
+    # count, market value, dividends, gain/loss dollars and percent (text, signed),
+    # and the annual rate -- blank, because the span is under a year. The gain
+    # INCLUDES the cash dividend: 1,000 price gain + 200 dividend on 10,000.
     cells = rw._row_cells(aapl[0], rw.INVESTMENT_PERFORMANCE_SPEC.columns)
-    assert cells == ["Brokerage", "AAPL (100 sh)", "11,000.00",
-                     "1,000.00", "+10.0%"]
+    assert cells == ["Brokerage", "AAPL (100 sh)", "11,000.00", "200.00",
+                     "1,200.00", "+12.0%", ""]
 
     totals = {r.label: r.amount for r in rows if r.section == "Portfolio"}
     assert totals["Cost Basis"] == 16950_00
@@ -288,19 +293,179 @@ def test_report_window_projector_and_spec(conn, world):
     assert totals["Dividend/Interest Income"] == 200_00
     assert totals["Return of Capital"] == 100_00
 
-    # The Market Value total line breaks the portfolio gain out into its own two
-    # columns (dollars and percent), not just the Amount column. The spec runs the
-    # report PERIOD-bounded (the filter's From..To window), so this headline is the
-    # sum of the per-holding period gains -- it reconciles with the line items, not
-    # with the lifetime unrealized figure. Here the window starts before every
-    # position opened, so it captures each open holding's whole gain including the
-    # realized part of MSFT's partial sale: AAPL 1,000 + MSFT 1,300 + RC 0 = 2,300
-    # over a 16,000 base (14.375% -> +14.4%). The lifetime unrealized total still
-    # shows on its own "Unrealized Gain/Loss" line below (1,400.00).
+    # The Market Value total line breaks the portfolio gain out into its own
+    # columns, not just the Amount column. The spec runs the report PERIOD-bounded
+    # (the filter's From..To window), so this headline is the sum of the open
+    # line items' gains, dividends included -- it reconciles with them, not with
+    # the since-purchase unrealized figure. The window starts before every
+    # position opened, so it captures each open holding's whole gain, including
+    # the realized part of MSFT's partial sale and RC's returned capital: AAPL
+    # 1,200 + MSFT 1,300 + RC 100 = 2,600 over the 21,000 put in (12.38% ->
+    # +12.4%). The since-purchase totals keep their own labelled lines below.
     mv = [r for r in rows if r.section == "Portfolio" and r.label == "Market Value"][0]
     mv_cells = rw._row_cells(mv, rw.INVESTMENT_PERFORMANCE_SPEC.columns)
-    assert mv_cells == ["Portfolio", "Market Value", "18,300.00",
-                        "2,300.00", "+14.4%"]
+    assert mv_cells == ["Portfolio", "Market Value", "18,300.00", "200.00",
+                        "2,600.00", "+12.4%", ""]
+
+
+# ---------------------------------------------------------------------------
+# right-click -> price history (parity with the investment register)
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def qapp():
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def charted_world(conn):
+    """One synthetic brokerage holding two invented tickers, each with a couple of
+    recorded prices so the shared chart really has a series to draw."""
+    bro = ledger.create_account(conn, "Synthetic Brokerage", "investment",
+                                opening_balance=0)
+    investments.record_investment(conn, bro, "2026-01-05", "Buy", symbol="ZZA",
+                                  quantity="10", price="10.00", amount=-100_00)
+    investments.record_investment(conn, bro, "2026-01-06", "Buy", symbol="YYB",
+                                  quantity="20", price="5.00", amount=-100_00)
+    for date, price in (("2026-01-31", "11.00"), ("2026-02-27", "12.00")):
+        investments.record_price(conn, "ZZA", date, price)
+    for date, price in (("2026-01-31", "6.00"), ("2026-02-27", "7.00")):
+        investments.record_price(conn, "YYB", date, price)
+    investments.rebuild_holdings(conn, bro)
+    return bro
+
+
+def _fake_menu_class(built):
+    """A stand-in QMenu that records the menus built and, on ``exec_``, chooses the
+    'Price history' entry -- the same shape test_ui uses for the register's menu.
+    A real ``QMenu.exec_`` would block forever under the offscreen platform."""
+    class _FakeMenu:
+        def __init__(self, *a, **k):
+            self.labels = []
+            self._acts = {}
+            built.append(self)
+
+        def addAction(self, text):
+            act = object()
+            self.labels.append(text)
+            self._acts[text] = act
+            return act
+
+        def addSeparator(self):
+            pass
+
+        def exec_(self, *a, **k):
+            for text, act in self._acts.items():
+                if text.startswith("Price history"):
+                    return act
+            return None
+
+    return _FakeMenu
+
+
+def _perf_window(conn):
+    from mammon.ui.report_window import INVESTMENT_PERFORMANCE_SPEC, ReportWindow
+
+    win = ReportWindow(conn, spec=INVESTMENT_PERFORMANCE_SPEC)
+    win.show()
+    return win
+
+
+def _row_showing(win, symbol):
+    """The table row whose stashed symbol is ``symbol`` (the display cell reads
+    'SYM (n sh)', which is exactly what the menu must NOT parse)."""
+    from PyQt5.QtCore import Qt
+
+    for row in range(win.table.rowCount()):
+        if win.table.item(row, 0).data(Qt.UserRole) == symbol:
+            return row
+    raise AssertionError(f"no row for {symbol}")
+
+
+def test_report_right_click_charts_that_rows_security(conn, charted_world, qapp,
+                                                      monkeypatch):
+    """Right-clicking a holding line in the Investment Performance report offers
+    'Price history: SYM…' and charts THAT row's security -- through the very helper
+    the investment register uses -- and keeps doing so after a re-sort."""
+    from PyQt5.QtCore import Qt
+    from mammon.ui import charts, report_window as rw
+
+    built = []
+    charted = []
+    monkeypatch.setattr(rw, "QMenu", _fake_menu_class(built))
+    monkeypatch.setattr(charts.ChartDialog, "exec_",
+                        lambda self: charted.append((self.windowTitle(), self.canvas)))
+
+    win = _perf_window(conn)
+    zza = _row_showing(win, "ZZA")
+    # The displayed Ticker cell is the composite; the symbol rides on the item.
+    assert win.table.item(zza, 1).text().startswith("ZZA (")
+
+    index = win.table.model().index(zza, 1)
+    monkeypatch.setattr(win.table, "indexAt", lambda pos: index)
+    win._on_table_context_menu(win.table.rect().center())
+
+    assert built and any(l.startswith("Price history: ZZA") for l in built[-1].labels)
+    assert len(charted) == 1
+    title, canvas = charted[0]
+    assert title.startswith("Price History - ZZA")
+    assert canvas.figure.axes                       # a real series was drawn
+    # The chart is told which account the holding sits in, so it can be labeled in
+    # that account's currency (SRD 5.8).
+    assert win._chart_account_id(zza, "ZZA") == charted_world
+
+    # Re-sorting by Ticker moves the holdings under the SAME row indexes; the menu
+    # must follow the item, not a remembered row -> right-clicking the same index
+    # now charts whatever security that row shows.
+    win._on_table_sort(1)                            # Ticker, ascending
+    win._on_table_sort(1)                            # Ticker, descending
+    moved = win.table.item(zza, 0).data(Qt.UserRole)
+    assert moved and moved != "ZZA"                  # the two tickers swapped
+    assert win.table.item(zza, 1).text().startswith(moved + " (")
+    win._on_table_context_menu(win.table.rect().center())
+    assert len(charted) == 2
+    assert charted[1][0].startswith(f"Price History - {moved}")
+
+
+def test_report_total_and_empty_rows_offer_no_price_history(conn, charted_world,
+                                                            qapp, monkeypatch):
+    """A Portfolio total line and a click over no row build no menu at all (never
+    an empty popup) and chart nothing."""
+    from PyQt5.QtCore import QModelIndex
+    from mammon.ui import charts, report_window as rw
+
+    built = []
+    charted = []
+    monkeypatch.setattr(rw, "QMenu", _fake_menu_class(built))
+    monkeypatch.setattr(charts.ChartDialog, "exec_",
+                        lambda self: charted.append(self.canvas))
+
+    win = _perf_window(conn)
+    totals = [r for r in range(win.table.rowCount())
+              if win.table.item(r, 1).text() == "Market Value"]
+    assert totals                                    # the report really shows one
+    index = win.table.model().index(totals[0], 1)
+    monkeypatch.setattr(win.table, "indexAt", lambda pos: index)
+    win._on_table_context_menu(win.table.rect().center())
+    assert built == [] and charted == []
+
+    monkeypatch.setattr(win.table, "indexAt", lambda pos: QModelIndex())
+    win._on_table_context_menu(win.table.rect().center())
+    assert built == [] and charted == []
+
+
+def test_only_the_investment_report_declares_price_history(conn):
+    """The menu handler is generic across flat reports, so the OFFER is gated by
+    the spec: no other report's rows name a security."""
+    from mammon.ui import report_window as rw
+
+    assert rw.INVESTMENT_PERFORMANCE_SPEC.price_history is True
+    for spec in (rw.CASH_FLOW_SPEC, rw.BY_PAYEE_SPEC, rw.BY_TAG_SPEC,
+                 rw.ACCOUNT_BALANCES_SPEC, rw.TRANSACTIONS_SPEC,
+                 rw.INCOME_EXPENSE_SPEC, rw.ITEMIZE_SPEC):
+        assert spec.price_history is False
 
 
 # ---------------------------------------------------------------------------

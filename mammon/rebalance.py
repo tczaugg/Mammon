@@ -12,13 +12,31 @@ Read-only over the ledger: nothing here writes a transaction. It writes only its
 own target tables, and it PROPOSES trades -- the arithmetic that closes the gap.
 Executing them stays the user's job, in the register, where it belongs.
 
-**The sleeve.** A target governs the accounts it can actually be applied to.
-``sleeve`` defaults to ``investments`` because a chequing balance that swings
-with the month's bills manufactures drift nobody can act on, and because nobody
-rebalances by selling 5% of a house. Property is reported ALONGSIDE, as context
-(:attr:`DriftReport.fixed_rows`), never folded into the mix being corrected --
-a drift number dominated by an illiquid position is not actionable, which is the
-failure mode most tools avoid only by not knowing the house exists.
+**The accounts are the user's to choose, and they are all one kind of money.**
+A target names its own accounts (``allocation_target_accounts``). Two reasons,
+both reported by the user (2026-09-15):
+
+* *"This mixes kinds of money. 401K + IRA shouldn't be mixed with ROTH which
+  shouldn't be mixed with non-tax special holdings."* A dollar in a Roth is not
+  a dollar in a 401(k): they are taxed differently on the way out, they are
+  rebalanced separately, and averaging them hides that a Roth is all bonds. So
+  each account carries a :data:`TAX_TREATMENTS` value and a target may cover
+  only ONE of them.
+* *"There is no customization for accounts. I wouldn't want to include the
+  [529] accounts here as those are for my kids and not something I consider part
+  of my assets."* Money held for someone else is not part of the mix at all, and no
+  scope rule can know that -- only the person can.
+
+This replaces the old ``sleeve`` enum, whose two values ("investments",
+"investments and cash") BOTH included cash -- a brokerage's idle cash is cash --
+so the difference between them was invisible while the advice changed. A target
+with no account list still reads its stored sleeve, so a file made before this
+keeps working until its accounts are chosen.
+
+Property is reported ALONGSIDE, as context (:attr:`DriftReport.fixed_rows`),
+never folded into the mix being corrected -- a drift number dominated by an
+illiquid position is not actionable, which is the failure mode most tools avoid
+only by not knowing the house exists.
 
 **The bands.** The default is the 5/25 rule: act when a class is off by 5
 absolute percentage points OR by 25% of its own target weight, whichever fires
@@ -44,11 +62,13 @@ its sell figures as "how far off", not "what to sell".
 """
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
-from mammon import asset_values, ledger, portfolio
+from mammon import asset_values, investments, ledger, portfolio
+from mammon.portfolio import list_securities
 
 # The sleeves a target may govern -- a subset of portfolio.ALLOCATION_SCOPES.
 # "everything" is deliberately absent: a target mix including a house is a
@@ -58,6 +78,19 @@ SLEEVE_LABELS = {
     "investments": "Investment accounts",
     "with_cash": "Investments and cash accounts",
 }
+# What kind of money an account holds. A target covers exactly one, because the
+# tax treatment is what makes two dollars non-interchangeable.
+TAX_TREATMENTS = ("taxable", "deferred", "roth", "special")
+TAX_TREATMENT_LABELS = {
+    "taxable": "Taxable",
+    "deferred": "Tax-deferred (401k, traditional IRA)",
+    "roth": "Roth (tax-free)",
+    "special": "Special purpose (529, HSA, held for others)",
+    "": "Not set",
+}
+#: How far back a holding's change is measured when the target has never been
+#: marked rebalanced.
+DEFAULT_SINCE_DAYS = 365
 DEFAULT_BAND_ABS = Decimal("5")
 DEFAULT_BAND_REL = Decimal("25")
 _HUNDRED = Decimal("100")
@@ -81,7 +114,10 @@ def _pct_text(value) -> str:
         raise ValueError(f"not a percentage: {value!r}")
     if pct < 0 or pct > _HUNDRED:
         raise ValueError(f"a target percentage must be 0-100, got {pct}")
-    return str(pct.normalize() if pct == pct.to_integral_value() else pct)
+    # format(), never Decimal.normalize(): normalize turns 70 into "7E+1", which
+    # is the same stored-exponent bug that made an option multiplier read 1E+2.
+    text = format(pct.normalize(), "f")
+    return text
 
 
 def _cents(total: int, pct: Decimal) -> int:
@@ -170,6 +206,93 @@ def set_active(conn, target_id) -> None:
 def active_target(conn):
     return conn.execute(
         "SELECT * FROM allocation_targets WHERE active=1 ORDER BY id LIMIT 1").fetchone()
+
+
+# ---------------------------------------------------------------------------
+# what kind of money an account holds, and which accounts a target governs
+# ---------------------------------------------------------------------------
+def account_treatment(acct) -> str:
+    """The tax treatment recorded for an account row, or ``""`` when unset.
+    Never guessed from the name: "IRA" appears in Roth IRAs too."""
+    try:
+        value = (acct["tax_treatment"] or "").strip().lower()
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return value if value in TAX_TREATMENTS else ""
+
+
+def set_account_treatment(conn, account_id: int, treatment) -> None:
+    """Record what kind of money an account holds (``None`` clears it). Written
+    through :mod:`mammon.ledger`, which owns the accounts table."""
+    value = (treatment or "").strip().lower() or None
+    if value is not None and value not in TAX_TREATMENTS:
+        raise ValueError(f"unknown tax treatment {treatment!r}; one of {TAX_TREATMENTS}")
+    ledger.update_account(conn, int(account_id), tax_treatment=value)
+
+
+def accounts_for_picking(conn, include_hidden: bool = False) -> list:
+    """Every account a target could cover -- the investment-like and cash-shaped
+    ones -- as ``(id, name, treatment)``, in the ledger's own order. A liability
+    is never offered: an allocation is of what you own."""
+    kinds = ledger.INVESTMENT_LIKE_TYPES + ("checking", "savings", "cash")
+    return [(int(a["id"]), a["name"], account_treatment(a))
+            for a in ledger.list_accounts(conn, include_closed=False,
+                                          include_hidden=include_hidden)
+            if (a["type"] or "") in kinds]
+
+
+def target_accounts(conn, target_id: int) -> list:
+    """The account ids this target governs (empty = none chosen; the legacy
+    ``sleeve`` then decides, so an older file keeps working)."""
+    return [int(r["account_id"]) for r in conn.execute(
+        "SELECT account_id FROM allocation_target_accounts WHERE target_id=? "
+        "ORDER BY account_id", (int(target_id),))]
+
+
+def mixed_treatments(conn, account_ids) -> list:
+    """The distinct tax treatments among these accounts, ignoring unset ones.
+    More than one is what :func:`set_target_accounts` refuses."""
+    seen = []
+    for aid in account_ids or ():
+        acct = ledger.get_account(conn, int(aid))
+        t = account_treatment(acct) if acct is not None else ""
+        if t and t not in seen:
+            seen.append(t)
+    return seen
+
+
+def set_target_accounts(conn, target_id: int, account_ids) -> None:
+    """Replace the target's account list.
+
+    Refused when the chosen accounts hold more than one kind of money: a target
+    is a mix of dollars that are interchangeable, and a Roth dollar and a
+    401(k) dollar are not. Accounts whose treatment is unset are allowed --
+    saying so is a separate decision, made in Account Details."""
+    ids = [int(a) for a in account_ids or ()]
+    kinds = mixed_treatments(conn, ids)
+    if len(kinds) > 1:
+        names = ", ".join(TAX_TREATMENT_LABELS.get(k, k) for k in kinds)
+        raise ValueError(
+            f"a target covers one kind of money at a time, and these accounts "
+            f"hold {len(kinds)}: {names}. Make a target for each.")
+    conn.execute("DELETE FROM allocation_target_accounts WHERE target_id=?",
+                 (int(target_id),))
+    for aid in ids:
+        conn.execute("INSERT OR IGNORE INTO allocation_target_accounts"
+                     "(target_id, account_id) VALUES (?,?)", (int(target_id), aid))
+    conn.commit()
+
+
+def set_rebalanced(conn, target_id: int, date=None) -> str:
+    """Mark the target rebalanced on ``date`` (today by default). That date is
+    the span each holding's change is measured over -- what has moved since you
+    last acted is exactly what pushed a class off target."""
+    when = date or _dt.date.today().isoformat()
+    _dt.date.fromisoformat(when)
+    conn.execute("UPDATE allocation_targets SET rebalanced_on=? WHERE id=?",
+                 (when, int(target_id)))
+    conn.commit()
+    return when
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +474,28 @@ def set_line_balanced(conn, target_id: int, asset_class: str, pct) -> dict:
 # drift
 # ---------------------------------------------------------------------------
 @dataclass
+class HoldingDrift:
+    """One holding inside an asset class: what it is worth, how much of the class
+    it is, and how much it has changed since the target was last rebalanced.
+
+    User, 2026-09-15: "If the goal is to rebalance, by selling asset classes that
+    are above target and buying those below target, wouldn't it also make sense
+    to show which assets within the asset class have changed the most as those
+    may be the ones we'd want to sell/buy?" ``change_cents`` is that holding's
+    total return over the span (dividends included,
+    :func:`mammon.portfolio.holding_performances`), and ``None`` when it cannot
+    be measured -- an unpriced holding, or one bought since."""
+    symbol: str
+    account: str
+    account_id: int
+    value_cents: int
+    pct_of_class: Decimal
+    change_cents: Optional[int] = None
+    change_pct: Optional[Decimal] = None
+    priced: bool = True
+
+
+@dataclass
 class ClassDrift:
     """One asset class: where it is, where it should be, and the gap."""
     asset_class: str
@@ -360,6 +505,14 @@ class ClassDrift:
     target_pct: Decimal
     target_cents: int
     out_of_band: bool
+    holdings: list = field(default_factory=list)      # HoldingDrift, biggest first
+
+    @property
+    def is_unclassified(self) -> bool:
+        """The bucket for holdings whose asset class nobody has said yet. It is
+        not a class you can hold or trade, so it is never judged against a band
+        and never given a buy or sell: the answer is to classify it."""
+        return self.asset_class == "unclassified"
 
     @property
     def drift_pct(self) -> Decimal:
@@ -388,6 +541,10 @@ class ClassDrift:
     def action(self) -> str:
         """The rebalancing verb for this row, derived from ``move_cents``.
 
+        ``classify`` for the unclassified bucket: telling someone to SELL six
+        figures of "Unclassified" is advice about a gap in the records, not
+        about the portfolio (user-reported).
+
         For a security class it is the obvious ``buy`` (underweight) or ``sell``
         (overweight). CASH is different and must NEVER be ``sell``: you cannot
         sell cash, you spend it. It is consumed and generated only as the
@@ -398,6 +555,8 @@ class ClassDrift:
         cash line's move drives how far the securities trades diverge. ``hold``
         when the class already sits on its target.
         """
+        if self.is_unclassified:
+            return "classify"
         if self.move_cents == 0:
             return "hold"
         if self.is_cash:
@@ -425,6 +584,18 @@ class DriftReport:
     # guessed at: brokerage cash is cash, and looks identical to a bank balance
     # that should not be in the sleeve at all.
     sleeve_accounts: list = field(default_factory=list)
+    # The accounts this target actually governs, and the one kind of money they
+    # hold (blank when unset). Chosen by the user, not by a scope rule.
+    account_ids: list = field(default_factory=list)
+    tax_treatment: str = ""
+    # The span each holding's change is measured over, and whether it is the
+    # date the user last rebalanced (else a fallback window).
+    since: Optional[str] = None
+    since_is_rebalance: bool = False
+    # Holdings the sleeve could not price: they count as zero everywhere, so a
+    # report that stayed silent about them was quietly wrong (a wallet's coins
+    # valued nothing because their prices were filed under the wrong symbol).
+    unpriced: list = field(default_factory=list)
     # Sleeve accounts holding a balance but no securities (see
     # portfolio.Allocation.cash_only_accounts). They land wholly in Cash, so a
     # target's Cash line reads wildly overweight for a reason that is a data gap,
@@ -434,6 +605,11 @@ class DriftReport:
     @property
     def needs_rebalance(self) -> bool:
         return any(r.out_of_band for r in self.rows)
+
+    @property
+    def unclassified_row(self):
+        """The unclassified bucket, when the sleeve holds one."""
+        return next((r for r in self.rows if r.is_unclassified), None)
 
     @property
     def out_of_band(self) -> list:
@@ -447,8 +623,10 @@ class DriftReport:
     @property
     def to_move_cents(self) -> int:
         """The size of the rebalance: total cents that would change hands (each
-        trade counted once, so the buys -- which equal the sells)."""
-        return sum(r.move_cents for r in self.rows if r.move_cents > 0)
+        trade counted once, so the buys -- which equal the sells). The
+        unclassified bucket is not a trade and is left out."""
+        return sum(r.move_cents for r in self.rows
+                   if r.move_cents > 0 and not r.is_unclassified)
 
 
 def in_band(drift_pp: Decimal, target_pct: Decimal, band_abs: Decimal,
@@ -468,8 +646,71 @@ def in_band(drift_pp: Decimal, target_pct: Decimal, band_abs: Decimal,
     return True
 
 
+def _holdings_by_class(conn, alloc, as_of=None, prices=None, since=None) -> dict:
+    """``{asset_class: [HoldingDrift]}`` for the sleeve, biggest first.
+
+    What is INSIDE each class, so the rows a rebalance would trade are visible
+    rather than implied: which holding grew most since the last rebalance is
+    which one made the class overweight. A security split across classes
+    (:mod:`mammon.security_mix`) contributes its parts to each, and its change is
+    split the same way, so the pieces still sum to the holding.
+    """
+    from mammon import crypto, security_mix
+    classes = {r["symbol"]: r["asset_class"] for r in list_securities(conn)}
+    mixtures = security_mix.all_mixtures(conn)
+    out: dict = {}
+    for slice_ in alloc.by_account:
+        aid, name = int(slice_.key), slice_.label
+        acct = ledger.get_account(conn, aid)
+        if acct is None or (acct["type"] or "") not in ledger.INVESTMENT_LIKE_TYPES:
+            continue
+        is_crypto = crypto.is_crypto_account(acct)
+        valuation = (crypto.account_valuation(conn, aid, as_of, prices) if is_crypto
+                     else investments.account_valuation(conn, aid, as_of, prices))
+        gains = {}
+        if since and not is_crypto:
+            try:
+                gains = portfolio.holding_performances(
+                    conn, aid, as_of or _dt.date.today().isoformat(), start=since,
+                    prices=prices)
+            except Exception:                      # pragma: no cover - never block the view
+                gains = {}
+        for h in valuation.holdings:
+            if not is_crypto and investments.is_option(conn, h.symbol):
+                continue                            # options are out of the mix (5.8e-9)
+            priced = h.price is not None
+            value = int(h.market_value)
+            perf = gains.get(investments.resolve_symbol(conn, h.symbol))
+            parts = (security_mix.split_value(value, mixtures[h.symbol])
+                     if mixtures.get(h.symbol) else
+                     {classes.get(h.symbol) or "unclassified": value})
+            for cls, part in parts.items():
+                share = (Decimal(part) / Decimal(value)) if value else Decimal(0)
+                change = None if perf is None else int(
+                    (Decimal(perf.gain) * share).quantize(Decimal("1"),
+                                                          rounding=ROUND_HALF_UP))
+                pct = None
+                if perf is not None and perf.gain_pct is not None:
+                    pct = perf.gain_pct
+                out.setdefault(cls, []).append(HoldingDrift(
+                    symbol=h.symbol, account=name, account_id=aid,
+                    value_cents=part, pct_of_class=Decimal(0),
+                    change_cents=change, change_pct=pct, priced=priced))
+        if valuation.cash:
+            out.setdefault("cash", []).append(HoldingDrift(
+                symbol="Cash", account=name, account_id=aid,
+                value_cents=int(valuation.cash), pct_of_class=Decimal(0)))
+    for cls, items in out.items():
+        items.sort(key=lambda h: -h.value_cents)
+        total = sum(h.value_cents for h in items)
+        for h in items:
+            h.pct_of_class = ((Decimal(h.value_cents) / Decimal(total)) * _HUNDRED
+                              if total else Decimal(0))
+    return out
+
+
 def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
-          prices: Optional[dict] = None) -> DriftReport:
+          prices: Optional[dict] = None, since: Optional[str] = None) -> DriftReport:
     """Compare the real mix against a target (the ACTIVE one when ``target_id``
     is omitted).
 
@@ -488,7 +729,21 @@ def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
     band_rel = _D(target["band_rel_pct"], DEFAULT_BAND_REL)
     lines = target_lines(conn, tid)
 
-    sleeve_alloc = portfolio.allocation(conn, as_of=as_of, prices=prices, scope=sleeve)
+    # The target's OWN accounts decide the sleeve; the stored scope is the
+    # fallback for a target made before accounts could be chosen.
+    chosen = target_accounts(conn, tid)
+    treatment = (mixed_treatments(conn, chosen) or [""])[0] if chosen else ""
+    if chosen:
+        sleeve_alloc = portfolio.allocation(conn, account_ids=chosen, as_of=as_of,
+                                            prices=prices)
+    else:
+        sleeve_alloc = portfolio.allocation(conn, as_of=as_of, prices=prices, scope=sleeve)
+    stamp = target["rebalanced_on"] if "rebalanced_on" in target.keys() else None
+    measured_since = stamp or since or (
+        _dt.date.fromisoformat(as_of or _dt.date.today().isoformat())
+        - _dt.timedelta(days=DEFAULT_SINCE_DAYS)).isoformat()
+    holdings_by_class = _holdings_by_class(
+        conn, sleeve_alloc, as_of=as_of, prices=prices, since=measured_since)
     total = int(sleeve_alloc.total)
     current = {s.key: int(s.value) for s in sleeve_alloc.by_class}
     sleeve_accounts = [s.label for s in sleeve_alloc.by_account]
@@ -510,7 +765,11 @@ def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
             out_of_band=False)
         # A sleeve worth nothing has no mix to be off; reporting every class as
         # wildly out of band would be noise, not a finding.
-        row.out_of_band = bool(total) and not in_band(
+        row.holdings = holdings_by_class.get(cls, [])
+        # The unclassified bucket is a records gap, not a position off its
+        # weight: judging it against a band produced a bold red "Sell" for
+        # securities whose only problem was having no asset class yet.
+        row.out_of_band = bool(total) and not row.is_unclassified and not in_band(
             row.drift_pct, target_pct, band_abs, band_rel)
         rows.append(row)
 
@@ -541,7 +800,10 @@ def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
         sleeve_total=total, band_abs_pct=band_abs, band_rel_pct=band_rel,
         target_total_pct=sum(lines.values(), Decimal("0")),
         rows=rows, fixed_rows=fixed_rows, fixed_total=fixed_total,
-        sleeve_accounts=sleeve_accounts, cash_only_accounts=cash_only)
+        sleeve_accounts=sleeve_accounts, cash_only_accounts=cash_only,
+        account_ids=chosen, tax_treatment=treatment,
+        since=measured_since, since_is_rebalance=bool(stamp),
+        unpriced=list(sleeve_alloc.unpriced))
 
 
 def target_from_current(conn, name: str, sleeve: str = "investments",

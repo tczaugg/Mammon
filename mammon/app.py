@@ -48,11 +48,20 @@ def sample_data(conn) -> None:
     ledger.create_transfer(conn, chk, sav, "2024-01-25", 1_000_00, memo="monthly savings")
 
 
+#: The Windows taskbar identity. The installer stamps the SAME string onto its
+#: Start Menu shortcut (installer/install.py reads it from here), which is what
+#: makes a pinned Mammon a pin of Mammon. Without it the running window belongs
+#: to pythonw.exe, the pin records pythonw.exe with no arguments, and clicking
+#: it later starts a bare Python instead of Mammon. Changing this string orphans
+#: every existing pin until the shortcut is re-created.
+APP_USER_MODEL_ID = "Mammon.Desktop"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mammon.app", description="Mammon register")
     p.add_argument("--db", default=None,
-                   help="path to the Mammon database file "
-                        "(default: <install root>/data/mammon.db)")
+                   help="path to the Mammon database file (default: the database "
+                        "last opened in the window, else <data dir>/mammon.db)")
     p.add_argument("--account", type=int, default=None,
                    help="open this account's register on startup")
     p.add_argument("--demo", action="store_true",
@@ -104,12 +113,14 @@ def _resolve_db(arg, root=None) -> str:
         return arg
     if root is not None:                      # explicit root: tests pin one
         return str(Path(root) / "data" / "mammon.db")
-    # The single, durable, CWD-independent default. Created on first run.
-    # Resolved by mammon.paths, which also honours $MAMMON_DATA_DIR -- this
-    # function used to ignore it while backups and the download log obeyed it,
-    # so redirecting that variable moved everything EXCEPT the database.
-    from mammon import paths
-    return str(paths.default_db_path())
+    # The database last chosen in the window, else the single, durable,
+    # CWD-independent default (created on first run). Both resolve through
+    # mammon.paths, which also honours $MAMMON_DATA_DIR -- this function used to
+    # ignore it while backups and the download log obeyed it, so redirecting
+    # that variable moved everything EXCEPT the database. See mammon.last_db for
+    # why an explicit --db (above) is never remembered.
+    from mammon import last_db
+    return str(last_db.startup_db())
 
 
 def _open_db(db_path):
@@ -148,9 +159,44 @@ def _open_db(db_path):
     return conn
 
 
-def _launch_gui(conn, db_path, account) -> int:
+def _claim_taskbar_identity() -> None:
+    """Give an INSTALLED copy's windows the identity its Start Menu shortcut
+    carries (see :data:`APP_USER_MODEL_ID`). Must run before any window exists.
+
+    A source checkout is left alone: no shortcut carries the ID there, and a
+    clone claiming it would merge its windows into an installed copy's taskbar
+    button, whose pin then launches the installed copy instead."""
+    if sys.platform != "win32":
+        return
+    from mammon import paths
+    if not paths.is_installed():
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            APP_USER_MODEL_ID)
+    except Exception:                          # pragma: no cover - cosmetic only
+        pass
+
+
+def _warn_missing_last_db(window, missing, db_path) -> None:
+    """Say so when the remembered database could not be opened and the launch
+    fell back. Deferred to the event loop so the window is up behind the
+    message; only the real launch reaches here, never a test."""
+    from PyQt5.QtCore import QTimer
+    from PyQt5.QtWidgets import QMessageBox
+    QTimer.singleShot(0, lambda: QMessageBox.warning(
+        window, "Mammon",
+        f"The database you last used could not be found:\n{missing}\n\n"
+        f"Opened {db_path} instead.\n\n"
+        "If it is on a drive that is not connected, connect it and start Mammon "
+        "again; otherwise use File > Open Database to choose it."))
+
+
+def _launch_gui(conn, db_path, account, missing_last_db=None) -> int:
     # Import Qt lazily so headless tooling can import mammon.app without a display.
     from PyQt5.QtWidgets import QApplication
+    from mammon import last_db
     from mammon.ui import prefs
     from mammon.ui.style import apply_theme
     from mammon.ui.widgets import MainWindow
@@ -164,14 +210,17 @@ def _launch_gui(conn, db_path, account) -> int:
     # Apply the user's persisted Display Preferences (font/colors/shading); with
     # none saved this is exactly the default classic look.
     apply_theme(app, prefs.display_prefs())
-    window = MainWindow(conn, db_path=db_path)
+    window = MainWindow(conn, db_path=db_path,
+                        on_database_opened=last_db.remember)
     if account is not None:
         window.open_register(account)
     window.show()
+    if missing_last_db is not None:
+        _warn_missing_last_db(window, missing_last_db, db_path)
     return app.exec_()
 
 
-def _launch_gui_locked(db_path, account=None) -> int:
+def _launch_gui_locked(db_path, account=None, missing_last_db=None) -> int:
     """Start the GUI for an ENCRYPTED database: ask, then open.
 
     Separate from :func:`_launch_gui` because the order is forced. The password
@@ -181,6 +230,7 @@ def _launch_gui_locked(db_path, account=None) -> int:
     back to opening the file unkeyed."""
     from PyQt5.QtWidgets import QApplication
 
+    from mammon import last_db
     from mammon.ui import prefs
     from mammon.ui.password_dialog import ask_password
     from mammon.ui.style import apply_theme
@@ -194,10 +244,13 @@ def _launch_gui_locked(db_path, account=None) -> int:
     conn = db.init_db(db_path, key)
     crashlog.install_excepthook(crashlog.crash_log_path(db_path))
     crashlog.install_qt_message_handler(crashlog.crash_log_path(db_path))
-    window = MainWindow(conn, db_path=db_path, db_key=key)
+    window = MainWindow(conn, db_path=db_path, db_key=key,
+                        on_database_opened=last_db.remember)
     if account is not None:
         window.open_register(account)
     window.show()
+    if missing_last_db is not None:
+        _warn_missing_last_db(window, missing_last_db, db_path)
     return app.exec_()
 
 
@@ -211,15 +264,23 @@ def main(argv=None) -> int:
     # ``--db`` win from the CLI exactly as it already does from tests.
     args = build_parser().parse_args(argv)
     db_path = _resolve_db(args.db)
+    missing = None
+    if args.db is None:
+        from mammon import last_db
+        missing = last_db.missing_remembered()
+    _claim_taskbar_identity()
     # An encrypted ledger needs its password before anything can be read from it,
     # and asking needs a QApplication -- so the prompt happens inside the GUI
     # launch, not here. A plaintext ledger (the default) opens exactly as before.
     from mammon import encryption
     if encryption.is_encrypted(db_path):
-        return _launch_gui_locked(db_path, args.account)
+        return _launch_gui_locked(db_path, args.account, missing_last_db=missing)
     conn = _open_db(db_path)
     _ensure_seed(conn, args.demo)
-    return _launch_gui(conn, db_path, args.account)
+    # The three-argument call is the seam tests replace _launch_gui through.
+    if missing is None:
+        return _launch_gui(conn, db_path, args.account)
+    return _launch_gui(conn, db_path, args.account, missing_last_db=missing)
 
 
 if __name__ == "__main__":

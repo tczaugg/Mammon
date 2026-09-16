@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional
 
-from mammon import asset_values, ledger
+from mammon import asset_values, instruments, ledger
 
 _CENT = Decimal("1")
 _HUNDRED = Decimal("100")
@@ -115,6 +115,12 @@ _DIVIDEND_ACTIONS = {
     "cglong", "cglongx", "cgshort", "cgshortx", "cgmid", "cgmidx",
     "reinvlg", "reinvsh", "reinvmd",
     "intinc", "intincx", "reinvint",
+    # A broker download's own words for a cash dividend. Accepted through review
+    # as written, they were cash into the account but no one's income: a real
+    # ledger held 63 such rows, every 2026 dividend of its ETFs, in no dividend
+    # total and no return (migration 72 drops the snapshots that summed without
+    # them).
+    "dividend", "cashdividend",
 }
 
 # Cash effect of an action on the account's CASH balance. Quicken exports a
@@ -166,6 +172,99 @@ _ACQUIRE_ACTIONS = {
 _DISPOSE_ACTIONS = {
     "sell", "sellbond", "sellmf", "sellother", "sellstock", "sellx",
 }
+
+# ---------------------------------------------------------------------------
+# Option life-cycle actions (SRD 5.8e-7)
+# ---------------------------------------------------------------------------
+# An option contract has four ways in and out that a share has no analogue for,
+# and Part 1.2 of the instrument taxonomy names them: buy/sell TO OPEN (the
+# position is created, long or short) and buy/sell TO CLOSE (it is unwound), plus
+# the three ENDINGS that are not trades at all -- EXERCISE (the long holder takes
+# the deal), ASSIGN (the writer is made to honour it) and EXPIRE (nobody does
+# anything and the contract simply stops existing).
+#
+# These are NEW vocabulary. No pre-existing ledger row carries one of them, which
+# is why the branches below can be added without a kind test: the option rules
+# reach a row only when that row was WRITTEN with an option action, and the two
+# writers that emit them (:func:`record_option_exercise`,
+# :func:`record_option_expiration`) both refuse a symbol that is not explicitly
+# ``kind='option'``. A NULL-kind row is UNCLASSIFIED and keeps every path it had.
+#
+# The constants are the display spellings actually stored in
+# ``investment_transactions.action``; the sets are keyed by the normalized form
+# (lowercased, spaces stripped) that :func:`_action_key` produces.
+OPTION_BUY_TO_OPEN = "Buy to Open"
+OPTION_SELL_TO_CLOSE = "Sell to Close"
+OPTION_SELL_TO_OPEN = "Sell to Open"
+OPTION_BUY_TO_CLOSE = "Buy to Close"
+OPTION_EXERCISE = "Exercise"
+OPTION_ASSIGN = "Assign"
+OPTION_EXPIRE = "Expire"
+OPTION_EXPIRE_SHORT = "Expire Short"
+
+#: Every option life-cycle action, normalized.
+OPTION_ACTIONS = {
+    "buytoopen", "selltoclose", "selltoopen", "buytoclose",
+    "exercise", "assign", "expire", "expireshort",
+}
+
+#: Why an expiry is TWO actions rather than one "Expire" whose direction is read
+#: off the position: a share-quantity row has to state its own direction. The
+#: reconciliation sums :func:`share_qty_delta` per row to get the contract count
+#: (:func:`share_reconcile_rows`), and it has no position to consult -- so a
+#: single "Expire" would be counted with the wrong sign for one of the two sides
+#: and the reconciliation would silently disagree with the replay. Split in two,
+#: each expiry is an ordinary removal or an ordinary cover and EVERY existing
+#: path -- quantity, cash, realized P/L, reconciliation -- is already correct.
+#: :func:`record_option_expiration` picks the right one from the position, so
+#: the choice is never the caller's to get wrong.
+_EXPIRE_ACTIONS = {"expire", "expireshort"}
+
+#: A written contract leaving the books against its OWN short lots, so the credit
+#: released is lot-exact rather than the position average (see
+#: :func:`_relieve_short`). All three are short covers for quantity purposes.
+_SHORT_LOT_CLOSE_ACTIONS = {"buytoclose", "assign", "expireshort"}
+#: ...and of those, the ones that BOOK realized P/L. An assignment books none:
+#: the premium rolls into the share lot instead (Pub 550), which is the whole
+#: point of the exercise/assignment pair.
+_SHORT_REALIZING_ACTIONS = {"buytoclose", "expireshort"}
+#: The two endings whose premium rolls into a share lot instead of being realized.
+_BASIS_ROLL_ACTIONS = {"exercise", "assign"}
+
+_ADD_ACTIONS |= {"buytoopen"}
+# Exercise is a REMOVAL that is not a SALE: the contract leaves at its own cost
+# and books nothing, because that cost is about to reappear inside a share lot.
+# A long expiry IS a sale -- of nothing, for nothing: proceeds of zero against
+# the basis relieved is exactly the loss of the whole premium, which is why it
+# needs no arithmetic of its own.
+_REMOVE_ACTIONS |= {"selltoclose", "exercise", "expire"}
+_SALE_ACTIONS |= {"selltoclose", "expire"}
+_SHORT_OPEN_ACTIONS |= {"selltoopen"}
+_SHORT_COVER_ACTIONS |= _SHORT_LOT_CLOSE_ACTIONS
+_ACQUIRE_ACTIONS |= {"buytoopen"}
+_DISPOSE_ACTIONS |= {"selltoclose", "expire"}
+# Cash: paying a premium and paying to close a written contract are money out;
+# an expiry of either sign moves no cash at all. Selling to open/close keeps the
+# stored sign (positive = the premium received), like every other credit in this
+# module, and so do Exercise/Assign -- whose amount is the SIGNED premium being
+# rolled, cash in for a long contract's basis and cash out for a written one's
+# credit.
+_CASH_OUT_ACTIONS |= {"buytoopen", "buytoclose"}
+_CASH_ZERO_ACTIONS |= _EXPIRE_ACTIONS
+
+# Plain trades, whose DIRECTION the action states but whose MEANING the position
+# decides (:func:`_apply_trade`). Quicken's four verbs do not track the sign of
+# the position they act on: a short is covered with ``Buy`` as often as with
+# ``CvrShrt``, a long is sold with ``ShtSell``, and an option writer's whole
+# history is ``ShtSell``/``CvrShrt`` pairs. Keyed on the action alone, a Buy
+# against a short stacked a long lot on top of it, a Sell with nothing held
+# booked its entire proceeds as gain, and a cover realized nothing at all -- on
+# a migrated option-writing history that put realized P/L several times away
+# from the cash the trades actually produced. The option life-cycle verbs
+# are deliberately NOT here: they are written only for a classified contract,
+# by writers that already know the position's sign (SRD 5.8e-7).
+_TRADE_BUY_ACTIONS = {"buy", "buybond", "buymf", "buyother", "buystock", "buyx", "cvrshrt"}
+_TRADE_SELL_ACTIONS = {"sell", "sellbond", "sellmf", "sellother", "sellstock", "sellx", "shtsell"}
 
 
 def _cash_effect(action, amount) -> int:
@@ -399,12 +498,12 @@ def is_known_action(action) -> bool:
     (any spelling the holdings replay recognises). Raw source activity text --
     "Credit Interest", "RECORDKEEPING FEE" -- is not, which is how callers tell
     an importer's untranslated passthrough from a real action."""
-    a = str(action or "").strip().lower()
+    a = str(action or "").strip().lower().replace(" ", "")
     if not a:
         return False
     known = (_ADD_ACTIONS | _REMOVE_ACTIONS | _RTRNCAP_ACTIONS
              | _SHORT_OPEN_ACTIONS | _SHORT_COVER_ACTIONS | _SPLIT_ACTIONS
-             | _SALE_ACTIONS | _DIVIDEND_ACTIONS)
+             | _SALE_ACTIONS | _DIVIDEND_ACTIONS | OPTION_ACTIONS)
     return a in known or a in {"cash", "miscinc", "miscexp", "xin", "xout",
                                "withdraw", "withdrwx", "margint", "div", "divx",
                                "stockdividend"}
@@ -792,18 +891,28 @@ def register_rows(conn, account_id: int) -> list[dict]:
     derived keys):
 
       * ``share_bal`` -- running quantity of THAT ROW's security as clean Decimal
-        text, updated on share-MOVING actions (:data:`_ADD_ACTIONS` -> +qty,
-        :data:`_REMOVE_ACTIONS` -> -qty) and SCALED by a split
-        (:data:`_SPLIT_ACTIONS` -> x q/10) -- the SAME classification
-        :func:`compute_holdings` uses, so the last share_bal per symbol ties to
-        holdings/valuation. ``None`` on cash-only or non-share-moving rows
-        (Div/IntInc/XIn/MiscInc/Cash) -- Quicken leaves Share Bal blank there.
+        text, moved by :func:`share_qty_delta` on every share-MOVING action and
+        SCALED by a split (:data:`_SPLIT_ACTIONS` -> x q/10, which takes
+        precedence because its effect is multiplicative, not additive).
+        ``None`` on cash-only or non-share-moving rows
+        (Div/IntInc/RtrnCap/XIn/MiscInc/Cash) -- Quicken leaves Share Bal blank
+        there.
 
-        The split case was missing, and it broke the tie to holdings rather than
-        just the split's own row: a StkSplit is neither an ADD nor a REMOVE, so
-        the running total was left at its pre-split value and EVERY later row for
-        that security reported a stale balance. An 8-for-1 on 26 shares left the
-        column reading 26 forever while holdings said 208.
+        Classification is DELEGATED, not repeated here: :func:`is_quantity_action`
+        and :func:`share_qty_delta` are the same pair the holdings replay uses, so
+        the last share_bal per symbol ties to holdings/valuation. This function
+        used to carry its own second copy of the rule (``a in _ADD_ACTIONS or a in
+        _REMOVE_ACTIONS``), which silently omitted the two SHORT sets --
+        :data:`_SHORT_OPEN_ACTIONS` (ShtSell) and :data:`_SHORT_COVER_ACTIONS`
+        (CvrShrt) are separate sets in this module -- so a short leg fell through
+        to the cash-only branch and the register rendered its (correctly negative)
+        Share Bal as an empty cell.
+
+        The split case was likewise missing once, and it broke the tie to holdings
+        rather than just the split's own row: a StkSplit is neither an ADD nor a
+        REMOVE, so the running total was left at its pre-split value and EVERY
+        later row for that security reported a stale balance. An 8-for-1 on 26
+        shares left the column reading 26 forever while holdings said 208.
       * ``inv_amt`` -- ``abs(amount)`` on share-moving rows (the gross security
         amount Quicken shows under 'Inv Amt'); ``None`` otherwise.
       * ``cash_amt`` -- the row's effect on the account CASH (:func:`_cash_effect`):
@@ -817,14 +926,21 @@ def register_rows(conn, account_id: int) -> list[dict]:
     """
     acct = ledger.get_account(conn, account_id)
     cash = 0
+    opening = 0
     if acct is not None:
         try:
-            cash = acct["opening_balance"] or 0
+            opening = acct["opening_balance"] or 0
         except (KeyError, IndexError):
-            cash = 0
+            opening = 0
+    # The opening balance joins the running cash on its own date, as it does in
+    # ledger.register_rows and ledger.account_balance.
+    opened = not opening
     share_bal: dict[str, Decimal] = {}
     out: list[dict] = []
     for t in _register_sequence(conn, account_id):
+        if not opened and ledger.opening_balance_on(acct, t["date"]):
+            cash += opening
+            opened = True
         cash_leg = isinstance(t, dict) and t.get("cash_leg")
         a = (t["action"] or "").strip().lower().replace(" ", "")
         # A backfilled transfer leg lives in the cash ``transactions`` table (see
@@ -833,7 +949,6 @@ def register_rows(conn, account_id: int) -> list[dict]:
         camt = int(t["amount"] or 0) if cash_leg else _cash_effect(t["action"], t["amount"])
         cash += camt
         sym = t["symbol"]
-        share_moving = a in _ADD_ACTIONS or a in _REMOVE_ACTIONS
         sbal = None
         inv_amt = None
         # A security row is one that MOVES shares of a named security -- a bare
@@ -845,10 +960,13 @@ def register_rows(conn, account_id: int) -> list[dict]:
             bal = apply_split(share_bal.get(sym, Decimal(0)), t)
             share_bal[sym] = bal
             sbal = _qty_text(bal)
-        elif sym and share_moving:
-            q = _D(t["quantity"])
-            bal = share_bal.get(sym, Decimal(0))
-            bal = bal + q if a in _ADD_ACTIONS else bal - q
+        elif sym and is_quantity_action(a):
+            # ONE classification for the whole module: share_qty_delta already
+            # signs ADD/CvrShrt positive and REMOVE/ShtSell negative, so a short
+            # leg carries the balance negative instead of falling through to the
+            # blank cash-only branch. (_SPLIT_ACTIONS is caught above; its delta
+            # is 0 because a split scales rather than adds.)
+            bal = share_bal.get(sym, Decimal(0)) + share_qty_delta(t)
             share_bal[sym] = bal
             sbal = _qty_text(bal)
             if t["amount"] is not None:
@@ -1019,20 +1137,27 @@ def investment_txn_for_cash_leg(conn, txn):
 
 
 def _register_sequence(conn, account_id: int) -> list:
-    """The account's rows for the register in application order -- the real
+    """The account's rows for the register in register order -- the real
     ``investment_transactions`` rows merged with any cash-only transfer legs that
-    only exist in ``transactions`` (:func:`_unrepresented_transfer_legs`). Ordered
-    by date, then investment rows before backfilled cash legs, then id, so the
-    running cash balance accumulates in a stable, date-correct sequence. With no
-    stray legs this is exactly ``list_investment_txns`` order (existing behaviour)."""
+    only exist in ``transactions`` (:func:`_unrepresented_transfer_legs`).
+
+    Ordered by date, then CASH EFFECT high to low, then investment rows before
+    backfilled cash legs, then id (SRD 5.1b, the same rule as
+    :func:`ledger.register_rows`). A day's rows carry no time, and in id order a
+    rebalance's buys could show ahead of the sales that paid for them, or a
+    purchase ahead of the transfer that funded it, with the cash balance dipping
+    negative in between. Cash in first and the largest spend last keeps the
+    running cash as high as it can be at every row. Share-only rows (reinvest,
+    share transfers, splits) move no cash and sit between the two. This is the
+    DISPLAY order: the holdings replay keeps application order (date, id), so a
+    same-day buy and sale of one security are never replayed as a short."""
     inv_rows = list_investment_txns(conn, account_id)
     legs = _unrepresented_transfer_legs(conn, account_id, inv_rows)
-    if not legs:
-        return list(inv_rows)
 
     def _key(r):
         is_leg = isinstance(r, dict) and r.get("cash_leg")
-        return (r["date"] or "", 1 if is_leg else 0, int(r["id"] or 0))
+        cash = int(r["amount"] or 0) if is_leg else _cash_effect(r["action"], r["amount"])
+        return (r["date"] or "", -cash, 1 if is_leg else 0, int(r["id"] or 0))
 
     return sorted([*inv_rows, *legs], key=_key)
 
@@ -1073,6 +1198,13 @@ class RealizedGain:
     quantity: Decimal
     proceeds: int                     # cents, net of commission
     basis: int                        # cents relieved
+    #: Set ONLY where the law fixes the term regardless of the dates. The one
+    #: case that matters here: gain or loss on a contract the user WROTE is
+    #: short-term however long the contract was open (Pub 550, "Options" --
+    #: writing is not holding property, so there is no holding period to run).
+    #: Without it a LEAPS written two years ago and expiring worthless would
+    #: report a long-term gain, which is wrong on the tax form.
+    term_override: Optional[str] = None
 
     @property
     def gain(self) -> int:
@@ -1081,7 +1213,10 @@ class RealizedGain:
     @property
     def term(self) -> str:
         """``long`` when held more than one year, ``short`` otherwise,
-        ``unknown`` when the acquisition date is not known."""
+        ``unknown`` when the acquisition date is not known -- unless
+        ``term_override`` fixes it (a written option; see that field)."""
+        if self.term_override:
+            return self.term_override
         if not self.acquired:
             return "unknown"
         a = _dt.date.fromisoformat(self.acquired)
@@ -1192,6 +1327,80 @@ def _relieve(pos, q: Decimal, method: str, assigned) -> list:
     return out
 
 
+def _relieve_short(pos, q: Decimal) -> list:
+    """The mirror of :func:`_relieve` for a SHORT position: take ``q`` units back
+    out of the obligation and return what each short lot gives up as
+    ``[(lot_date, lot_txn_id, qty, credit)]``, where ``credit`` is NEGATIVE --
+    the money that came IN when the position was opened is carried as a negative
+    cost, so releasing it raises ``pos.cost`` back toward zero.
+
+    Why a short needs its own function rather than the position average
+    :func:`_apply_txn` used to apply: for an option, short is the NORMAL
+    direction (writing calls and puts is the common retail strategy), so the
+    premium of the exact contract being closed has to be identifiable. Lots are
+    taken oldest-first; there is no ``method`` because lot selection on a short
+    is not the user's to make -- what is relieved is the obligation that is
+    actually being closed.
+
+    ``pos.qty`` is left to the caller, exactly as :func:`_relieve` does. Falls
+    back to the aggregate average when no short lot history exists (a ShtSell
+    from before this vocabulary, or a snapshot seeded position), which reproduces
+    the pre-existing average-credit behaviour to the cent."""
+    if q <= 0 or pos.qty >= 0:
+        return []
+    q = min(q, -pos.qty)
+    short_lots = [lot for lot in pos.lots if lot.qty < 0]
+    if not short_lots:
+        per = Decimal(pos.cost) / pos.qty          # both negative -> positive
+        taken = -_cents(per * q)                   # negative: a credit released
+        if abs(taken) > abs(pos.cost):
+            taken = pos.cost
+        pos.cost -= taken
+        return [(None, None, q, taken)]
+    out: list = []
+    remaining, total = q, 0
+    for lot in short_lots:
+        if remaining <= 0:
+            break
+        avail = -lot.qty
+        take = min(avail, remaining)
+        c = lot.cost if take >= avail else _cents(Decimal(lot.cost) * take / avail)
+        lot.cost -= c
+        lot.qty += take
+        total += c
+        remaining -= take
+        out.append((lot.date, lot.txn_id, take, c))
+    # Only fully-released lots go; a partially-closed short lot stays negative.
+    pos.lots = [lot for lot in pos.lots if lot.qty != 0]
+    pos.cost -= total
+    return out
+
+
+def _short_gain_rows(t, sym: str, taken: list, cost_paid: int,
+                     term: Optional[str] = "short") -> list:
+    """One :class:`RealizedGain` per SHORT lot a close drew on. A written
+    contract's P/L is the mirror of a long's: the premium received when it was
+    written is the proceeds (``-credit``, since a credit is carried negative) and
+    what it cost to make the obligation go away is the basis -- zero when it
+    simply expired worthless, which is what makes the whole premium the gain.
+
+    ``acquired`` is the date the contract was WRITTEN and ``sold`` the date it
+    was closed, so the row reads in calendar order; ``term`` is pinned short by
+    default because writing an option starts no holding period (see
+    :attr:`RealizedGain.term_override`)."""
+    if not taken:
+        return []
+    total_qty = sum((x for _, _, x, _ in taken), Decimal(0))
+    out, allotted = [], 0
+    for i, (date, txn_id, take, credit) in enumerate(taken):
+        c = (cost_paid - allotted if i == len(taken) - 1
+             else _cents(Decimal(cost_paid) * take / total_qty))
+        allotted += c
+        out.append(RealizedGain(_row_value(t, "id"), sym, date, t["date"],
+                                take, -credit, c, term_override=term))
+    return out
+
+
 def _gain_rows(t, sym: str, q: Decimal, proceeds: int, taken: list) -> list:
     """One :class:`RealizedGain` per lot a sale drew on, the sale's net
     proceeds shared out by shares (the last lot absorbs the rounding)."""
@@ -1205,6 +1414,66 @@ def _gain_rows(t, sym: str, q: Decimal, proceeds: int, taken: list) -> list:
         allotted += p
         out.append(RealizedGain(_row_value(t, "id"), sym, date, t["date"], take, p, cost))
     return out
+
+
+def _apply_trade(pos, t, sym: str, a: str, q: Decimal, method: str, assignments) -> None:
+    """Fold one plain trade into ``pos`` by what it does to the POSITION, not by
+    what its action is called (see :data:`_TRADE_BUY_ACTIONS`).
+
+    A buying trade first COVERS any short -- releasing the credit the short was
+    opened for and realizing that credit less the share of the cash spent on
+    covering -- and only what is left over opens or adds to a long lot. A
+    selling trade first SELLS any long, exactly as a sale always has (lot
+    method, specified lots, one gain row per lot), and only what is left over
+    opens or adds to a short. When a trade crosses zero, its cash is shared out
+    by shares between the side it closes and the side it opens.
+
+    Every trade that stays on one side is the previous arithmetic unchanged: a
+    long-only history replays to the same cost, lots and gains to the cent.
+
+    A covered short is SHORT-term whatever its dates. For a written option that
+    is the law (Pub 550: writing starts no holding period); for an equity short
+    sale it is the normal case, and an exception needs facts this row does not
+    carry."""
+    pos.ever_held = True
+    txn_id = _row_value(t, "id")
+    if a in _TRADE_BUY_ACTIONS:
+        total = _cost_of(t, q)
+        cover = min(q, -pos.qty) if pos.qty < 0 else Decimal(0)
+        cover_cost = total if cover == q else _cents(Decimal(total) * cover / q)
+        if cover > 0:
+            taken = _relieve_short(pos, cover)
+            pos.qty += cover
+            rows = _short_gain_rows(t, sym, taken, cover_cost)
+            pos.realized += sum(g.gain for g in rows)
+            pos.gains.extend(rows)
+            if pos.qty == 0:
+                pos.cost = 0
+                pos.lots = []
+        rest = q - cover
+        if rest > 0:
+            cost = total - cover_cost
+            pos.qty += rest
+            pos.cost += cost
+            pos.lots.append(_Lot(rest, cost, t["date"], txn_id))
+        return
+
+    total = _proceeds_of(t, q)
+    close = min(q, pos.qty) if pos.qty > 0 else Decimal(0)
+    close_proceeds = total if close == q else _cents(Decimal(total) * close / q)
+    if close > 0:
+        cost_before = pos.cost
+        taken = _relieve(pos, close, method, (assignments or {}).get(txn_id))
+        pos.qty -= close
+        if pos.qty == 0:
+            pos.cost = 0
+            pos.lots = []
+        pos.realized += close_proceeds - (cost_before - pos.cost)
+        pos.gains.extend(_gain_rows(t, sym, close, close_proceeds, taken))
+    rest = q - close
+    if rest > 0:
+        pos.qty -= rest
+        pos.cost -= total - close_proceeds
 
 
 def _apply_txn(positions: dict, t, method: str = "average", assignments=None) -> None:
@@ -1230,6 +1499,12 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
         # Income distributed BY the security (also adds shares if it is a
         # reinvest action, handled by the _ADD_ACTIONS branch below).
         pos.dividends += abs(t["amount"] or 0)
+    if q > 0 and (a in _TRADE_BUY_ACTIONS or a in _TRADE_SELL_ACTIONS):
+        # A plain trade is read against the position's sign. A row with no
+        # positive quantity (an amount-only or oddly signed import) keeps the
+        # branches below exactly as they always were.
+        _apply_trade(pos, t, sym, a, q, method, assignments)
+        return
     if a in _ADD_ACTIONS:
         cost = _cost_of(t, q)
         pos.qty += q
@@ -1249,27 +1524,62 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
             # Realized gain = net proceeds - the cost actually relieved
             # (cost_before - cost_after). A share TRANSFER out
             # (ShrsOut/XOut/RemoveShares) is not a sale and books nothing.
-            proceeds = _proceeds_of(t, q)
+            # "Expired worthless" is taken literally -- proceeds are zero by
+            # definition, never whatever price column the row happens to carry,
+            # so the loss is always exactly the premium paid.
+            proceeds = 0 if a in _EXPIRE_ACTIONS else _proceeds_of(t, q)
             pos.realized += proceeds - (cost_before - pos.cost)
             pos.gains.extend(_gain_rows(t, sym, q, proceeds, taken))
         pos.ever_held = True
     elif a in _SHORT_OPEN_ACTIONS:
         # Open/add to a short: shares go negative; proceeds credit the basis
         # (a negative cost, the mirror of a Buy's positive basis).
+        credit = _cost_of(t, q)
         pos.qty -= q
-        pos.cost -= _cost_of(t, q)
+        pos.cost -= credit
+        if a in OPTION_ACTIONS and q > 0:
+            # A WRITTEN option gets a lot of its own -- negative quantity,
+            # negative cost -- so that the close, assignment or expiry that
+            # eventually relieves it can name the premium it was written for and
+            # the date it was written on. Short is the normal direction for an
+            # option, so "the position average" is not good enough here. ShtSell
+            # is deliberately excluded: an equity short keeps the lot-less
+            # average behaviour it has always had. A negative lot is inert to the
+            # rest of the module -- both _spread_cost and _relieve return early
+            # while the position quantity is not positive.
+            pos.lots.append(_Lot(-q, -credit, t["date"], _row_value(t, "id")))
         pos.ever_held = True
     elif a in _SHORT_COVER_ACTIONS:
-        # Buy the shares back: relieve the proportional credit, raise qty
-        # toward zero. avg credit/share uses abs(qty) so its sign survives.
-        # (Short realized P/L is intentionally not booked here -- shorts are
-        # rare and out of scope for the per-security P/L view.)
-        if pos.qty < 0:
-            avg_per_share = Decimal(pos.cost) / abs(pos.qty)
-            pos.cost -= _cents(avg_per_share * q)
-        pos.qty += q
-        if pos.qty == 0:
-            pos.cost = 0
+        if a in _SHORT_LOT_CLOSE_ACTIONS:
+            # A WRITTEN option leaving the books: Buy to Close (bought back),
+            # Expire Short (nobody used it) or Assign (the writer was made to
+            # honour it). All three release the exact credit of the contracts
+            # being closed. The first two REALIZE it -- the premium received
+            # less what it cost to end the obligation, which for an expiry is
+            # nothing at all, making the whole premium the gain. An assignment
+            # books none: its premium is not income, it rolls into the share lot
+            # the assignment creates or disposes of (Pub 550; see
+            # :func:`record_option_exercise`).
+            taken = _relieve_short(pos, q)
+            pos.qty += q
+            if pos.qty == 0:
+                pos.cost = 0
+                pos.lots = []
+            if a in _SHORT_REALIZING_ACTIONS:
+                paid = 0 if a in _EXPIRE_ACTIONS else _cost_of(t, q)
+                rows = _short_gain_rows(t, sym, taken, paid)
+                pos.realized += sum(g.gain for g in rows)
+                pos.gains.extend(rows)
+        else:
+            # Reached only by a CvrShrt with no positive quantity: every real
+            # cover goes through _apply_trade, which realizes the short. This is
+            # the old quantity-only fallback for a malformed row.
+            if pos.qty < 0:
+                avg_per_share = Decimal(pos.cost) / abs(pos.qty)
+                pos.cost -= _cents(avg_per_share * q)
+            pos.qty += q
+            if pos.qty == 0:
+                pos.cost = 0
         pos.ever_held = True
     elif a in _SPLIT_ACTIONS:
         # Rescale the running share count by the split's exact ratio; a reverse
@@ -1307,7 +1617,14 @@ def _fold_aliases(conn, positions: dict) -> dict:
     the new ticker's lots pool under the canonical symbol, so the Holdings window
     and every valuation see one identity across the rename date. A no-op (the same
     object) when no aliases exist -- the overwhelmingly common case -- so the hot
-    replay path pays nothing."""
+    replay path pays nothing.
+
+    An option contract is NEVER folded (SRD 5.8e-2a). :func:`add_alias` refuses to
+    record such an alias in the first place; this raises if one exists anyway,
+    because merging a contract's position into its underlying's is unrecoverable
+    at read time -- the contract count and the share count become one number and
+    nothing downstream can tell them apart again. Loud beats wrong here: a
+    ValueError names the two symbols, and the user removes the alias."""
     alias_map = {a: c for a, c in list_aliases(conn)}
     if not alias_map:
         return positions
@@ -1322,6 +1639,16 @@ def _fold_aliases(conn, positions: dict) -> dict:
     folded: dict = {}
     for sym, pos in positions.items():
         key = canon(sym)
+        # Only a symbol that actually MOVES is checked, so an unaliased ledger --
+        # and every NULL-kind row, which is UNCLASSIFIED and never an option --
+        # pays nothing and behaves exactly as before.
+        if key != sym and (_stored_kind(conn, sym) == instruments.Kind.OPTION.value
+                           or _stored_kind(conn, key) == instruments.Kind.OPTION.value):
+            raise ValueError(
+                f"refusing to fold {sym!r} into {key!r}: one of them is an "
+                "option contract, and an option is a distinct instrument from "
+                "its underlying, never another spelling of it -- remove the "
+                "security_aliases row")
         if key in folded:
             _merge_position(folded[key], pos)
         else:
@@ -1522,26 +1849,57 @@ def compute_holdings(conn, account_id: int, as_of: Optional[str] = None) -> dict
     }
 
 
+def _states_no_cash(t) -> bool:
+    """True for a buy or sell trade whose amount is stated as exactly zero.
+
+    The QIF specification: "If an item is omitted from the transaction in the
+    QIF file, Quicken treats it as a blank item." A trade exported with a price
+    and a quantity but no ``T`` moved no cash in Quicken's books -- Quicken writes
+    an option's expiry or assignment removal that way ("Buy 20 @ 100", no total)
+    -- and the cash balance already reads it as zero. Pricing it from quantity x
+    price instead charged $2,000 that never left the account. A blank amount
+    (NULL, as manual entry leaves it) still derives from quantity x price, and a
+    share transfer (ShrsIn/ShrsOut) still takes its basis from its price, which is
+    the only basis it states."""
+    if t["amount"] is None or t["amount"] != 0:
+        return False
+    a = (t["action"] or "").strip().lower().replace(" ", "")
+    return a in _TRADE_BUY_ACTIONS or a in _TRADE_SELL_ACTIONS
+
+
 def _cost_of(t, qty: Decimal) -> int:
     """Cash cost (cents) a share-adding transaction adds to basis: the actual
-    cash out if the row carries an amount, else price*qty plus commission."""
+    cash out if the row carries an amount, else price*qty plus commission (never
+    for a trade whose amount is stated as zero; see :func:`_states_no_cash`)."""
     amount = t["amount"]
     if amount not in (None, 0):
         return abs(amount)
+    if _states_no_cash(t):
+        return 0
     base = _cents(qty * _D(t["price"]) * _HUNDRED) if t["price"] else 0
     return base + abs(t["commission"] or 0)
 
 
 def _proceeds_of(t, qty: Decimal) -> int:
-    """Net cash (cents) a share-removing SALE brings in: the row's amount if it
-    carries one, else price*qty, in both cases LESS commission -- the mirror of
+    """Net cash (cents) a share-removing SALE brings in: the row's amount when it
+    carries one, else price*qty LESS commission -- the exact mirror of
     :func:`_cost_of`, so realized P/L (proceeds - relieved basis) nets the
-    commission paid on both the buy and the sell."""
+    commission paid on both the buy and the sell exactly once.
+
+    A trade's ``amount`` is the cash that actually moved, commission included,
+    in both directions: that is what Quicken's ``T`` and an OFX ``<TOTAL>``
+    state, what :func:`_cash_effect` posts to the cash balance, and what a
+    migrated ledger holds for all but a handful of penny-rounded commissioned
+    trades. This used to subtract the
+    commission from the amount as well, which charged it twice: every closed
+    position read short by its sale commissions, and a position's realized P/L
+    no longer tied to the cash it produced."""
     amount = t["amount"]
     if amount not in (None, 0):
-        gross = abs(amount)
-    else:
-        gross = _cents(qty * _D(t["price"]) * _HUNDRED) if t["price"] else 0
+        return abs(amount)
+    if _states_no_cash(t):
+        return 0
+    gross = _cents(qty * _D(t["price"]) * _HUNDRED) if t["price"] else 0
     return gross - abs(t["commission"] or 0)
 
 
@@ -1724,10 +2082,78 @@ def _identity_symbols(conn, symbol) -> list:
     return [canon, *aliases]
 
 
+def _stored_kind(conn, symbol) -> Optional[str]:
+    """The ``securities.kind`` stored under EXACTLY this spelling, lowercased, or
+    ``None`` for "no row" and for "row exists, kind is NULL" alike -- both mean
+    UNCLASSIFIED (SRD 5.8e-2). No alias resolution: this answers "what is THIS
+    name", which is what the identity partition below has to ask before it can
+    resolve anything."""
+    name = str(symbol or "").strip()
+    if not name:
+        return None
+    row = conn.execute(
+        "SELECT kind FROM securities WHERE symbol=?", (name,)).fetchone()
+    kind = ((row[0] if row is not None else None) or "").strip().lower()
+    return kind or None
+
+
+def _kind_identity_symbols(conn, symbol) -> list:
+    """:func:`_identity_symbols` narrowed to ONE INSTRUMENT (SRD 5.8e-2d).
+
+    An alias set means "two ticker spellings of one continuous identity", and
+    :func:`add_alias` refuses to put an option contract in one. This is the
+    braces to that belt: a set recorded before the guard landed, or written by
+    hand, can still fuse a contract onto its underlying, and a union across
+    them would value the contract at the stock's price and sum its contract
+    count into the stock's share count. So the set is partitioned: a known
+    option resolves only over option-kind spellings, and anything NOT known to
+    be an option drops the option-kind spellings.
+
+    Bit-for-bit today's list whenever no spelling in the set is an EXPLICIT
+    ``kind='option'`` row -- which is every identity in an unclassified ledger,
+    because NULL kind is UNCLASSIFIED and never equity. A single-element
+    identity (the overwhelmingly common case) never even looks a kind up."""
+    syms = _identity_symbols(conn, symbol)
+    if len(syms) < 2:
+        return syms
+    option = instruments.Kind.OPTION.value
+    kinds = {s: _stored_kind(conn, s) for s in syms}
+    if not any(k == option for k in kinds.values()):
+        return syms                       # today's behaviour, untouched
+    want_option = _stored_kind(conn, symbol) == option
+    kept = [s for s in syms if (kinds.get(s) == option) == want_option]
+    # Never widen back to the fused set when the partition empties: the asked-for
+    # spelling alone is the honest answer, not "everything".
+    return kept or [str(symbol or "").strip()]
+
+
+def _kind_canon(conn, symbol):
+    """:func:`resolve_symbol` narrowed to ONE INSTRUMENT (SRD 5.8e-2d).
+
+    The canonical spelling when it is the same instrument as ``symbol``, else
+    ``symbol`` itself. Identical to ``resolve_symbol`` for every identity that
+    :func:`_kind_identity_symbols` leaves whole -- which is every identity in an
+    unclassified ledger -- so this is a no-op there.
+
+    It exists because canonicalising FIRST is how a hand-written alias row
+    fusing a contract onto its underlying would still win: ask to reconcile the
+    contract, resolve to the stock, and reconcile the stock's shares under the
+    contract's name. The partition has to be applied to the resolution itself,
+    not only to the set it is resolved over."""
+    name = str(symbol or "").strip()
+    canon = resolve_symbol(conn, name)
+    return canon if canon in _kind_identity_symbols(conn, name) else (name or canon)
+
+
 def _price_identity_clause(conn, symbol):
     """``(where_fragment, params)`` selecting every price_history row that shares
-    ``symbol``'s canonical identity -- ``symbol IN (?,...)``."""
-    syms = _identity_symbols(conn, symbol)
+    ``symbol``'s canonical identity -- ``symbol IN (?,...)``.
+
+    Unchanged for renames, which is the whole point of it. It just never unions
+    across instruments of different kinds (:func:`_kind_identity_symbols`): an
+    option's premium series and its underlying's price series are two different
+    series, and reading one for the other is a silent mis-valuation."""
+    syms = _kind_identity_symbols(conn, symbol)
     return "symbol IN (%s)" % ",".join("?" for _ in syms), list(syms)
 
 
@@ -1816,6 +2242,162 @@ def record_prices(conn, rows) -> int:
     return len(payload)
 
 
+#: Option-leg actions that say outright that a contract was exercised or
+#: assigned: the ones :func:`record_option_exercise` writes.
+_DELIVERY_OPTION_ACTIONS = {OPTION_EXERCISE.lower(), OPTION_ASSIGN.lower()}
+
+
+def option_delivery_leg_ids(conn, rows) -> set:
+    """The ids among ``rows`` that are the SHARE side of an option exercise or
+    assignment: rows whose price comes from the contract, not the market.
+
+    A share leg changes hands at the strike, or at strike +/- premium when the
+    premium is rolled into its basis (SRD 5.8e-7). Neither is what a share traded
+    for that day, so neither may become price history. Quicken makes exactly this
+    mistake: its price list records the strike as the day's close on assignment
+    days, so a real ledger held closes tens of percent away from where the stock
+    traded. :func:`learn_prices_from_transactions` would write the same figures
+    from the share legs themselves on any day that had no price.
+
+    Two shapes, and both require the contract to be EXPLICITLY classified
+    ``kind='option'`` with its underlying recorded, so no option rule reaches an
+    unclassified security (SRD 5.8e-2):
+
+    * **Mammon's own pair** (:func:`record_option_exercise`): an ``Exercise`` or
+      ``Assign`` row, same account and date, on a contract whose underlying is
+      this row's security, for the same number of shares.
+    * **The broker's and Quicken's pair**: this row states the STRIKE as its
+      price, and the same account holds, that date, a row closing a contract on
+      this underlying at that strike, for the same number of shares, with no
+      price and no amount. That is how an OFX ``<CLOSUREOPT>`` and a Quicken
+      export both write the contract side.
+
+    Shares match either one-for-one or as contracts x multiplier: Quicken
+    records an option's quantity in shares, Mammon's writer in contracts.
+
+    Deliberately narrow. A same-day stock trade that happens to be at a strike
+    but has no matching unpriced option close keeps its price, so an ordinary
+    trade is never mistaken for a delivery.
+    """
+    days: dict = {}
+    for r in rows:
+        if r["symbol"] and r["date"]:
+            days.setdefault((r["account_id"], r["date"]), []).append(r)
+    if not days:
+        return set()
+
+    cols = "id, account_id, date, action, symbol, quantity, price, amount"
+    if len(days) == 1:
+        ((aid, date),) = days
+        found = conn.execute(
+            f"SELECT {cols} FROM investment_transactions "
+            "WHERE account_id=? AND date=?", (aid, date)).fetchall()
+    else:
+        accounts = sorted({aid for aid, _ in days})
+        marks = ",".join("?" * len(accounts))
+        found = conn.execute(
+            f"SELECT {cols} FROM investment_transactions "
+            f"WHERE account_id IN ({marks})", accounts).fetchall()
+
+    terms_by_symbol: dict = {}
+
+    def terms_of(symbol):
+        key = str(symbol or "").strip()
+        if key not in terms_by_symbol:
+            terms_by_symbol[key] = option_terms(conn, key) if key else None
+        return terms_by_symbol[key]
+
+    names_by_symbol: dict = {}
+
+    def names_of(symbol):
+        """Every spelling a share row's security answers to: its alias identity
+        plus each spelling's recorded ticker. A QIF import stores a stock under
+        its NAME ("ACME INC") while an option records its underlying as the
+        TICKER ("ACME"), and ``securities.ticker`` is what joins the two."""
+        key = str(symbol or "").strip()
+        if key not in names_by_symbol:
+            spellings = [str(s).strip() for s in _identity_symbols(conn, key) if s]
+            names = {s.upper() for s in spellings}
+            for s in spellings:
+                row = conn.execute("SELECT ticker FROM securities WHERE symbol=?",
+                                   (s,)).fetchone()
+                if row is not None and (row[0] or "").strip():
+                    names.add(row[0].strip().upper())
+            names_by_symbol[key] = names
+        return names_by_symbol[key]
+
+    legs: dict = {}
+    for o in found:
+        key = (o["account_id"], o["date"])
+        if key not in days:
+            continue
+        terms = terms_of(o["symbol"])
+        if terms and (terms.get("underlying") or "").strip():
+            legs.setdefault(key, []).append((o, terms))
+
+    out: set = set()
+    for key, option_legs in legs.items():
+        for r in days[key]:
+            if terms_of(r["symbol"]) is not None:
+                continue                          # an option row, not a share leg
+            identity = names_of(r["symbol"])
+            shares = abs(_D(r["quantity"]))
+            for o, terms in option_legs:
+                if terms["underlying"].strip().upper() not in identity:
+                    continue
+                contracts = abs(_D(o["quantity"]))
+                mult = terms.get("multiplier")
+                if shares != contracts and not (mult and shares == contracts * mult):
+                    continue
+                action = str(o["action"] or "").replace(" ", "").lower()
+                if action in _DELIVERY_OPTION_ACTIONS:
+                    out.add(r["id"])
+                    break
+                unpriced = _D(o["price"]) == 0 and _D(o["amount"]) == 0
+                strike = terms.get("strike")
+                if (unpriced and strike is not None and _D(r["price"]) != 0
+                        and _D(r["price"]) == strike):
+                    out.add(r["id"])
+                    break
+    return out
+
+
+def drop_delivery_strike_closes(conn, account_ids, sources=("qif",)) -> int:
+    """Delete recorded closes that are a delivery leg's STRIKE on its own day.
+
+    Quicken's price list records the strike as the close on the day an option is
+    exercised or assigned, so an imported history carries closes tens of percent
+    away from the market on exactly those days. For each share leg in
+    ``account_ids`` that :func:`option_delivery_leg_ids` recognizes, a price row
+    from one of ``sources`` for that security and date whose close EQUALS the leg's
+    price is removed. Run after the investment rows land, so it holds whichever
+    order a yearly set of files arrives in. A genuine close that happens to equal
+    the strike that day is lost too; the neighbouring closes stand in for it.
+    Returns rows deleted."""
+    ids = sorted({int(a) for a in account_ids or () if a is not None})
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        "SELECT id, account_id, symbol, date, price, amount, commission, quantity "
+        f"FROM investment_transactions WHERE account_id IN ({marks})", ids).fetchall()
+    legs = option_delivery_leg_ids(conn, rows)
+    if not legs:
+        return 0
+    src_marks = ",".join("?" * len(sources))
+    deleted = 0
+    for r in rows:
+        if r["id"] not in legs or not r["price"]:
+            continue
+        for ph in conn.execute(
+                "SELECT id, close_price FROM price_history WHERE symbol=? AND date=? "
+                f"AND source IN ({src_marks})", (r["symbol"], r["date"], *sources)).fetchall():
+            if _D(ph["close_price"]) == _D(r["price"]):
+                deleted += conn.execute("DELETE FROM price_history WHERE id=?",
+                                        (ph["id"],)).rowcount
+    return deleted
+
+
 def learn_prices_from_transactions(conn, account_id=None, *, txn_id=None) -> int:
     """Record each investment transaction's own per-share price into price_history.
 
@@ -1823,6 +2405,10 @@ def learn_prices_from_transactions(conn, account_id=None, *, txn_id=None) -> int
     the QIF ``I`` field -- which is real price history the broker already handed
     us. Capturing it means a 401(k) whose fund prices are quoted nowhere public
     still values correctly, and it costs nothing: the data is already in the row.
+
+    Except the share side of an option exercise or assignment: its price is the
+    strike (or strike +/- premium), not a trade at market, so it is skipped
+    (:func:`option_delivery_leg_ids`).
 
     Written with DO-NOTHING precedence and source ``txn`` so an explicit quote
     (a !Type:Prices block, or a fetched quote) always wins for the same
@@ -1838,7 +2424,7 @@ def learn_prices_from_transactions(conn, account_id=None, *, txn_id=None) -> int
     Scope it with ``account_id`` (one account) or ``txn_id`` (one row, the accept
     path); omitting both walks every investment account. Returns rows written.
     """
-    cols = "symbol, date, price, amount, commission, quantity"
+    cols = "id, account_id, symbol, date, price, amount, commission, quantity"
     if txn_id is not None:
         rows = conn.execute(
             "SELECT %s FROM investment_transactions WHERE id=?" % cols,
@@ -1850,10 +2436,11 @@ def learn_prices_from_transactions(conn, account_id=None, *, txn_id=None) -> int
     else:
         rows = conn.execute(
             "SELECT %s FROM investment_transactions" % cols).fetchall()
+    delivery = option_delivery_leg_ids(conn, rows)
     priced = []
     for r in rows:
         sym = str(r["symbol"] or "").strip()
-        if not sym or not r["date"]:
+        if not sym or not r["date"] or r["id"] in delivery:
             continue
         price = r["price"]
         bounds = None
@@ -2118,14 +2705,22 @@ def _split_events(conn, symbol) -> list:
     Voided rows are out of the share math (:func:`void_investment`) and so are
     out of the price math.
     """
-    frag, params = _share_identity_clause(conn, symbol)
+    # Split rows first, through the partial index migration 71 keeps on exactly
+    # this expression, then the identity match in Python. Filtering by identity
+    # in SQL scanned every investment row, and this runs on every past-date
+    # price read (latest_price): it tripled the time to draw net worth history.
+    # The WHERE text must stay identical to the index's for SQLite to use it.
+    _, params = _share_identity_clause(conn, symbol)
+    identity = set(params)
     rows = conn.execute(
-        "SELECT date, action, quantity, split_num, split_den, memo"
-        " FROM investment_transactions WHERE " + frag + " ORDER BY date, id",
-        params,
+        "SELECT symbol, date, action, quantity, split_num, split_den, memo"
+        " FROM investment_transactions"
+        " WHERE lower(replace(action,' ',''))='stksplit' ORDER BY date, id",
     )
     seen: dict = {}
     for r in rows:
+        if str(r["symbol"] or "").strip().upper() not in identity:
+            continue
         if _action_key(r["action"]) not in _SPLIT_ACTIONS:
             continue
         if is_void_investment(r):
@@ -2181,24 +2776,44 @@ def _split_adjusted(events, date: str, source, value) -> Optional[Decimal]:
 
 
 def latest_price(conn, symbol: str, as_of: Optional[str] = None) -> Optional[Decimal]:
-    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever).
-    Reads across the whole canonical identity, so a renamed ticker's pre-rename
-    closes still price its holding (:func:`_identity_symbols`).
+    """The most recent recorded close for ``symbol`` on/before ``as_of`` (or ever),
+    expressed on the SHARE SCALE OF ``as_of``. Reads across the whole canonical
+    identity, so a renamed ticker's pre-rename closes still price its holding
+    (:func:`_identity_symbols`).
 
-    RAW, deliberately -- unlike :func:`price_history` this is NOT split-adjusted.
-    It prices a holding at ``as_of``, and the share count it multiplies comes
-    from the replay AS OF that same date, which has not yet had a later split
-    applied to it (:func:`_apply_txn`). Pre-split shares x pre-split price is the
-    consistent pairing; a current valuation reads a post-split row on both sides
-    and is unaffected either way."""
+    It prices a holding at ``as_of``, and the share count it multiplies comes from
+    the replay AS OF that same date, which has applied every split up to
+    ``as_of`` and none after (:func:`_apply_txn`). The price has to be on that
+    same scale, and a stored row is on one of two others:
+
+    * an AS-TRADED row (a transaction's own price, a QIF price list, a typed
+      price) is on the scale of its own date, so a split between that date and
+      ``as_of`` divides it;
+    * a PROVIDER row (:data:`SPLIT_ADJUSTED_SOURCES`) arrives already restated
+      in today's units, so a split AFTER ``as_of`` multiplies it back up.
+
+    Returning every row raw paired the provider's back-adjusted closes with
+    pre-split share counts: a holding's shares before an 8:1 split were valued at
+    an eighth of their worth, and a performance report measured from a pre-split
+    date showed a gain near 1,000% where the real one was under 30%. A symbol
+    with no splits reads exactly the stored close."""
     clause, params = _price_identity_clause(conn, symbol)
-    sql = "SELECT close_price FROM price_history WHERE " + clause
+    sql = "SELECT date, close_price, source FROM price_history WHERE " + clause
     if as_of is not None:
         sql += " AND date<=?"
         params.append(as_of)
     sql += " ORDER BY date DESC, id DESC LIMIT 1"
     row = conn.execute(sql, params).fetchone()
-    return _D(row["close_price"]) if row else None
+    if row is None:
+        return None
+    price = _D(row["close_price"])
+    events = _split_events(conn, symbol)
+    if not events:
+        return price
+    after_as_of = _cumulative_split(events, as_of) if as_of is not None else Fraction(1)
+    if str(row["source"] or "").strip().lower() in SPLIT_ADJUSTED_SOURCES:
+        return _rescale_price(price, 1 / after_as_of)
+    return _rescale_price(price, _cumulative_split(events, row["date"]) / after_as_of)
 
 
 def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
@@ -2260,15 +2875,150 @@ def price_history_bounds(conn, symbol: str, as_of: Optional[str] = None) -> list
     return out
 
 
+# ---------------------------------------------------------------------------
+# Instrument kind: what a security's CLASS alone settles about its price
+# ---------------------------------------------------------------------------
+# NULL kind means UNCLASSIFIED, never "equity" (SRD 5.8e-2), so everything
+# here is a no-op until a row actually carries a kind. Nothing below
+# classifies anything; it only reads what the source, the deriver or the user
+# already stored.
+
+#: Kinds whose price is fixed by construction rather than observed. A
+#: money-market sweep is one unit of currency per share by definition -- that
+#: is what makes it a sweep -- so there is no market price to look up and any
+#: number that is not 1 is an error that shows up as phantom gain or loss.
+#: Decimal, never float: prices are Decimal-encoded TEXT everywhere.
+PINNED_PRICE_KINDS = {instruments.Kind.MONEY_MARKET.value: Decimal(1)}
+
+
+def security_kind(conn, symbol) -> Optional[str]:
+    """The stored ``securities.kind`` for ``symbol``, lowercased, or ``None``.
+
+    ``None`` covers both "no such row" and "row exists, kind is NULL" because
+    they mean the same thing to every caller: UNCLASSIFIED. The row's OWN kind
+    wins; only when this spelling says nothing is the answer resolved across the
+    identity, so a renamed holding still finds the kind stored under its other
+    spelling -- but a contract sitting in a hand-written alias set can never
+    inherit its underlying's kind (:func:`_kind_identity_symbols`, SRD 5.8e-2d)."""
+    name = str(symbol or "").strip()
+    if not name:
+        return None
+    own = _stored_kind(conn, name)
+    if own:
+        return own
+    for s in _kind_identity_symbols(conn, name):
+        kind = _stored_kind(conn, s)
+        if kind:
+            return kind
+    return None
+
+
+def is_money_market(conn, symbol) -> bool:
+    """True for a money-market sweep -- the kind the cash rollup can absorb."""
+    return security_kind(conn, symbol) == instruments.Kind.MONEY_MARKET.value
+
+
+def is_option(conn, symbol) -> bool:
+    """True ONLY for a security EXPLICITLY classified ``kind='option'``.
+
+    The one predicate every option-aware branch in this module keys off. False
+    for a NULL-kind row, which is UNCLASSIFIED rather than "not an option"
+    (SRD 5.8e-2) -- so an unclassified forty-year ledger takes the pre-existing
+    code path everywhere, unchanged, until its rows are actually classified."""
+    return security_kind(conn, symbol) == instruments.Kind.OPTION.value
+
+
+def option_terms(conn, symbol) -> Optional[dict]:
+    """The stored contract terms for an option, or ``None`` when ``symbol`` is
+    not one (SRD 5.8e-5).
+
+    ``{'symbol', 'multiplier', 'underlying', 'expiration', 'strike', 'right'}``.
+    ``multiplier`` and ``strike`` come back Decimal (never float); ``multiplier``
+    is ``None`` when the column is NULL, which the caller must treat as "not
+    recorded", NOT as a licence to assume 100 -- a mini contract is 10 and an
+    index contract can be anything. Terms are READ here, never parsed: parsing
+    belongs to :mod:`mammon.instruments` and the write belongs to the backfill.
+    Resolved across the identity so a contract stored under either spelling of a
+    renamed underlying still finds its own row -- but over the KIND-scoped
+    identity (SRD 5.8e-2d), so a stock sharing an alias set with a contract never
+    picks up that contract's strike, expiration or multiplier."""
+    for s in _kind_identity_symbols(conn, symbol):
+        if _stored_kind(conn, s) != instruments.Kind.OPTION.value:
+            continue
+        row = conn.execute(
+            "SELECT symbol, multiplier, underlying, expiration, strike, "
+            "option_right FROM securities WHERE symbol=?", (s,)).fetchone()
+        if row is None:
+            continue
+        mult = (row["multiplier"] or "").strip() if row["multiplier"] else ""
+        strike = (row["strike"] or "").strip() if row["strike"] else ""
+        return {
+            "symbol": row["symbol"],
+            "multiplier": _D(mult) if mult else None,
+            "underlying": row["underlying"],
+            "expiration": (row["expiration"] or None),
+            "strike": _D(strike) if strike else None,
+            "right": (row["option_right"] or None),
+        }
+    return None
+
+
+def contract_multiplier(conn, symbol) -> Decimal:
+    """How many units of the underlying ONE unit of ``symbol``'s quantity
+    controls -- the factor between a quoted price and a position's value.
+
+    ``Decimal(1)`` for everything that is not an explicitly classified option,
+    including every NULL-kind row, so this is a no-op multiply on the existing
+    ledger. For an option it is ``securities.multiplier`` (Decimal TEXT; 100 for
+    a standard US equity contract, 10 for a mini).
+
+    An option whose multiplier was never recorded falls back to the schema's
+    documented ``NULL = 1`` rather than guessing 100 -- but that is a data gap,
+    not an answer, so :func:`option_position_problems` reports it. Guessing
+    would be a silent 100x error on exactly the contracts (minis, index,
+    adjusted-for-split) where the guess is wrong.
+
+    The kind/multiplier reading itself is :func:`mammon.securities
+    .contract_multiplier` -- the one place that knows a NULL multiplier column
+    means 1 for a share and UNSTATED for a contract. This wrapper adds the two
+    things the arithmetic here needs and that one deliberately withholds:
+    identity resolution (a contract stored under either spelling of a renamed
+    underlying), and a number rather than :data:`instruments.UNKNOWN`, because a
+    valuation site cannot multiply by a sentinel. Imported inside the function:
+    :mod:`mammon.securities` imports this module at load time."""
+    from mammon import securities as _securities   # circular at import time
+    terms = option_terms(conn, symbol)
+    if terms is None:
+        return Decimal(1)
+    mult = _securities.contract_multiplier(conn, terms["symbol"])
+    return Decimal(1) if mult is instruments.UNKNOWN else mult
+
+
+def pinned_price(conn, symbol) -> Optional[Decimal]:
+    """The price this security's KIND fixes, or ``None`` if its kind fixes none.
+
+    See :data:`PINNED_PRICE_KINDS`. Consulted ahead of both the caller's
+    override and ``price_history``: a sweep that drifted off 1 is exactly what
+    a stale recorded close or a downloaded quote does to it, and the kind is
+    the more reliable statement."""
+    return PINNED_PRICE_KINDS.get(security_kind(conn, symbol))
+
+
 def _resolve_price(conn, symbol, as_of, prices, account_id=None) -> Optional[Decimal]:
-    """The price to value ``symbol`` at ``as_of``: an explicit caller-supplied
-    ``prices`` override (symbol -> price) takes precedence, otherwise the latest
-    recorded ``price_history`` close on/before ``as_of``. ``None`` when neither
-    is available -- the holding is reported unpriced rather than guessed at. The
-    caller-supplied override may be keyed by any spelling of the identity (the
-    old ticker or the new), so it is matched across the identity too."""
+    """The price to value ``symbol`` at ``as_of``: a price PINNED by the
+    security's kind wins outright, then an explicit caller-supplied ``prices``
+    override (symbol -> price), otherwise the latest recorded ``price_history``
+    close on/before ``as_of``. ``None`` when none is available -- the holding is
+    reported unpriced rather than guessed at. The caller-supplied override may
+    be keyed by any spelling of the identity (the old ticker or the new), so it
+    is matched across the identity too -- across the spellings of the SAME
+    instrument only (:func:`_kind_identity_symbols`), so a quote injected for a
+    stock can never price an option contract fused onto it."""
+    fixed = pinned_price(conn, symbol)
+    if fixed is not None:
+        return fixed
     if prices:
-        for s in _identity_symbols(conn, symbol):
+        for s in _kind_identity_symbols(conn, symbol):
             if s in prices:
                 return _D(prices[s])
     return latest_price(conn, symbol, as_of)
@@ -2295,6 +3045,34 @@ class AccountValuation:
     total: int                       # cents (cash + securities)
     holdings: list = field(default_factory=list)   # list[HoldingValue]
     unpriced: list = field(default_factory=list)    # symbols with no price
+    # Cents of money-market value folded OUT of ``securities`` and INTO
+    # ``cash`` because the caller asked for it (money_market_as_cash). 0 when
+    # it did not, which is the default. ``total`` is the same either way --
+    # the money did not move, only the bucket it is reported in.
+    cash_equivalents: int = 0
+
+
+def _market_value(conn, symbol, qty: Decimal, price: Decimal) -> int:
+    """Market value in CENTS of ``qty`` units of ``symbol`` quoted at ``price``.
+
+    The ONE place in this module where a quantity meets a price (SRD 5.8e-5), so
+    that the multiplier is applied once and cannot be forgotten at one of the
+    three valuation entry points.
+
+    For a share, and for every NULL-kind (UNCLASSIFIED) row, the multiplier is 1
+    and this is the arithmetic that has always been here, bit for bit. For an
+    option the quoted price is a PER-SHARE PREMIUM while the quantity is
+    CONTRACTS, so the value is ``contracts x premium x multiplier``: ten standard
+    contracts at a $4.20 premium are worth $4,200, not $42. Valuing a contract at
+    premium x 1 is the defect this fixes -- it understated an options sleeve by
+    100x, in the direction that makes net worth wrong.
+
+    The SIGN follows the quantity and nothing takes an absolute value, so a SHORT
+    option position (negative contracts -- written to open, not yet bought back)
+    values NEGATIVE and subtracts from net worth. That is correct: an open short
+    contract is an obligation to deliver, i.e. a liability, and reporting it as a
+    positive asset double-counts the premium already received in cash."""
+    return _cents(qty * price * contract_multiplier(conn, symbol) * _HUNDRED)
 
 
 def _holdings_as_of(conn, account_id: int, as_of: Optional[str]):
@@ -2341,7 +3119,7 @@ def holding_values(conn, account_id: int, as_of: Optional[str] = None,
         if price is None:
             out.append(HoldingValue(sym, qty, cost, None, 0, None))
         else:
-            mv = _cents(qty * price * _HUNDRED)
+            mv = _market_value(conn, sym, qty, price)
             out.append(HoldingValue(sym, qty, cost, price, mv, mv - cost))
     return out
 
@@ -2398,7 +3176,7 @@ def _value_position(conn, account_id: int, symbol: str, pos: _Position,
     if is_open:
         price = _resolve_price(conn, symbol, as_of, prices, account_id)
         if price is not None:
-            market_value = _cents(pos.qty * price * _HUNDRED)
+            market_value = _market_value(conn, symbol, pos.qty, price)
             unrealized = market_value - pos.cost
     return SecurityPosition(
         symbol=symbol, quantity=pos.qty, cost_basis=pos.cost,
@@ -2503,8 +3281,538 @@ def holding_values_at(conn, account_id: int, as_of: Optional[str] = None,
             continue
         price = _resolve_price(conn, sym, as_of, prices, account_id)
         if price is not None:
-            out[sym] = _cents(pos.qty * price * _HUNDRED)
+            out[sym] = _market_value(conn, sym, pos.qty, price)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Option positions that cannot be true (SRD 5.8e-6)
+# ---------------------------------------------------------------------------
+#: Problem codes :func:`option_position_problems` reports.
+OPTION_PROBLEM_EXPIRED = "expired"
+OPTION_PROBLEM_NO_MULTIPLIER = "missing_multiplier"
+
+
+@dataclass
+class OptionPositionProblem:
+    """One option position that the data says cannot be true, as of a date."""
+    account_id: int
+    symbol: str
+    quantity: Decimal                 # signed contracts (negative = short)
+    problem: str                      # OPTION_PROBLEM_*
+    as_of: str                        # ISO date the check was made against
+    expiration: Optional[str] = None  # ISO, when the row records one
+    detail: str = ""                  # a sentence for the user
+
+
+def option_position_problems(conn, account_id: int,
+                             as_of: Optional[str] = None) -> list:
+    """Option positions in this account that are DATA ERRORS as of ``as_of``
+    (today when omitted). Read-only: it reports, it never repairs.
+
+    A nonzero option position dated past its ``expiration`` is the case that
+    matters. Every option ends -- exercised, assigned, closed or expired
+    worthless -- so a contract still showing contracts after its expiration date
+    means a closing transaction is MISSING from the ledger. The replay must not
+    silently carry it forward (it then values forever off a stale premium and
+    inflates net worth) and must not silently zero it either (that invents a
+    disposal the user never made, with a realized gain and a tax year attached).
+    A missing close is the user's to resolve, so it surfaces as an error and the
+    position is left exactly as recorded.
+
+    Also reported: an option whose ``multiplier`` was never recorded, because
+    :func:`contract_multiplier` refuses to guess 100 for it and the position is
+    therefore being valued at 1x (see that function).
+
+    A NULL-kind row is never reported -- UNCLASSIFIED is not "option", so an
+    unclassified ledger returns an empty list and nothing new appears under the
+    user until they classify a row."""
+    from mammon import securities as _securities   # circular at import time
+    when = as_of or _dt.date.today().isoformat()
+    _validate_iso_date(when)
+    out: list = []
+    for sym, qty, _cost in _holdings_as_of(conn, account_id, as_of):
+        if qty == 0 or not is_option(conn, sym):
+            continue
+        terms = option_terms(conn, sym) or {}
+        expires = terms.get("expiration")
+        if expires and str(expires) < when:
+            side = "short" if qty < 0 else "long"
+            out.append(OptionPositionProblem(
+                account_id=account_id, symbol=sym, quantity=qty,
+                problem=OPTION_PROBLEM_EXPIRED, as_of=when,
+                expiration=str(expires),
+                detail=(f"{_qty_text(qty)} contracts of {sym} are still open "
+                        f"({side}) after expiration {expires}: the closing "
+                        "transaction (exercise, assignment, close or expiry) "
+                        "is missing from the ledger"),
+            ))
+        # Asked of :mod:`mammon.securities`, not of the column, so "blank",
+        # "unparseable" and "zero or negative" are the one UNSTATED answer here
+        # that they are at the valuation site.
+        if _securities.contract_multiplier(
+                conn, terms.get("symbol") or sym) is instruments.UNKNOWN:
+            out.append(OptionPositionProblem(
+                account_id=account_id, symbol=sym, quantity=qty,
+                problem=OPTION_PROBLEM_NO_MULTIPLIER, as_of=when,
+                expiration=(str(expires) if expires else None),
+                detail=(f"{sym} has no recorded contract multiplier, so it is "
+                        "being valued at 1 unit per contract instead of the "
+                        "100 a standard contract controls"),
+            ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The holdings VIEW: contracts grouped under the underlying (SRD 5.8e-8)
+# ---------------------------------------------------------------------------
+#: Expiration-proximity cues :func:`holdings_view` attaches to an option line.
+OPTION_CUE_EXPIRED = "expired"      # already past its expiration, still open
+OPTION_CUE_EXPIRING = "expiring"    # expires within ``soon_days``
+#: How far ahead "expiring" looks, in days.
+OPTION_EXPIRY_SOON_DAYS = 7
+
+
+@dataclass
+class HoldingLine:
+    """One row of the Holdings window: a :class:`SecurityPosition` plus what the
+    UI needs to DISPLAY it, so the widget layer needs no SQL and no option rules.
+
+    ``group`` is the symbol this line sorts under -- an option's recorded
+    ``underlying`` when it has one, otherwise the line's own symbol. It is a
+    presentation grouping ONLY: contracts are never folded into the underlying's
+    share count, because 3 contracts and 300 shares are different quantities of
+    different instruments and adding them is the option-as-a-share bug that
+    5.8e-5 exists to stop. Every line keeps its own position, quantity and
+    market value; the account total is unchanged.
+
+    For a line that is not EXPLICITLY ``kind='option'`` every option field is
+    None/False and ``group`` is the symbol itself, so an unclassified ledger
+    produces exactly the rows, in exactly the order, that it did before options
+    existed."""
+    position: SecurityPosition
+    kind: Optional[str] = None            # lowercased securities.kind, or None
+    is_option: bool = False
+    group: str = ""                       # symbol this line sorts under
+    underlying: Optional[str] = None
+    expiration: Optional[str] = None      # ISO
+    strike: Optional[Decimal] = None
+    right: Optional[str] = None           # "call" / "put"
+    multiplier: Optional[Decimal] = None
+    cue: Optional[str] = None             # OPTION_CUE_*, or None
+    problems: list = field(default_factory=list)   # OptionPositionProblem
+
+    @property
+    def symbol(self) -> str:
+        return self.position.symbol
+
+    @property
+    def quantity(self) -> Decimal:
+        """Signed: shares for a share line, CONTRACTS for an option line."""
+        return self.position.quantity
+
+    @property
+    def is_short(self) -> bool:
+        """A written contract (or a shorted security): an obligation, not an
+        asset. Its market value is already negative (5.8e-5)."""
+        return self.position.quantity < 0
+
+    @property
+    def grouped(self) -> bool:
+        """True when this line sorts under a DIFFERENT symbol -- the cue the UI
+        uses to indent it under its underlying."""
+        return self.group != self.position.symbol
+
+
+def holdings_view(conn, account_id: int, as_of: Optional[str] = None,
+                  prices: Optional[dict] = None,
+                  soon_days: int = OPTION_EXPIRY_SOON_DAYS) -> list:
+    """:func:`held_positions` as display lines: option contracts grouped under
+    their underlying, each carrying its terms and an expiration cue. Read-only.
+
+    Ordering is ``(group, options after shares, expiration, strike, symbol)``.
+    With no options in the account that degenerates to ``sorted by symbol`` --
+    byte for byte the order :func:`held_positions` already returns -- so an
+    UNCLASSIFIED ledger sees no change at all.
+
+    The cue is not derived here. Expiry logic lives in
+    :func:`option_position_problems` and is asked twice: once at ``as_of`` (what
+    is expired NOW) and once at ``as_of + soon_days`` (what will be), the
+    difference being what is merely expiring. One rule, one implementation; a
+    second copy of "is it past expiry" is how the window and the problem report
+    start disagreeing. An account holding no contracts never makes the second
+    call."""
+    lines = []
+    for pos in held_positions(conn, account_id, as_of, prices):
+        sym = pos.symbol
+        terms = option_terms(conn, sym)
+        if terms is None:
+            lines.append(HoldingLine(position=pos, kind=security_kind(conn, sym),
+                                     group=sym))
+            continue
+        under = terms.get("underlying") or None
+        lines.append(HoldingLine(
+            position=pos, kind="option", is_option=True,
+            group=str(under) if under else sym,
+            underlying=(str(under) if under else None),
+            expiration=(str(terms["expiration"]) if terms.get("expiration") else None),
+            strike=terms.get("strike"), right=terms.get("right"),
+            multiplier=terms.get("multiplier"),
+        ))
+    lines.sort(key=lambda ln: (ln.group, 1 if ln.is_option else 0,
+                               ln.expiration or "",
+                               ln.strike if ln.strike is not None else Decimal(0),
+                               ln.symbol))
+    if not any(ln.is_option for ln in lines):
+        return lines
+
+    when = as_of or _dt.date.today().isoformat()
+    _validate_iso_date(when)
+    by_symbol: dict = {}
+    for prob in option_position_problems(conn, account_id, when):
+        by_symbol.setdefault(prob.symbol, []).append(prob)
+    expired = {s for s, ps in by_symbol.items()
+               if any(p.problem == OPTION_PROBLEM_EXPIRED for p in ps)}
+    horizon = (_dt.date.fromisoformat(when)
+               + _dt.timedelta(days=max(0, soon_days))).isoformat()
+    expiring = {p.symbol for p in option_position_problems(conn, account_id, horizon)
+                if p.problem == OPTION_PROBLEM_EXPIRED} - expired
+    for ln in lines:
+        ln.problems = by_symbol.get(ln.symbol, [])
+        if ln.symbol in expired:
+            ln.cue = OPTION_CUE_EXPIRED
+        elif ln.symbol in expiring:
+            ln.cue = OPTION_CUE_EXPIRING
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Fund conversions kept as one holding (migration 73, SRD 5.8d)
+# ---------------------------------------------------------------------------
+# User, 2026-09-15: "A brokerage creating a new fund and transfering an old fund
+# to the new is a tougher case, especially when the price of the funds is
+# different so the number of shares change. It's like a split and a rename all at
+# once, but the split isn't a nice ratio of integers." The link is the person's
+# decision; the rule below is what entitles them to make it: "require that all of
+# the first be sold and that all the proceeds go into the second."
+def conversion_proceeds(conn, account_id: int, from_symbol: str, to_symbol: str,
+                        date: str) -> Optional[int]:
+    """The cents that moved from ``from_symbol`` into ``to_symbol`` on ``date``
+    in this account, when that day was a whole conversion, else None.
+
+    Whole means both halves of the user's rule: the old position was open going
+    into the day and EMPTY at its end (every share sold), and the purchases of
+    the new fund that day cost exactly what the sales brought in, to the cent.
+    Partial, or with money left over or added, it is two ordinary trades."""
+    old, new = resolve_symbol(conn, from_symbol), resolve_symbol(conn, to_symbol)
+    if not old or not new or old == new or not date:
+        return None
+    rows = conn.execute("SELECT * FROM investment_transactions WHERE account_id=? AND date=?",
+                        (account_id, date)).fetchall()
+    proceeds = cost = 0
+    sold = bought = False
+    for t in rows:
+        if is_void_investment(t):
+            continue
+        sym = resolve_symbol(conn, (t["symbol"] or "").strip())
+        a = _action_key(t["action"])
+        q = _D(t["quantity"])
+        if sym == old and a in _SALE_ACTIONS:
+            proceeds += _proceeds_of(t, q)
+            sold = True
+        elif sym == new and a in _ACQUIRE_ACTIONS:
+            cost += _cost_of(t, q)
+            bought = True
+    if not (sold and bought) or proceeds <= 0 or proceeds != cost:
+        return None
+    prior = (_dt.date.fromisoformat(date) - _dt.timedelta(days=1)).isoformat()
+    before = _replay_positions(conn, account_id, prior).get(old)
+    after = _replay_positions(conn, account_id, date).get(old)
+    if before is None or before.qty <= 0 or (after is not None and after.qty != 0):
+        return None
+    return proceeds
+
+
+def holding_links(conn, account_id: int) -> list:
+    """``[(from_symbol, to_symbol, date)]`` recorded for the account, oldest first."""
+    return [(r["from_symbol"], r["to_symbol"], r["date"]) for r in conn.execute(
+        "SELECT from_symbol, to_symbol, date FROM holding_links WHERE account_id=? "
+        "ORDER BY date, from_symbol", (account_id,))]
+
+
+def holding_successors(conn, account_id: int) -> dict:
+    """``{symbol: the holding it continues as today}`` for every link that STILL
+    meets the conversion rule, chains followed (A -> B -> C gives A: C, B: C). A
+    link whose transactions have since been edited so the day is no longer a
+    whole conversion is ignored rather than trusted."""
+    step = {}
+    for frm, to, date in holding_links(conn, account_id):
+        if conversion_proceeds(conn, account_id, frm, to, date) is not None:
+            step[resolve_symbol(conn, frm)] = resolve_symbol(conn, to)
+    out = {}
+    for frm in step:
+        cur, seen = frm, {frm}
+        while cur in step and step[cur] not in seen:
+            cur = step[cur]
+            seen.add(cur)
+        out[frm] = cur
+    return out
+
+
+def conversion_candidates(conn, account_id: int, symbol: str) -> list:
+    """``[(from_symbol, to_symbol, date, cents)]``: every fund in the account that
+    could be linked into ``symbol``'s holding -- into ``symbol`` itself or into a
+    fund already linked to it -- because on a day it was bought, another fund was
+    wholly sold for exactly that money. Links already recorded are left out."""
+    target = resolve_symbol(conn, symbol)
+    succ = holding_successors(conn, account_id)
+    group = {target} | {f for f, t in succ.items() if t == target}
+    linked = {resolve_symbol(conn, f) for f, _t, _d in holding_links(conn, account_id)}
+    out = []
+    for to in sorted(group):
+        days = [r[0] for r in conn.execute(
+            "SELECT DISTINCT date FROM investment_transactions WHERE account_id=? AND symbol=? "
+            "ORDER BY date", (account_id, to))]
+        for day in days:
+            sellers = {r[0] for r in conn.execute(
+                "SELECT DISTINCT symbol FROM investment_transactions WHERE account_id=? "
+                "AND date=? AND symbol IS NOT NULL AND symbol<>? ", (account_id, day, to))}
+            for frm in sorted(sellers):
+                key = resolve_symbol(conn, frm)
+                if key in linked or key in group:
+                    continue
+                cents = conversion_proceeds(conn, account_id, frm, to, day)
+                if cents is not None:
+                    out.append((frm, to, day, cents))
+    return out
+
+
+def link_holding(conn, account_id: int, from_symbol: str, to_symbol: str, date: str) -> None:
+    """Record that ``from_symbol`` continues as ``to_symbol`` in this account from
+    ``date``, for measuring a holding's return (migration 73). Refused unless the
+    day was a whole conversion (:func:`conversion_proceeds`), for an option
+    contract, or when it would close a loop. Changes no transaction, price or
+    holding; :func:`unlink_holding` undoes it completely."""
+    if looks_like_option(from_symbol, to_symbol):
+        raise ValueError("an option contract does not continue as another security")
+    if conversion_proceeds(conn, account_id, from_symbol, to_symbol, date) is None:
+        raise ValueError(
+            f"{from_symbol} was not wholly sold on {date} with exactly the proceeds "
+            f"buying {to_symbol}, so {to_symbol} does not continue it")
+    succ = holding_successors(conn, account_id)
+    if succ.get(resolve_symbol(conn, to_symbol), resolve_symbol(conn, to_symbol)) == \
+            resolve_symbol(conn, from_symbol):
+        raise ValueError(f"linking {from_symbol} to {to_symbol} would form a loop")
+    conn.execute(
+        "INSERT INTO holding_links(account_id, from_symbol, to_symbol, date) VALUES (?,?,?,?) "
+        "ON CONFLICT(account_id, from_symbol) DO UPDATE SET to_symbol=excluded.to_symbol, "
+        "date=excluded.date", (account_id, from_symbol.strip(), to_symbol.strip(), date))
+    conn.commit()
+
+
+def unlink_holding(conn, account_id: int, from_symbol: str) -> None:
+    conn.execute("DELETE FROM holding_links WHERE account_id=? AND from_symbol=?",
+                 (account_id, (from_symbol or "").strip()))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Writing the endings: exercise, assignment, expiry (SRD 5.8e-7)
+# ---------------------------------------------------------------------------
+def _open_option_position(conn, account_id: int, symbol: str, date: str):
+    """``(position, lot_method, canonical_symbol)`` for the option ``symbol`` on
+    this account as it stands immediately BEFORE a row dated ``date``.
+
+    The kind gate for both writers below lives here: a symbol that is not
+    EXPLICITLY ``kind='option'`` is refused outright, so no option rule can ever
+    reach an unclassified security (SRD 5.8e-2). The position is read back off
+    the replay rather than off ``holdings`` because the lots -- which premium,
+    paid on which date -- are what the ending has to consume, and only the
+    replay has them."""
+    if not is_option(conn, symbol):
+        raise ValueError(
+            f"{symbol} is not classified as an option (kind="
+            f"{security_kind(conn, symbol)!r}); option life-cycle rows are "
+            "written only for kind='option'")
+    positions = _replay_positions(conn, account_id, as_of=date)
+    sym, pos = symbol, positions.get(symbol)
+    if pos is None:
+        for s in _kind_identity_symbols(conn, symbol):
+            if s in positions:
+                sym, pos = s, positions[s]
+                break
+    if pos is None or pos.qty == 0:
+        raise ValueError(
+            f"no open position in {symbol} on {date} to exercise, assign or "
+            "expire")
+    return pos, get_lot_method(conn, account_id), sym
+
+
+def _closing_basis(pos, q: Decimal, method: str) -> int:
+    """The SIGNED cents a close of ``q`` contracts takes out of ``pos``:
+    positive for a long position (the premium PAID, its cost basis), negative
+    for a written one (the premium RECEIVED, carried as a negative cost).
+
+    Computed on a throwaway copy of the position, by the same two functions the
+    replay itself will use when it later reaches the row this answer is about --
+    so the figure written into the share leg cannot drift from the figure the
+    replay relieves. A full close reports ``pos.cost`` outright, matching
+    :func:`_apply_txn`'s rule that a position reaching zero quantity has zero
+    cost: otherwise a lot-by-lot sum could leave a stray cent behind."""
+    if q >= abs(pos.qty):
+        return pos.cost
+    dup = _Position(qty=pos.qty, cost=pos.cost,
+                    lots=[_Lot(l.qty, l.cost, l.date, l.txn_id)
+                          for l in pos.lots])
+    taken = (_relieve(dup, q, method, None) if pos.qty > 0
+             else _relieve_short(dup, q))
+    return sum(c for _, _, _, c in taken)
+
+
+def record_option_exercise(conn, account_id: int, date: str, symbol: str,
+                           quantity=None, *, memo: Optional[str] = None) -> dict:
+    """Exercise a long option, or record the assignment of a written one, and
+    roll its premium into the basis of the shares that change hands.
+
+    This is the rule Part 1.2 of the instrument taxonomy exists to state, and
+    the reason an option cannot be modelled as "a share with a funny symbol":
+    when a contract is exercised the premium does not become a gain or a loss.
+    It moves. A call exercised buys stock at ``strike + premium``; a written put
+    assigned buys it at ``strike - premium``; a put exercised sells at
+    ``strike - premium``; a written call assigned sells at ``strike + premium``
+    (IRS Pub 550, "Options"). The contract's own holding period is discarded --
+    what matters afterwards is how long the SHARES are held.
+
+    Two rows are written, and they are two for a reason. The share leg is a
+    plain ``Buy``/``Sell`` carrying the adjusted figure, so every existing
+    mechanism -- lots, lot method, realized gain, reconciliation, the register
+    -- applies to it with no option awareness whatsoever. The option leg
+    (``Exercise`` long, ``Assign`` short) closes the contract and books no gain,
+    and its amount is the basis being rolled, SIGNED. That makes the pair
+    cash-neutral on the premium: a long call's ``+premium`` cancels the premium
+    embedded in the share leg's cost, leaving exactly ``strike x shares`` of
+    cash actually moving, which is what the broker's statement will say. Writing
+    the share leg at the adjusted basis WITHOUT that cancelling leg would
+    double-count a premium that left the account when the contract was bought.
+
+    ``quantity`` is in CONTRACTS and defaults to the whole position; the share
+    leg is ``quantity x multiplier`` units of the underlying. Refuses a
+    cash-settled contract (one with no underlying recorded): there is nothing to
+    deliver, and such a position is closed with Sell to Close or an expiry.
+    Commission is deliberately not accepted -- an exercise fee is its own row,
+    because folding it into an amount that also encodes a basis roll makes both
+    unreadable. Returns the ids and the figures used. Does NOT rebuild holdings;
+    call :func:`rebuild_holdings` after."""
+    _validate_iso_date(date)
+    pos, method, sym = _open_option_position(conn, account_id, symbol, date)
+    q = abs(pos.qty) if quantity is None or quantity == "" else _D(quantity)
+    if q <= 0:
+        raise ValueError("quantity must be a positive number of contracts")
+    if q > abs(pos.qty):
+        raise ValueError(
+            f"{_qty_text(q)} contracts of {sym} exceeds the open position of "
+            f"{_qty_text(abs(pos.qty))}")
+
+    terms = option_terms(conn, sym) or {}
+    right = (terms.get("right") or "").strip().upper()[:1]
+    if right not in ("C", "P"):
+        raise ValueError(
+            f"{sym} records no option right (call or put), so which way the "
+            "shares move is unknown; classify the contract first")
+    strike = terms.get("strike")
+    if strike is None or strike <= 0:
+        raise ValueError(
+            f"{sym} records no strike price, so the shares have no price to "
+            "change hands at; classify the contract first")
+    underlying = (terms.get("underlying") or "").strip()
+    if not underlying:
+        raise ValueError(
+            f"{sym} records no underlying, so there is nothing to deliver -- a "
+            "cash-settled contract is closed with Sell to Close or an expiry, "
+            "never an exercise")
+
+    mult = contract_multiplier(conn, sym)
+    shares = q * mult
+    # ``strike`` is a per-share DOLLAR price, like every price column in this
+    # module, so it crosses into cents by the same ``* _HUNDRED`` every other
+    # site uses (:func:`_cents` only rounds; it does not convert).
+    strike_cash = _cents(strike * shares * _HUNDRED)
+    long_side = pos.qty > 0
+    basis = _closing_basis(pos, q, method)
+    # Shares are ACQUIRED by exercising a call or being assigned on a written
+    # put, and DISPOSED of by exercising a put or being assigned on a written
+    # call. One expression, because those are the two cases where the right and
+    # the direction agree.
+    acquire = (right == "C") == long_side
+    action = OPTION_EXERCISE if long_side else OPTION_ASSIGN
+    share_amount = strike_cash + basis if acquire else strike_cash - basis
+    if share_amount < 0:
+        raise ValueError(
+            f"{action} of {sym} would give the shares a negative "
+            f"{'cost' if acquire else 'proceeds'} of {share_amount} cents "
+            f"(strike {strike_cash}, premium {basis}); check the recorded "
+            "strike, multiplier and premium before recording this")
+
+    roll = ("premium rolled into the share basis" if acquire
+            else "premium applied against the proceeds")
+    opt_id = record_investment(
+        conn, account_id, date, action, symbol=sym, quantity=q,
+        amount=basis,
+        memo=memo or f"{action} {_qty_text(q)} {sym} at {strike} ({roll})")
+    shr_id = record_investment(
+        conn, account_id, date, "Buy" if acquire else "Sell",
+        symbol=underlying, quantity=shares,
+        amount=-share_amount if acquire else share_amount,
+        memo=(memo or f"{action} {sym}: {_qty_text(shares)} {underlying} "
+                      f"at {strike} ({roll})"))
+    return {
+        "action": action,
+        "option_txn_id": opt_id,
+        "share_txn_id": shr_id,
+        "share_action": "Buy" if acquire else "Sell",
+        "symbol": sym,
+        "underlying": underlying,
+        "contracts": q,
+        "shares": shares,
+        "option_basis": basis,
+        "strike_cash": strike_cash,
+        "share_amount": share_amount,
+    }
+
+
+def record_option_expiration(conn, account_id: int, date: str, symbol: str,
+                             quantity=None, *,
+                             memo: Optional[str] = None) -> int:
+    """Let an option expire worthless -- the ending where nobody does anything.
+
+    One row, no cash, and above all NO SHARES: an expiring contract that leaves
+    a phantom position behind is the classic option-as-a-share bug. Which of the
+    two expiry actions is written is decided here from the position's sign, so
+    the caller cannot get it wrong: a long position expiring is an ordinary
+    removal whose proceeds are zero, making the loss exactly the premium paid; a
+    written one is an ordinary cover that costs nothing, making the gain exactly
+    the premium received -- and SHORT-term however long the contract was open,
+    because writing an option starts no holding period (Pub 550; see
+    :attr:`RealizedGain.term_override`).
+
+    ``quantity`` is in CONTRACTS and defaults to the whole position, which is
+    the normal case: expiry is not selective. Does NOT rebuild holdings; call
+    :func:`rebuild_holdings` after."""
+    _validate_iso_date(date)
+    pos, _method, sym = _open_option_position(conn, account_id, symbol, date)
+    q = abs(pos.qty) if quantity is None or quantity == "" else _D(quantity)
+    if q <= 0:
+        raise ValueError("quantity must be a positive number of contracts")
+    if q > abs(pos.qty):
+        raise ValueError(
+            f"{_qty_text(q)} contracts of {sym} exceeds the open position of "
+            f"{_qty_text(abs(pos.qty))}")
+    long_side = pos.qty > 0
+    action = OPTION_EXPIRE if long_side else OPTION_EXPIRE_SHORT
+    return record_investment(
+        conn, account_id, date, action, symbol=sym, quantity=q, amount=0,
+        memo=(memo or f"{_qty_text(q)} {sym} expired worthless ("
+                      f"{'premium paid is the loss' if long_side else 'premium received is the gain'})"))
 
 
 def net_contributions_by_symbol(conn, account_id: int, start: str,
@@ -2598,19 +3906,37 @@ def _duplicated_transfer_leg_total(conn, account_id: int,
 
 
 def account_valuation(conn, account_id: int, as_of: Optional[str] = None,
-                      prices: Optional[dict] = None) -> AccountValuation:
+                      prices: Optional[dict] = None,
+                      money_market_as_cash: bool = False) -> AccountValuation:
     """Total value of an investment account: cash (ordinary ledger balance plus
     the investment-transaction cash flows) plus the market value of its holdings.
-    ``prices`` (symbol -> price) overrides recorded prices for what-if / testing."""
+    ``prices`` (symbol -> price) overrides recorded prices for what-if / testing.
+
+    ``money_market_as_cash`` reports a money-market sweep under ``cash`` instead
+    of ``securities`` -- which is what a sweep IS to most people, and what a
+    brokerage statement usually calls it. It is a REPORTING choice, so it moves
+    nothing: ``total`` is identical either way and the holding still appears in
+    ``holdings``. Off by default, because the alternative would silently change
+    every cash-vs-securities figure an existing ledger already shows. The
+    parameter is passed in rather than read here: the domain layer does not
+    read UI preferences (the UI reads ``prefs.money_market_as_cash`` and hands
+    it down, exactly as it does with the allocation scope)."""
     hvs = holding_values(conn, account_id, as_of, prices)
     securities = sum(hv.market_value for hv in hvs)
     cash = (ledger.account_balance(conn, account_id, as_of)
             + investment_cash(conn, account_id, as_of)
             - _duplicated_transfer_leg_total(conn, account_id, as_of))
+    equivalents = 0
+    if money_market_as_cash:
+        equivalents = sum(hv.market_value for hv in hvs
+                          if is_money_market(conn, hv.symbol))
+        cash += equivalents
+        securities -= equivalents
     unpriced = [hv.symbol for hv in hvs if hv.price is None]
     return AccountValuation(
         account_id=account_id, cash=cash, securities=securities,
         total=cash + securities, holdings=hvs, unpriced=unpriced,
+        cash_equivalents=equivalents,
     )
 
 
@@ -2761,12 +4087,19 @@ def fetch_quote_history(conn, pairs, *, start=None, end=None, source=None,
     :func:`fetch_quotes` is -- ``price_history`` is keyed by the name a holding
     is stored under, so history filed under "ALTY" prices nothing when the
     holding is "ALTY GLOBAL X SUPERDIVIDEND ALTER".
+
+    A never-quote holding (:func:`securities.never_quote`) is dropped before the
+    provider is called, same as in :func:`fetch_quotes` -- a pinned or
+    tickerless security has no series to download.
     """
     wanted: dict = {}
     for name, ticker in pairs:
         tick = (ticker or "").strip()
         if tick:
             wanted.setdefault(tick.upper(), []).append(name)
+    if not wanted:
+        return 0
+    _, wanted = _quotable_plan(conn, sorted(wanted), wanted)
     if not wanted:
         return 0
     src = source or default_quote_source()
@@ -2896,6 +4229,45 @@ def default_quote_source():
     return YFinanceQuoteSource()
 
 
+def _quotable_plan(conn, symbols, names):
+    """``(symbols, ticker -> [holding name])`` with every NEVER-QUOTE security
+    removed, de-duplicated, order preserved.
+
+    The guard has to run on the holding NAMES a ticker would be filed against,
+    not on the ticker itself, because the dangerous case is precisely the one
+    where the two differ: a tickerless plan fund named "INTL EQUITY INDEX"
+    reaches a quote path as ticker "INTL", which is a real listed company whose
+    price has nothing to do with the fund. A ticker whose targets are ALL
+    never-quote is dropped entirely, so the provider is never asked at all --
+    skipping beats fetching-then-discarding, which still spends a request and
+    still risks writing the wrong price. A ticker no one mapped is checked under
+    its own name (that caller is asking for a holding stored under its ticker).
+
+    ``securities`` is imported lazily: it imports THIS module at module scope,
+    so importing it at ours would be a cycle."""
+    from mammon import securities
+
+    lookup = {k.upper(): list(v) for k, v in (names or {}).items()}
+    syms: list[str] = []
+    keep: dict = {}
+    for s in symbols:
+        s = (s or "").strip()
+        if not s or s in syms:
+            continue
+        targets = lookup.get(s.upper())
+        if targets is None:
+            if securities.never_quote(conn, s):
+                continue
+            syms.append(s)
+            continue
+        live = [t for t in targets if not securities.never_quote(conn, t)]
+        if not live:
+            continue
+        syms.append(s)
+        keep[s.upper()] = live
+    return syms, keep
+
+
 def fetch_quotes(conn, symbols, source=None, names=None) -> list[Quote]:
     """Fetch the latest close for ``symbols`` and write price_history rows.
 
@@ -2914,17 +4286,12 @@ def fetch_quotes(conn, symbols, source=None, names=None) -> list[Quote]:
     already know the mapping pass it; a caller that passes none is asking for
     the symbols it named to be priced under those same names, which is right
     when the holding IS stored under its ticker."""
-    syms: list[str] = []
-    for s in symbols:
-        s = (s or "").strip()
-        if s and s not in syms:
-            syms.append(s)
+    syms, lookup = _quotable_plan(conn, symbols, names)
     if not syms:
         return []
     src = source or default_quote_source()
     quotes = src.get_quotes(syms)
     default_name = getattr(src, "source_name", None)
-    lookup = {k.upper(): list(v) for k, v in (names or {}).items()}
     for q in quotes:
         targets = lookup.get((q.symbol or "").upper()) or [q.symbol]
         for target in targets:
@@ -3014,11 +4381,118 @@ def is_share_adjustment(txn) -> bool:
     return str(_row_value(txn, "memo") or "").startswith(SHARE_ADJUSTMENT_MARK)
 
 
+@dataclass(frozen=True)
+class HeldRange:
+    """One uninterrupted stretch during which a symbol had a non-zero position.
+
+    ``end`` is None while the position is STILL open -- which is a different
+    statement from "closed today" and has to survive into the overlap test
+    (:func:`held_overlap`), where an open range extends to today."""
+    start: str
+    end: Optional[str]
+    direction: str  # "long" or "short"
+
+
+def held_ranges(conn, symbol) -> list:
+    """Every period this stored symbol was actually held, oldest first.
+
+    The share balance is replayed across ALL accounts in date order: a range
+    opens on the date the running quantity leaves zero and closes on the date it
+    returns to zero, and the sign says whether it was held long or short. A
+    symbol with no quantity-changing rows (a dividend-only spelling, a name that
+    exists only in ``securities``) therefore has NO ranges at all, which is the
+    answer the securities review needs -- it means "nothing here can overlap
+    anything", not "held forever".
+
+    Matched on the LITERAL stored spelling (trimmed, case-sensitive) rather than
+    on a canonical identity, because the caller -- the securities dialog and its
+    overlap rule -- is reasoning about the stored spellings themselves, and
+    folding "zzta" into "ZZTA" here would make a case twin look like one symbol
+    that had always been held.
+
+    Decimal throughout; a split contributes 0 (:func:`share_qty_delta`), so it
+    rescales a position without ever opening or closing a range. A sign flip
+    that never lands on a recorded zero closes one range and opens the other on
+    that same date, so a long and a short of one symbol are never merged into a
+    single stretch."""
+    raw = str(symbol or "").strip()
+    if not raw:
+        return []
+    rows = conn.execute(
+        "SELECT * FROM investment_transactions "
+        "WHERE TRIM(COALESCE(symbol,''))=? ORDER BY date, id", (raw,))
+    out: list = []
+    qty = Decimal(0)
+    start: Optional[str] = None
+    direction = "long"
+    for t in rows:
+        if not is_quantity_action(_row_value(t, "action")) or is_void_investment(t):
+            continue
+        date = str(_row_value(t, "date") or "")
+        prev, qty = qty, qty + share_qty_delta(t)
+        if prev == 0 and qty != 0:
+            start, direction = date, ("short" if qty < 0 else "long")
+        elif prev != 0 and qty == 0:
+            out.append(HeldRange(start or date, date, direction))
+            start = None
+        elif prev != 0 and qty != 0 and (qty < 0) != (prev < 0):
+            out.append(HeldRange(start or date, date, direction))
+            start, direction = date, ("short" if qty < 0 else "long")
+    if start is not None:
+        out.append(HeldRange(start, None, direction))
+    return out
+
+
+def held_overlap(a: HeldRange, b: HeldRange, today: Optional[str] = None):
+    """The ``(start, end)`` the two ranges have in common, or None.
+
+    Dates are INCLUSIVE on both ends -- selling out of one security and buying
+    another on the same day is a same-day handover, and the securities review
+    treats that as an overlap rather than as a clean succession. An open range
+    (``end is None``) extends to ``today``."""
+    now = today or _dt.date.today().isoformat()
+    start = max(a.start, b.start)
+    end = min(a.end or now, b.end or now)
+    if start > end:
+        return None
+    return (start, end)
+
+
+def format_held_range(r: HeldRange) -> str:
+    """One range as text: ``2004-03-12 - 2011-07-01``, an open one as
+    ``2019-05-02 - present``, a single-day one as just that date, and a short
+    position marked ``(short)``."""
+    if r.end == r.start:
+        text = r.start
+    else:
+        text = f"{r.start} - {r.end or 'present'}"
+    return f"{text} (short)" if r.direction == "short" else text
+
+
+def format_held_ranges(ranges, limit: Optional[int] = None) -> str:
+    """Ranges joined by ``; ``. With ``limit``, only that many are spelled out
+    and the rest are counted, so a cell stays readable while the caller can show
+    the unlimited form in a tooltip."""
+    items = list(ranges)
+    if not items:
+        return ""
+    if limit is not None and len(items) > limit:
+        shown = [format_held_range(r) for r in items[:limit]]
+        return "; ".join(shown) + f"; +{len(items) - limit} more"
+    return "; ".join(format_held_range(r) for r in items)
+
+
 def _share_identity_clause(conn, symbol):
     """``(where_fragment, params)`` selecting every investment row that shares
     ``symbol``'s canonical identity -- the canonical spelling plus every alias
-    of it, compared case-insensitively."""
-    syms = [str(s).strip().upper() for s in _identity_symbols(conn, symbol) if s]
+    of it, compared case-insensitively.
+
+    Scoped to ONE instrument (:func:`_kind_identity_symbols`, SRD 5.8e-2d): a
+    reconciliation is always within one instrument, so an option contract
+    reconciles its own contract count against the statement's options section
+    and can never contribute a single unit to the underlying stock's share
+    count. Unchanged for every identity without an explicit option in it."""
+    syms = [str(s).strip().upper() for s in _kind_identity_symbols(conn, symbol) if s]
     if not syms:
         syms = [str(symbol or "").strip().upper()]
     frag = "UPPER(TRIM(COALESCE(symbol,''))) IN (%s)" % ",".join("?" for _ in syms)
@@ -3028,8 +4502,10 @@ def _share_identity_clause(conn, symbol):
 def share_identity(conn, symbol) -> list:
     """Every ticker spelling that reconciles as ``symbol``: its canonical symbol
     first, then its aliases. Public so the dialog can show the user WHICH names
-    a share balance was summed over."""
-    return [s for s in _identity_symbols(conn, symbol) if s]
+    a share balance was summed over. Scoped to one instrument, exactly as
+    :func:`_share_identity_clause` sums it, so what the dialog displays is what
+    was actually counted."""
+    return [s for s in _kind_identity_symbols(conn, symbol) if s]
 
 
 def share_reconcile_rows(conn, account_id: int, symbol: str,
@@ -3133,11 +4609,18 @@ def share_reconcile_summary(conn, account_id: int, symbol: str,
     number the user clears items (or records an adjustment) to drive to zero.
 
     Quantities in and out are Decimal (strings are accepted and parsed); never
-    floats. Splits and aliases are handled by the replay, not by the caller."""
+    floats. Splits and aliases are handled by the replay, not by the caller.
+
+    A reconciliation runs WITHIN ONE INSTRUMENT (SRD 5.8e-2d). For an option the
+    quantities here are CONTRACTS, reconciled against the statement's options
+    section, never against the underlying's share count; ``kind`` says which,
+    and ``adjustment_allowed`` is False for an option because there is no such
+    thing as adjusting a contract count by inventing shares
+    (:func:`record_share_adjustment` refuses it)."""
     if not symbol or not str(symbol).strip():
         raise ValueError("share reconciliation needs a security symbol")
     _validate_iso_date(statement_date)
-    canon = resolve_symbol(conn, str(symbol).strip())
+    canon = _kind_canon(conn, symbol)
     rows = share_reconcile_rows(conn, account_id, canon, through=statement_date)
     explicit = starting_qty not in (None, "")
     if explicit:
@@ -3152,9 +4635,12 @@ def share_reconcile_summary(conn, account_id: int, symbol: str,
     stated = _D(stated_ending_qty)
     prior_row = last_share_reconciliation(conn, account_id, canon,
                                           before=statement_date)
+    kind = security_kind(conn, canon)
     return {
         "account_id": account_id,
         "symbol": canon,
+        "kind": kind,
+        "adjustment_allowed": kind != instruments.Kind.OPTION.value,
         "identity_symbols": share_identity(conn, canon),
         "statement_date": statement_date,
         "prior_qty": prior,
@@ -3211,12 +4697,25 @@ def record_share_adjustment(conn, account_id: int, symbol: str, date: str,
     cash effect) carrying :data:`SHARE_ADJUSTMENT_MARK` on its memo, so it is
     identifiable in the register and deletable later with
     :func:`delete_share_adjustment`. The caller MUST show the user
-    :data:`SHARE_ADJUSTMENT_WARNING` first. Returns the new row id."""
+    :data:`SHARE_ADJUSTMENT_WARNING` first.
+
+    REFUSED for an option contract (SRD 5.8e-2d). ``ShrsIn``/``ShrsOut`` move
+    SHARES, and the gap in an option position is never missing shares -- it is a
+    missing open or close of a contract, which has a premium, a multiplier and a
+    cost basis attached. Papering over it with a share adjustment would create a
+    zero-cost phantom position that values at the contract's premium and never
+    expires. Returns the new row id."""
     q = _D(qty_delta)
     if q == 0:
         raise ValueError("a share adjustment of zero shares changes nothing")
     _validate_iso_date(date)
-    canon = resolve_symbol(conn, str(symbol).strip())
+    canon = _kind_canon(conn, symbol)
+    if is_option(conn, canon) or is_option(conn, str(symbol).strip()):
+        raise ValueError(
+            f"refusing a share adjustment for option contract {canon!r}: a "
+            "contract count is not a share count, and the missing piece is an "
+            "opening or closing trade with a premium and a basis, not shares "
+            "-- record the trade instead")
     note = (memo or "").strip()
     text = SHARE_ADJUSTMENT_MARK + " share balance adjustment"
     if note:

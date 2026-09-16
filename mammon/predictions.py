@@ -9,6 +9,13 @@ define. A prediction can be dismissed per account and payee
 (``prediction_dismissals``); the better answer, when the user knows the real
 amount and date, is to make it a scheduled payment, which supersedes it.
 
+One payee is not always one bill. A phone carrier paid for four family
+members in rotation posts about weekly while each line is billed monthly, and
+read as a single series it becomes a weekly payment of an arbitrary amount --
+four times as many calendar events as there are bills. So a payee's history is
+clustered into SUB-STREAMS (see ``split_substreams``) before any cadence is
+fitted, and each sub-stream is fitted on its own.
+
 Two things make a prediction trustworthy, and the code weighs both: three or
 more occurrences (two are enough only when the amounts nearly match), and a
 bank descriptor saying the payment is automatic -- AUTOPAY, ACH, RECURRING,
@@ -130,37 +137,78 @@ def predict_recurring(conn, today: str, *, account_ids: Optional[Iterable[int]] 
     for (aid, key), items in groups.items():
         if len(key) < 3 or (aid, key) in covered or (aid, key) in skip:
             continue
-        amount_of, category = core_amounts(conn, items)
-        series = collapse_series(items, amount_of)
-        if len(series) < max(2, min_count):
-            continue
-        dates = [d for d, _, _ in series]
-        freq = fit_period(dates)
-        if freq is None:
-            continue
-        amounts = [a for _, a, _ in series]
-        typical = typical_amount(amounts)
-        if typical == 0 or any((a < 0) != (typical < 0) for a in amounts):
-            continue
-        rows = [r for _, _, r in series]
-        payee = rows[-1]["payee"]
-        automatic = _automatic_for(conn, payee, rows)
-        near = sum(1 for a in amounts if abs(a - typical) <= abs(typical) // 3)
-        if len(series) >= 3:
-            if near * 5 < len(amounts) * 3:               # fewer than 60% near the typical
-                continue
-        elif (max(abs(a - typical) for a in amounts) > abs(typical) // 10
-              and not automatic):
-            continue                      # two loosely similar rows prove nothing
-        nxt, guard = scheduled.advance_date(dates[-1], freq), 0
-        while nxt < today and guard < 400:
-            nxt, guard = scheduled.advance_date(nxt, freq), guard + 1
-        out.append(Prediction(
-            account_id=aid, payee=payee, key=key, amount=typical, frequency=freq,
-            last_date=dates[-1], next_date=nxt, count=len(series), automatic=automatic,
-            category_id=category, varies=any(a != typical for a in amounts)))
+        out.extend(payee_predictions(conn, aid, key, items, today,
+                                     min_count=max(2, min_count)))
     out.sort(key=lambda p: (p.next_date, p.account_id, p.payee.lower()))
     return out
+
+
+def payee_predictions(conn, account_id: int, key: str, items, today: str, *,
+                      min_count: int = 2) -> list:
+    """Every prediction one payee's rows on one account support: normally one,
+    and one per sub-stream when the payee is several bills at once (see
+    ``split_substreams``).
+
+    The split is taken only when it is clearly the better reading -- two or
+    more sub-streams that EACH pass the same fit, amount-consistency and
+    minimum-occurrence tests a whole series must pass, each still running at
+    the end of the history, together accounting for at least half the payee's
+    occurrences. Anything less falls back to reading the payee as one series,
+    so an ordinary bill whose amount drifts (which clusters into singletons)
+    keeps exactly the prediction it had before sub-streams existed. A
+    sub-stream with too few occurrences is simply not predicted: predicting it
+    badly is worse than leaving it out."""
+    amount_of, category = core_amounts(conn, items)
+    whole = collapse_series(items, amount_of)
+    streams = split_substreams(items, amount_of)
+    if len(streams) > 1:
+        last = max(r["date"] for r in items)
+        subs, explained = [], 0
+        for rows in streams:
+            series = collapse_series(rows, amount_of)
+            p = _fit_series(conn, account_id, key, series, today, min_count,
+                            _stream_category(rows, category))
+            if p is None or not _still_running(p, last):
+                continue
+            subs.append(p)
+            explained += len(series)
+        if len(subs) >= 2 and explained * 2 >= len(whole):
+            return subs
+    p = _fit_series(conn, account_id, key, whole, today, min_count, category)
+    return [p] if p is not None else []
+
+
+def _fit_series(conn, account_id: int, key: str, series, today: str, min_count: int,
+                category) -> Optional[Prediction]:
+    """One ``collapse_series`` run as a Prediction, or None when it is not
+    steady enough to be one."""
+    if len(series) < min_count:
+        return None
+    dates = [d for d, _, _ in series]
+    freq = fit_period(dates)
+    if freq is None:
+        return None
+    amounts = [a for _, a, _ in series]
+    typical = typical_amount(amounts)
+    if typical == 0 or any((a < 0) != (typical < 0) for a in amounts):
+        return None
+    rows = [r for _, _, r in series]
+    payee = rows[-1]["payee"]
+    automatic = _automatic_for(conn, payee, rows)
+    near = sum(1 for a in amounts if abs(a - typical) <= abs(typical) // 3)
+    if len(series) >= 3:
+        if near * 5 < len(amounts) * 3:                   # fewer than 60% near the typical
+            return None
+    elif (max(abs(a - typical) for a in amounts) > abs(typical) // 10
+          and not automatic):
+        return None                       # two loosely similar rows prove nothing
+    nxt, guard = scheduled.advance_date(dates[-1], freq), 0
+    while nxt < today and guard < 400:
+        nxt, guard = scheduled.advance_date(nxt, freq), guard + 1
+    return Prediction(
+        account_id=account_id, payee=payee, key=key, amount=typical, frequency=freq,
+        last_date=dates[-1], next_date=nxt, count=len(series), automatic=automatic,
+        category_id=category, varies=any(a != typical for a in amounts))
 
 
 def core_amounts(conn, rows) -> tuple:
@@ -202,6 +250,106 @@ def core_amounts(conn, rows) -> tuple:
         return core.get(int(r["id"]), int(r["amount"]))
 
     return amount_of, category
+
+
+# ---------------------------------------------------------------------------
+# sub-streams: one payee that is several bills
+# ---------------------------------------------------------------------------
+# Amount is the cluster key, because a given bill repeats to the cent -- or
+# within a few cents of tax and fees -- while two of the same payee's bills for
+# different people or different plans differ by dollars. Hence a tight
+# tolerance: two percent of the amount, floored at fifty cents so small
+# amounts are not split by rounding alone. It is deliberately far tighter than
+# the one-third band that lets a SINGLE series' amount drift; that gap is what
+# keeps an ordinary varying bill (a power bill of 80, 85, 82) from being read
+# as three streams -- it clusters into singletons, none of which qualifies, and
+# the payee falls back to being read as one series.
+SUBSTREAM_TOLERANCE_PCT = 2
+SUBSTREAM_TOLERANCE_FLOOR = 50           # cents
+
+# How far behind the payee's last posting a sub-stream may fall and still count
+# as running, in multiples of its own period. A rotation's streams all reach
+# the end of the history; the old amount of a bill that simply went up does
+# not, and must not be predicted alongside the new one.
+SUBSTREAM_STALE_PERIODS = 1.5
+
+_PERIOD_DAYS = {label: days for label, days, _tol in scheduled._INTERVAL_TESTS}
+
+
+def split_substreams(rows, amount_of=None) -> list:
+    """One payee's ``rows`` clustered into the separate bills they are, as a
+    list of date-ordered row lists (a single list when the payee looks like one
+    series). Amount first; when amount alone does not separate them, memo and
+    category as tie-breakers -- the four lines of a family phone plan can cost
+    the same and be told apart only by what the memo says. Account is not a
+    tie-breaker here: the caller has already grouped by account.
+
+    Splitting is cheap and reversible: the caller (``payee_predictions``) keeps
+    a split only when each part independently earns a prediction, so an
+    over-eager cluster costs nothing."""
+    amount_of = amount_of or (lambda r: int(r["amount"]))
+    rows = list(rows)
+    clusters = _cluster_by_amount(rows, amount_of)
+    if len(clusters) < 2:
+        clusters = _cluster_by_tiebreak(rows)
+    return [sorted(c, key=lambda r: (r["date"], r["id"])) for c in
+            sorted(clusters, key=lambda c: min((r["date"], r["id"]) for r in c))]
+
+
+def _near_amount(a: int, anchor: int) -> bool:
+    """``a`` is the same bill as ``anchor``: same direction of money, and equal
+    within the sub-stream tolerance."""
+    if (a < 0) != (anchor < 0):
+        return False
+    tol = max(abs(anchor) * SUBSTREAM_TOLERANCE_PCT // 100, SUBSTREAM_TOLERANCE_FLOOR)
+    return abs(a - anchor) <= tol
+
+
+def _cluster_by_amount(rows, amount_of) -> list:
+    """Rows grouped by near-equal amount. Each row is measured against the
+    amount that OPENED its cluster, not the previous row, so a long ladder of
+    amounts two percent apart does not chain into one cluster spanning
+    dollars."""
+    buckets: list = []                                   # [(anchor, [rows])]
+    for r in sorted(rows, key=lambda r: (amount_of(r), r["date"], r["id"])):
+        amount = amount_of(r)
+        for anchor, bucket in buckets:
+            if _near_amount(amount, anchor):
+                bucket.append(r)
+                break
+        else:
+            buckets.append((amount, [r]))
+    return [b for _, b in buckets]
+
+
+def _memo_key(memo) -> str:
+    return " ".join((memo or "").lower().split())
+
+
+def _cluster_by_tiebreak(rows) -> list:
+    """Rows grouped by (memo, category): the fallback when every row costs the
+    same. A memo that varies month to month scatters the payee into singletons,
+    which is harmless -- no singleton earns a prediction, so the payee is read
+    as one series again."""
+    buckets: dict = {}
+    for r in rows:
+        buckets.setdefault((_memo_key(r["memo"]), r["category_id"]), []).append(r)
+    return list(buckets.values())
+
+
+def _stream_category(rows, fallback):
+    """The category of one sub-stream: what most of its own rows say, falling
+    back to the payee-wide answer (rows with no category of their own, or a
+    payee that is always split)."""
+    cats = [r["category_id"] for r in rows if r["category_id"] is not None]
+    return max(set(cats), key=cats.count) if cats else fallback
+
+
+def _still_running(p: Prediction, payee_last_date: str) -> bool:
+    period = _PERIOD_DAYS.get(p.frequency, 30.44)
+    behind = (_dt.date.fromisoformat(payee_last_date)
+              - _dt.date.fromisoformat(p.last_date)).days
+    return behind <= period * SUBSTREAM_STALE_PERIODS
 
 
 # ---------------------------------------------------------------------------

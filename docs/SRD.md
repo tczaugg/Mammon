@@ -152,11 +152,23 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   PROJECTION (`RegisterModel._view`) that every row-indexed method reads, so an
   edit made through a sorted row reaches the transaction on screen. Date
   ascending IS the ledger order; other columns break ties by it. **Same-date
-  rows keep a stable total order, tiebroken by their insertion `id`**, so the
-  register never reshuffles between opens or after an unrelated edit:
-  `ledger.register_rows` queries `ORDER BY date, id` and every other column's
-  sort key ends in `(date, id)`; `id` is a monotonic `INTEGER PRIMARY KEY`
-  written only by `ledger`, and an in-place edit preserves it. **Balance
+  rows are ordered by cash balance, high to low** (user preference, 2026-09-15):
+  "That way a transfer of funds arriving in an account shows before the
+  purchases that use those funds. The sell of a rebalance occur before the buys."
+  A day's rows carry no time, so their order was an accident of entry; within a
+  date the row that raises the balance most comes first and the largest outflow
+  last, which keeps the running balance as high as it can be at every row and
+  never dips below where the day ends. Concretely: `ledger.register_rows` queries
+  `ORDER BY date, amount DESC, id`; the investment register
+  (`investments._register_sequence`) orders by date, then each row's cash
+  effect high to low (share-only rows, which move no cash, sit between inflows
+  and outflows), then id; a crypto account, whose events DO state a time, orders
+  by date, then time, then the cash-sleeve effect high to low, then id (5.8j).
+  The final `id` keeps the order total and stable, so the register never
+  reshuffles between opens; every other column's sort key ends in `(date, id)`.
+  This is DISPLAY order: the holdings and lot replays keep application order
+  (date, id -- or date, time, id for crypto), so a same-day buy and sale of one
+  security are never replayed as a short. **Balance
   keeps each row's date-ordered running value whatever the sort** (Quicken's
   behaviour): sorting by payee never recomputes a balance. Num sorts numbers
   numerically, then text, blanks last; the money columns sort by magnitude;
@@ -190,9 +202,8 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   the highlighted result or on every result, replacing the WHOLE field
   (Quicken's semantics; blank clears). Category skips transfers and splits and
   teaches the payee mapping. Confirms first; open registers reload after.
-- **The investment register shares this whole toolkit** (parity roadmap item 2 /
-  upgrade_priorities #5), reusing the cash register's pattern and differing only
-  where the content does. `InvestmentRegisterModel` gains the same
+- **The investment register shares this whole toolkit**, reusing the cash
+  register's pattern and differing only where the content does. `InvestmentRegisterModel` gains the same
   `_view`-projection indirection, so a header click sorts (Quantity / Price /
   Share Bal by Decimal magnitude, Inv Amt / Cash Amt / Cash Bal by cents, Action
   and Security / Category by text, Date the identity); a filter bar
@@ -412,7 +423,13 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   switches the theme belongs to the newly chosen theme (the dialog has already
   reseeded its swatches to that theme), and the dialog's theme combo reseeds each
   swatch from that theme's remembered pick so toggling it can never clobber the
-  other theme's saved color.
+  other theme's saved color. In the same spirit, the **tree expand/collapse
+  indicators** (the Itemize-by-Category drill-down, the report category picker,
+  the categories and tags dialogs) are theme-driven rather than native: the
+  platform style drew them near-black, which is invisible on the dark surfaces,
+  so each palette names a `branch_indicator` color and one global
+  `QTreeView::branch` rule in `style.build_qss` gives every tree in the app its
+  arrows at 4.5:1 contrast or better.
 - The accounts list gives **credit cards their own heading**. Quicken separates
   them only by ordering, leaving the boundary implicit; the order still matches
   (cards directly below Banking).
@@ -542,6 +559,22 @@ Code: `mammon/ledger.py`, `mammon/loans.py`.
 - Undo of "split this transfer" restores the whole transfer with the SAME mirror
   row re-linked; deleting the split transaction removes both legs. Either way no
   orphan is left in the other account.
+
+### 5.2b An opening balance counts from its date (2026-09-15)
+- **An account's opening balance is part of its balance on and after
+  `opening_date`, and not before.** Quicken writes an opening balance as a
+  transaction ON its date, and every balance it reports for an earlier date
+  leaves it out. Adding it for all dates made a mortgage opened in 2002 appear,
+  whole, in a 2000 balance and in every net-worth figure from before the account
+  existed. An account with no `opening_date` keeps the old reading: the opening
+  balance is there from the beginning.
+- One reader, `ledger.opening_balance_on(acct, as_of)`, answers it, and every
+  balance path goes through it: the from-inception sum, the register's running
+  balance (which picks the opening balance up at the first row on or after its
+  date), the investment register's cash column, and the year-end snapshots
+  (built, read and recomputed). Migration 69 drops the snapshots for years ending
+  before an account's opening date, which were written with the opening balance
+  in them; later snapshots are right under both readings and are kept.
 
 
 ### 5.4 Intermediary payees - Venmo, PayPal (RESOLVED: no dedicated field)
@@ -773,10 +806,14 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   plots as CAD.
   A security carries no currency of its own -- the account does (§5.4a,
   `fx.get_account_currency`) -- so a fund held in a CAD brokerage has CAD prices,
-  and the chart must not imply otherwise. Every entry point into it (the
-  investment register's Security-cell double-click and its "Price history"
-  context entry, and the Holdings window) is a window scoped to ONE account and
-  hands that account down to the shared chart helper, which labels the y axis
+  and the chart must not imply otherwise. Every entry point into it hands an
+  account down to the shared chart helper: the investment register's
+  Security-cell double-click and its "Price history" context entry, and the
+  Holdings window, are each a window scoped to ONE account; the Investment
+  Performance report (§5.9b) spans accounts, so its per-holding row carries the
+  same "Price history: SYM" right-click entry and supplies the account of THAT
+  row's holding -- one security held in two accounts plots twice, each in its own
+  currency. The helper labels the y axis
   `Price (CCY)`, names the currency in the plot title and the dialog title, and
   prints the `$` on the ticks ONLY for USD -- a CAD price wearing a bare dollar
   sign reads as USD and invites the reader to add it straight into a USD total.
@@ -864,12 +901,29 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
     0.8x reverse (26 shares → 20.8).
   - The register's **Quantity** cell shows `8:1` (`investments.split_display`),
     not `80`.
-  - The register's **Share Bal** applies the split. A StkSplit is neither an ADD
-    nor a REMOVE action, so `register_rows` skipped it: the split row showed a
-    blank balance and every LATER row for that security carried a pre-split
-    running total, disagreeing with `holdings` (which was always right, since it
-    replays through `_apply_txn`). Share Bal ties to holdings by documented
-    invariant; the split case has to be in both.
+  - The register's **Share Bal** applies the split. It also decides what moves
+    shares by asking the module's ONE classification rather than restating it:
+    a row counts when `investments.is_quantity_action` says so, and contributes
+    `investments.share_qty_delta`, the single signed helper `_apply_txn` already
+    replays into `holdings`. `register_rows` used to carry a second, sign-blind
+    copy of that rule (ADD-or-REMOVE), which omitted the short actions, so a
+    short leg fell through to the cash-only branch and rendered as an empty
+    cell. With the one classification, a short leg carries a negative Share Bal
+    — ShtSell 10, ShtSell 5, CvrShrt 4 reads -10, -15, -11 — a fully covered
+    short reads `0` rather than blank, and a position crossing back through zero
+    (short 10, then Buy 25) reads -10, 15, which is also the sort order, the
+    column being numeric. Short legs gained their gross security amount (**Inv
+    Amt**) in the same move, both answers coming from the one question. A row
+    that moves no shares — Div, IntInc, a bare cash transfer naming no security
+    — still shows a BLANK Share Bal, and blank means "this row moves no shares",
+    never "the balance here is unknown": that is the Quicken register's behavior,
+    and carrying the running total forward onto those rows would claim a
+    reconcilable share position where the transaction states none.
+    A StkSplit is neither an ADD nor a REMOVE action, so `register_rows` skipped
+    it: the split row showed a blank balance and every LATER row for that
+    security carried a pre-split running total, disagreeing with `holdings`
+    (which was always right, since it replays through `_apply_txn`). Share Bal
+    ties to holdings by documented invariant; the split case has to be in both.
 
 
 ### 5.8d Lots, capital gains, performance and allocation (roadmap item 7)
@@ -896,6 +950,27 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   (`portfolio.capital_gains`, `gains_summary`) lists them for a year or any
   range with the Schedule D footings by term; Lots (`portfolio.open_lots`)
   lists the open lots valued at a date with each one's term and days held.
+- **A trade is read against the position's sign** (`investments._apply_trade`,
+  2026-09-14). Buy, Sell, ShtSell and CvrShrt (and the other plain buy/sell
+  verbs) state a direction; the position decides what that means. A buying
+  trade covers any short first, realizing the credit less its share of the
+  cash spent, and only the rest opens a long lot. A selling trade sells any
+  long first, exactly as a sale always has, and only the rest opens a short.
+  A trade that crosses zero shares its cash between the two sides by shares.
+  Quicken's verbs do not track the sign: a short is covered with Buy as often
+  as with CvrShrt, and an option writer's whole history is ShtSell/CvrShrt. A
+  cover used to realize nothing, which put a migrated ledger's option-writing
+  history hundreds of percent away from the cash it produced in Previously
+  Held. A covered short
+  is short-term. The option life-cycle verbs (5.8e-7) keep their own branches.
+- **A trade's amount is the net cash that moved**, commission included, in both
+  directions: Quicken's `T`, an OFX `<TOTAL>`, and what the cash balance posts.
+  Realized P/L no longer subtracts a sale's commission from it a second time;
+  commission is applied only when a row has no amount and is priced from
+  quantity x price. The edit dialog's Amount placeholder says so. The property
+  both rules protect: once a symbol is flat and only traded, its realized P/L
+  equals its net cash to the cent (`test_investments_short_realized.py`).
+  Migration 68 drops the year-end snapshots written under the old rules.
 - **Year-end snapshots carry the lots** (`holdings_checkpoints.lots`, JSON), so
   the snapshot+delta replay reproduces the from-inception lot state exactly
   (`test_lots.py` proves it for all three methods). Migration 37 drops the
@@ -911,8 +986,77 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   valuation's multiset rule, so nothing counts twice) and securities moved in
   or out; buys, sells and dividends only move value around inside. For one
   security the boundary is the security: buys and shares in are money put in,
-  sales, cash dividends and shares out are money back. Bisection on the net
-  present value, so any data the user has yields a rate or an honest "n/a".
+  sales, cash dividends, returned capital and shares out are money back. Bisection
+  on the net present value, so any data the user has yields a rate or an honest
+  "n/a".
+- **One definition of a holding's return** (`portfolio.holding_performances`,
+  2026-09-15), read by the Investment Performance report, the Holdings window and
+  `security_performance` alike. User request: "We need a dividends column, and to
+  include the dividends in the gain and gain%. Also an annualized rate of return
+  ... over the selected period or the duration of the holding. Same on the
+  holdings dialog." And: "Reinvested dividends are included in the value of the
+  security. But cash dividends are not."
+  - **Gain** = ending value - starting value - money put in + money taken out.
+    A cash dividend is money taken out, so it is added. A reinvested dividend
+    bought shares that are already in the ending value and is neither in nor out,
+    so it counts once. Returned capital is money taken out.
+  - **Dividends** is every distribution in the span, cash and reinvested.
+  - **Gain %** is the gain over the capital at work (starting value plus money
+    put in). **Annual %** is the money-weighted rate per year over the span the
+    flows cover, and is blank under a year: annualizing a few months compounds
+    noise into a rate nobody earned.
+  - **The span** is the report's period when it has one, and otherwise the
+    CURRENT HOLDING: from the day the share count last left zero, so a fund sold
+    out in 2010 and bought again in 2021 is measured from 2021. Only a position
+    empty at the end of an EARLIER day restarts: rows within a day have no order,
+    so shares removed and re-added by a CUSIP change, or sold and bought back the
+    same day, are one continuous holding.
+  - **Shares removed are a fee unless another account received them**
+    (`portfolio.share_moves`; user rule: "Quicken doesn't have a way to move
+    shares from one account to another. You would just see shares removed in one
+    and shares added in the other. So treat shares removed as fees unless you see
+    that."). A 401(k) takes its administrative and recordkeeping fees as shares,
+    and counting those removals as money handed back added every fee to the
+    return. A removal pairs with an addition in a DIFFERENT account of exactly the
+    same number of shares of the same security (canonical symbol or recorded
+    ticker) within 10 days; the pair is money out of one position and into the
+    other, valued at whichever side states a value (brokers send arriving shares
+    with no price). The account-level return (`external_flows`) applies the same
+    rule. A removal whose addition is dated months away, or recorded under
+    another listing's symbol, stays a fee: pairing records seven months apart is
+    guessing, and the user corrects the records instead (user decision
+    2026-09-15: "That is something for the user to fix.").
+  - **A fund conversion can be kept as one holding** (migration 73,
+    `investments.link_holding`; the Holdings window's right-click "Continues from
+    ..."). A plan that closes a fund records the old fund sold and a new one
+    bought, usually at a different share price -- in the user's words "like a
+    split and a rename all at once, but the split isn't a nice ratio of
+    integers." The link is per account and the person's choice, and it is
+    offered and accepted only for a WHOLE conversion: every share of the old fund
+    sold that day, and exactly those proceeds buying the new one
+    (`conversion_proceeds`). Linked, the old fund's rows count under the new
+    one, the conversion day's sale and purchase move no money, and the value
+    carries over at the new share count, so the holding's gain and annual rate
+    run from the first fund's purchase. Chains follow (A -> B -> C). It changes
+    nothing else: prices, charts, holdings and stored rows are untouched, the old
+    fund stays in Previously Held marked "continued as", and unlinking restores
+    the two. Not a `security_aliases` row, because an alias pools the two price
+    histories and folds the holdings into one identity everywhere. A link whose
+    day has since been edited so the conversion is no longer whole is ignored
+    (`holding_successors`).
+  - **A portfolio rate** is solved over every holding's flows pooled, not averaged.
+    A position with no capital at work (shares that arrived from a merger with no
+    cost, an expired written option) still counts in the dollars but not in the
+    rate: it has no rate of return, and pooling it left a real ledger's lifetime
+    flows with none at all.
+  - Values come from the replay at each boundary date through `_market_value`,
+    so a short or an option values as it does everywhere else, and aliases fold
+    as the replay folds them.
+- **A broker's "Dividend" and "Cash Dividend" are dividends**
+  (`investments._DIVIDEND_ACTIONS`, migration 72 drops the holdings snapshots that
+  summed without them). Accepted through review as the download wrote them, 63
+  rows on a real ledger -- every 2026 dividend of its ETFs -- were cash into the
+  account but no one's income.
 - **Hidden accounts are out of the allocation**, matching
   `investments.net_worth`, which has always excluded them. Hiding is how a user
   says "the records here are incomplete -- leave it out of my totals", and such
@@ -1175,6 +1319,75 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   its own so it never appears among the proposals -- reporting only
   proposal-vs-proposal collisions described a two-way merge as a simple rename,
   which is the one change here that re-running cannot undo.
+- **Instrument kind is STORABLE but not yet populated.** Schema v67 adds `kind`
+  and `kind_source` to `securities`, plus the option terms `multiplier`,
+  `underlying`, `expiration`, `strike` and `option_right` (compartment K). The
+  migration only makes those facts recordable: it classifies nothing, backfills
+  nothing and rewrites no identity, so every existing security comes out with
+  NULL `kind` and behaves exactly as it did before. Valuation, holdings and cost
+  basis still treat every security as a thing with a symbol and a share count;
+  what reads the columns is the classification audit and its review screen
+  (5.8e-2b), which is how a row stops being NULL. NULL must be read as "not
+  known to be an option", never as "equity".
+- **An option contract's identity is its canonical OSI symbol**, not its
+  underlying's ticker. One contract is spelled `XYZ   260117C00150000`,
+  `.XYZ260117C150` or `-XYZ260117C150` by three brokers, and a position opened
+  under one spelling can never be closed under another; `mammon/instruments.py`
+  (pure domain) parses any of them into `OptionTerms` and `OptionTerms.osi()`
+  emits the one 21-char string every row for that contract shares. Two contracts
+  differing only in strike, expiry or right are DIFFERENT identities, and
+  collapsing either onto `XYZ` fuses the option position into the stock position
+  -- the destructive path 5.8e-2's re-keying must never take. An ADJUSTED root
+  (`XYZ1`) is likewise a distinct deliverable and survives into the symbol.
+- **A contract's multiplier is read from the feed, never assumed.** The standard
+  100 shares per contract does not hold for an adjusted contract, and guessing it
+  is how a $645 settlement gets reported as $6.45. Where the feed states the
+  deliverable, that wins; where nothing states it and the root is adjusted, the
+  multiplier is UNKNOWN rather than 100. What a source states about an
+  instrument lands in the v67 `securities` columns as it is imported
+  (`securities.classify_source` for a QIF type word, `classify_seclist` for an
+  OFX `<SECLIST>` block, both reached from the one import writer): a stated type
+  gives `kind_source='source'`, a symbol that parses gives the terms, and what
+  is allowed to land is decided by the precedence rule of 5.8e-2b, so nothing
+  the user has classified is ever reclassified by an import. A pre-2010 symbol
+  lands PARTIAL on purpose: the terms it cannot state
+  stay NULL and are NAMED as unknown rather than defaulted, because a guessed
+  strike is indistinguishable from a known one once it is stored.
+- **What the source's own trades show outranks what the symbol says**
+  (`securities.observed_multiplier`, 2026-09-15). The multiplier is the factor
+  that turns quantity x price into cash, and that is a fact about how the SOURCE
+  counted quantity. A broker feed counts contracts at a per-share premium (x100).
+  Quicken's QIF counts `Q` as "number of shares" and every option trade in decades
+  of its exports has `T = Q x I` -- shares at a per-share premium in some years,
+  contracts at a per-contract price in others -- so the symbol's 100 valued those
+  positions a hundred times too high. Each trade with a quantity, a price and an
+  amount gives `gross / (quantity x price)`; it counts for 1, 10, 100 or 1000 when
+  within 3% of it, or when the price it implies at that scale rounds to the stated
+  price at the places the export wrote (a 0.026 premium written 0.03). All counting
+  trades must agree, or nothing is set. An import applies it to the symbols it
+  traded (`record_observed_multipliers`) but never over a person's own
+  classification (`kind_source='user'`); a repair the person asks for may.
+- **A NULL `multiplier` means one for a share and UNSTATED for an option**, so
+  the column is never read without `kind` beside it. `securities.contract_multiplier`
+  is the one place that resolves the pair: `Decimal(1)` for anything not known
+  to be an option, the stated size for a classified contract, and UNKNOWN when
+  the row is an option no source has sized.
+- **Every site that derives or validates `amount` from `quantity x price` must
+  apply that multiplier**, because an option's price is a per-share premium
+  while its quantity counts CONTRACTS -- 2 at 1.75 is $350, and a site that does
+  not know it both computes $3.50 and reports the user's correct $350 as an
+  inconsistency. There are exactly two such sites, and a third must not appear:
+  `importers/record.derive_investment_amounts` (the import path, including the
+  tolerance it compares against) and `ui/widgets.InvestmentTransactionDialog.resolve_qpa`
+  (the manual-entry path; its recompute prompt goes back through the same solver
+  rather than repeating the arithmetic). Everything else takes the source's
+  stated cash verbatim -- notably the QIF investment record, whose `T` amount is
+  recorded as given.
+- **When the multiplier is UNSTATED, nothing is derived and nothing is flagged.**
+  The source's own amount is recorded as it stands; an inconsistency that is
+  indistinguishable from an unknown contract size is not a finding to put in
+  front of a user. The one place it is refused is manual entry with no amount
+  typed, where the cash cannot be recovered from quantity and price at all.
 
 
 ### 5.8e-2a Ticker renames without rewriting history (security aliases)
@@ -1240,6 +1453,366 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   real ticker), where the old spelling is simply wrong and should disappear.
 
 
+### 5.8e-2b Classifying what each security IS (audit first, then confirmation)
+Forty years of imports left `securities` describing instruments in whatever
+words each source happened to use, and schema v67 (5.8e-2) gave those facts a
+home without filling them in. Filling them in is deliberately TWO moves, not
+one: a report that only reads, and a screen where the user confirms. Nothing in
+either deletes a securities row, re-keys one, or touches a position.
+
+- **The audit reads and cannot write.** `mammon/reports/security_audit.py` is a
+  pure aggregation -- no Qt, no writes, plain data structures -- returning for
+  every securities row what the row currently says it is, what
+  `instruments.classify` PROPOSES it is, and the option terms its symbol parses
+  into, plus counts and row lists. Running it leaves the database byte for byte
+  as it was, and a connection under `PRAGMA query_only` is enough to run the
+  whole thing. That property is the entire reason the reading half is separated
+  from the acting half: the first pass over a real 40-year ledger is a report
+  the user can run without deciding anything.
+- **Three findings, kept apart, because they mean different things.** A `ticker`
+  differing from the `symbol` is the ordinary rename of 5.8e-2a and is BENIGN,
+  not a finding. A row whose identity is a CONTRACT while its ticker is its
+  underlying's is one Apply away from being absorbed into the stock, and is
+  flagged. A row whose identity is not a contract while its DESCRIPTION is one
+  is already two instruments fused into a single row -- what 5.8e-2's
+  destructive re-keying leaves behind -- and is flagged separately. Symbols
+  sharing one ticker are additionally reported as a group, noting whether the
+  group mixes kinds. Raising one undifferentiated alarm over all three would
+  bury the two real ones under every legitimate rename in the file.
+- **A fused row is proposed NO kind change.** Relabelling it picks one of the
+  two instruments and loses the other silently. The audit names the row and
+  stops; un-fusing is a separate operation that does not exist yet.
+- **The legacy OPRA decoder is never used as a detector.**
+  `instruments.parse_legacy_option` reads `IBM` happily as a contract, so it is
+  asked only about rows something ALREADY calls an option. A pre-2010 symbol
+  yields the terms it states and NAMES the rest as unknown rather than
+  defaulting them, exactly as at import time (5.8e-2).
+- **`securities.set_kinds` is the one writer, and it writes seven columns.**
+  `kind`, `kind_source` and the five option terms, on an EXISTING row: never
+  `symbol`, never `ticker`, never a holding, a lot assignment or a transaction.
+  It validates the whole batch before writing any of it, so one bad row in a
+  bulk confirmation cannot leave the file half-updated, and terms offered for a
+  kind that is not an option are refused rather than stored. A confirmed change
+  carries `kind_source='user'`, which the import path then declines to
+  overwrite. Setting a kind back to NULL clears `kind_source` and every term
+  with it -- unclassified is a real answer, and it must not leave the terms of a
+  previous guess behind.
+- **Precedence is `user` > `source` > `derived`, and it is not negotiable.**
+  This is the whole reason `kind_source` is stored rather than just `kind`. An
+  import states what a FEED said; the review screen records what a PERSON
+  decided; `instruments.classify` only works something out from a symbol's
+  shape. So: a NULL `kind` is filled by any statement; a statement of higher
+  rank replaces one of lower rank; a row marked `user` is never touched by an
+  import at all. Statements are re-imported constantly -- the same statement,
+  the same year-end file -- and a correction that the next import quietly undoes
+  is worse than having no correction screen.
+- **At equal rank, a restatement lands only if it is STRICTLY MORE COMPLETE.**
+  A second source may fill terms the first left NULL, but it may not disagree:
+  a different kind, or a different value for a term already recorded, is a
+  conflict to leave alone rather than a refinement to apply, and last-import-wins
+  would make a row's contents depend on file order. Terms compare by VALUE, so
+  `100` and `100.00` are the same statement, not an update. That is also what
+  makes re-import IDEMPOTENT: importing the same file twice leaves one row with
+  the same seven columns.
+- **The import side decides, `set_kinds` still writes.**
+  `securities.record_stated_kinds` is the gate in front of the one writer: it
+  reads the row, applies the rule above, and hands the survivors to `set_kinds`,
+  so the seven classification columns keep exactly one writer whether the change
+  came from a person or a feed. Which importers state a kind today: OFX, from
+  the `<SECLIST>` wrapper -- `<OPTINFO>` gives `kind='option'` with the
+  deliverable from `<SHPERCTRCT>`, the resolved underlying ticker, an ISO
+  expiration, the strike and the right; `<MFINFO>` gives `mutual_fund` and
+  `<DEBTINFO>` gives `bond`. And QIF, from a type word on its security master.
+  `<STOCKINFO>` and `<OTHERINFO>` state NOTHING and are left NULL on purpose:
+  brokers file shares, ETFs, ADRs and sweep funds alike under `<STOCKINFO>`, so
+  mapping it to `equity` would give a guess the standing of a statement.
+- **Reclassification is additive and reversible.** It moves no money, no share
+  count and no identity, so a wrong confirmation is corrected by confirming
+  again. This is what makes a bulk confirmation safe to offer at all.
+- **The review screen is a thin projection.** `SecurityKindDialog` (Tools ▸
+  Security Kinds…) holds no SQL and no classification logic; it reads the audit
+  and applies through `set_kinds`, and every write leaves it by one overridable
+  seam. It opens with its own proposals already ticked -- 900 securities are not
+  confirmed one at a time -- but it NEVER pre-ticks a flagged row, and ticking
+  in bulk by symbol-or-kind pattern skips flagged rows too, so the two shapes
+  that need a human are the two the blanket action cannot sweep up. The
+  confirmation names the rows going back to unclassified and names the flagged
+  ones, and always ends by stating that no symbol, ticker, holding or
+  transaction is changed. Option terms ride along only when the user accepts the
+  PROPOSED kind; an override to a different kind writes the kind alone, because
+  terms read off a symbol the user has just contradicted are not evidence.
+
+
+### 5.8e-2c Kinds that settle their own price: plan funds and money-market sweeps
+A kind is worth recording only where it CHANGES what the program does. Two of
+them decide, on their own, that a security needs no market data at all -- and
+for both, asking for it is worse than not asking.
+
+- **A tickerless plan fund is never handed to a quote provider.** A 401(k), 403(b)
+  or 529 internal fund ("INTL EQUITY INDEX", "STABLE VALUE FUND") is not listed
+  anywhere; no provider has a series for it, and its price arrives from the
+  statement or by hand. `fetch_ticker` rule 3 already refuses to GUESS a ticker
+  out of such a name -- INTL is a real listed company and the guess prices the
+  holding at a stranger's stock -- but refusing the guess still leaves the
+  download path trying and failing on every run. `kind='mutual_fund'` with no
+  resolvable ticker now makes it SKIP the row outright: `securities.never_quote`
+  answers the question once, and `investments.fetch_quotes`,
+  `fetch_quote_history` and the Holdings window's quotable list all drop the row
+  before a provider is called. A mutual fund WITH a real ticker (FIPDX) has a
+  daily NAV and is quoted exactly as before -- it is the absence of a ticker,
+  not the kind alone, that makes a fund unquotable.
+- **A money-market sweep is pinned at 1.** `kind='money_market'` fixes the price
+  at `Decimal(1)` inside `_resolve_price`, ahead of both the recorded price
+  history and a caller's injected override, because a downloaded 0.9998 (or a
+  stale 1.0001) is precisely the noise that makes a cash sleeve drift against a
+  statement that says the number is 5,000.00. The pin is a Decimal, never a
+  float, like every other price in the file. A pinned kind is also a never-quote
+  kind: there is no series to download for something whose price is a
+  definition.
+- **NULL kind still means UNCLASSIFIED, and behaves exactly as it always did.**
+  Neither rule fires on a row nobody has classified: `never_quote` answers False
+  and the old rule-3 behavior stands, unchanged. Nothing here reclassifies
+  anything retroactively -- the kinds come from 5.8e-2b, one confirmation at a
+  time.
+- **Whether a sweep is CASH or a SECURITY is a preference, and it ships OFF.**
+  `prefs.money_market_as_cash` (Asset Allocation window, "Count money-market
+  funds as cash") passes down to `investments.account_valuation` and
+  `portfolio.allocation` as a parameter -- the domain layer reads no Qt setting.
+  **Default: OFF**, deliberately, because ON would change the cash-versus-
+  securities split of every existing file the first time it opened, and a number
+  that moves on upgrade with no user action is indistinguishable from a bug. Its
+  default answer is therefore the one that reports today's figures.
+- **The flag moves money between buckets and never changes the amount.** With it
+  on, the sweep's market value leaves `securities` for `cash`
+  (`AccountValuation.cash_equivalents` records how much moved, so a footer can
+  still show Securities + Cash = Total), and in the allocation it is counted in
+  the `cash` class ONCE -- the per-holding loop skips a money-market position
+  precisely because the valuation already folded it into cash. `total` and
+  `by_security` are identical either way: how much of the fund you hold is not a
+  matter of opinion, only which bucket it is shown in.
+
+
+### 5.8e-2d An option contract is a SEPARATE INSTRUMENT from its underlying
+A contract on ACME is not a spelling of ACME, not a share of ACME, and not a
+line of ACME's position. Ten contracts and a hundred shares are 110 of nothing.
+Everything below keys off `kind='option'` **explicitly**; a NULL kind is
+UNCLASSIFIED (5.8e-2b) and takes the pre-existing path untouched, so an
+unclassified ledger behaves bit-for-bit as it did before any of this landed.
+
+- **The kind partition, and where it applies.** `investments.security_kind`
+  reads the row's OWN kind first and only falls back across the identity when
+  this spelling says nothing; `_kind_identity_symbols` then narrows the alias
+  set (5.8e-2a) to the spellings whose option-ness MATCHES the symbol asked
+  about, and `_kind_canon` narrows the canonical resolution the same way. Both
+  are no-ops on an identity of one spelling and on an identity where no member
+  is a classified option -- which is every identity in an un-backfilled file --
+  so the cost is a handful of indexed primary-key reads and the behavior is
+  unchanged.
+- **Why the resolution and not just the set.** Canonicalising first is how a bad
+  alias row would still win: ask about the contract, resolve to the stock, and
+  report the stock's shares under the contract's name. The partition has to
+  apply to the resolution itself.
+- **The position replay refuses a fused set outright.** `add_alias` will not
+  record a contract as an alias of its underlying (5.8e-2a); `_fold_aliases`
+  raises a `ValueError` naming both symbols if such a row exists anyway. Merging
+  a contract count into a share count is unrecoverable at read time -- they
+  become one number and nothing downstream can separate them -- so loud beats
+  wrong, and the user removes the alias.
+- **A reconciliation runs WITHIN ONE INSTRUMENT.** `share_identity`,
+  `_share_identity_clause` and `share_reconcile_summary` are scoped by the same
+  partition: an option reconciles its own CONTRACT count against the statement's
+  options section, and can never contribute to the underlying's share count. The
+  summary carries `kind` and `adjustment_allowed` so the dialog can say which it
+  is showing.
+- **`record_share_adjustment` REFUSES an option position.** The share adjustment
+  exists to close an unexplained SHARE gap with `ShrsIn`/`ShrsOut` (5.8a); there
+  is no such thing as settling a contract count by inventing shares, and the
+  right repair for a missing contract is the missing trade. It raises rather
+  than writing, under either spelling, and creates no row.
+- Covered by `mammon/tests/test_options_domain.py` (independent positions and
+  independent reconciliations, the hand-written fusing alias on both the read
+  and replay sides, the refused adjustment, and a NULL-kind twin for each).
+
+
+### 5.8e-2e Option contracts arriving from a broker statement (OFX/QFX)
+A broker's own statement is where most contracts enter the file, and for years
+`mammon/importers/ofx.py` dropped or flattened them: the option trade aggregates
+were unmapped, and every ending was collapsed into one cash-neutral
+`RemoveShares`. An options account imported that way had permanently wrong
+holdings and never realized a premium. The parser now reads the contract, the
+trade and the ending for what they are. The parser-level mechanics live in 6.3a;
+what follows is what the investments compartment is entitled to rely on.
+
+- **`<SECLIST>`/`<OPTINFO>` is the contract's definition, and Mammon spells the
+  contract itself.** The parse reads `OPTTYPE` (the right), `STRIKEPRICE`,
+  `DTEXPIRE` (normalized to ISO), `SHPERCTRCT` (the deliverable) and the
+  UNDERLYING's `SECID`, resolved against the securities already seen in the same
+  `<SECLIST>`. From those STATED TERMS it builds the canonical OSI symbol of
+  5.8e-2 -- it does not adopt the broker's `TICKER` as the identity. The ticker is
+  parsed first for the one thing the terms cannot give, an ADJUSTED root
+  (`XYZ1`), and `SECNAME` is tried as a fallback when the ticker will not parse.
+  An option resolved through the `<SECLIST>` then OVERRIDES the transaction row's
+  own `TICKER`, so three brokers' three spellings of one contract land on one
+  symbol and on one position, which is the whole point of 5.8e-2d. The exception
+  is a spelling whose terms cannot be recovered at all (a pre-2010 OPRA symbol):
+  there the broker's text is kept verbatim as the symbol, because an invented
+  contract is worse than an unparsed one.
+- **`<BUYOPT>`/`<SELLOPT>` are mapped, with their open/close flag.** The flag is
+  load-bearing, not cosmetic -- it is what separates opening a position from
+  closing one, and a write from a sale:
+
+  | Flag | Action | What it is |
+  |---|---|---|
+  | `BUYTOOPEN` | `Buy` | goes long the contract |
+  | `SELLTOCLOSE` | `Sell` | sells a contract held |
+  | `SELLTOOPEN` | `ShtSell` | WRITES the contract: a short position, cash in |
+  | `BUYTOCLOSE` | `CvrShrt` | buys back a contract written |
+
+  A flag that is absent or unrecognized falls back to a plain `Buy` for
+  `<BUYOPT>` and a plain `Sell` for `<SELLOPT>` rather than being dropped.
+  Units are carried as a MAGNITUDE whatever sign the feed put on them, because
+  direction lives in the action alone and the domain layer negates a disposal's
+  quantity itself.
+- **`<CLOSUREOPT>` ends the position with its real outcome**, chosen from the
+  `OPTACTION` and whether the position is short (negative units, or an
+  assignment, since only a writer can be assigned):
+
+  | Ending | Long | Short |
+  |---|---|---|
+  | `EXPIRE` | `Sell` at a price of **zero** | `CvrShrt` |
+  | `EXERCISE` | `RemoveShares` (cash-neutral) | `CvrShrt` |
+  | `ASSIGN` | -- | `CvrShrt` |
+  | absent | `RemoveShares` | `CvrShrt` |
+
+  An exercise is the one deliberately cash-neutral case: its premium is not lost,
+  it becomes part of the basis of the shares arriving on the OTHER leg, and
+  `RELFITID` is carried through on the option record so the two halves can be
+  tied together. This is the import-side counterpart of the basis rules 5.8e-7
+  states for the domain writers; the importer maps onto the EXISTING action
+  vocabulary (`Buy`/`Sell`/`ShtSell`/`CvrShrt`/`RemoveShares`) and introduces no
+  new action and no schema change.
+- **An expiring contract is now a Sell at a price of zero -- a deliberate
+  behavior flip, recorded as such.** `mammon/tests/test_importers.py`'s
+  `test_ofx_closureopt_removes_option_units` previously expected the
+  cash-neutral `RemoveShares` and now asserts `action == 'Sell'`, `amount == 0`,
+  the holding fully closed, and cash unmoved by the close. That is the change
+  that realizes the premium: a removal disposes of the position while reporting
+  no result, so the entire cost of a contract bought and held to expiry
+  disappeared from the file. The old assertion was not a regression to preserve.
+- **A contract arriving this way is CLASSIFIED, and nothing else is.** The
+  `<SECLIST>` statement reaches the v67 columns only through
+  `securities.record_stated_kinds` and its one writer `securities.set_kinds`
+  (5.8e-2b), at `kind_source='source'`, so it fills what is NULL and never
+  overwrites what a person confirmed. The parsed terms that ride on the
+  normalized record are not otherwise persisted today. NULL `kind` still means
+  UNCLASSIFIED and never `equity`: a legacy ledger that has imported none of
+  this behaves exactly as it did before.
+- Covered by `mammon/tests/test_ofx_options.py` (19 tests in three groups:
+  `<OPTINFO>` to identity, OSI symbol and multiplier, including divergent broker
+  spellings canonicalizing to one symbol and an unrecoverable spelling kept as
+  it stands; each open/close flag's action, with and without a `<SECLIST>`; and
+  each ending with its `RELFITID` linkage, round-tripped through the database).
+
+
+### 5.8e-2f Pre-2010 broker shorthand option symbols, and the never-merge guarantee
+- A symbol that decodes as an option contract is **NEVER proposed for merging
+  into its underlying**, by any route. This holds for the modern 21-character
+  OSI symbol (5.8e-2, 5.8e-2e) and equally for the **pre-2010 OPRA / broker
+  shorthand** a long history carries: a root, then one month/right letter and
+  one strike letter. Brokers write the root in a fixed-width three-character
+  field, so both `MS DJ` (two-character root, space-padded) and `LOWFX`
+  (three-character root, closed up) are that one form. User-reported: an
+  identity review over a real ledger proposed collapsing dozens of them onto
+  their underlying, unlabelled and unrecognizable.
+- `instruments.parse_legacy_option` decodes both spellings. The month/right
+  letter table is the validity test (A-L = Jan-Dec calls, M-X = Jan-Dec puts;
+  Y and Z decode to nothing), the root must be two letters or more, and a
+  symbol whose letters are not a valid code returns None rather than a guess.
+  It yields the underlying, expiration MONTH and call/put right; strike, day
+  and year stay UNKNOWN, because the strike letter is a code into a table that
+  depends on the contract's price range and is not recoverable from the symbol
+  alone.
+- That decoder remains **NOT a detector** and must not be used as one: every
+  four- or five-letter ticker "decodes" (`AAPL`, `VFIAX`). `securities.suggest`
+  therefore consults it **only for a row whose proposal would otherwise change
+  the key** -- the spaced form always does, and the compact form does when a
+  source stated the ROOT as the ticker, which is the QIF/OFX case where
+  `apply_splits` would execute the merge as recorded fact. A row already being
+  left alone is never stamped as an option, so ordinary funds do not acquire a
+  false label.
+- A refused row comes back as ITSELF: `old == symbol`, no description,
+  `confident=False`, plus a human-readable `Split.reason` naming the decoded
+  contract. `apply_splits` and `_rekey` act only on a key change or a
+  description, so such a row has nothing either could execute -- the guarantee
+  is structural, not a matter of the caller behaving. `security_aliases`
+  semantics are untouched (rename only, 5.8e-2a).
+- The securities dialog shows refused rows **unticked and not tickable**,
+  sorted together at the foot of the list rather than interleaved with real
+  proposals, with the reason text in its "What happens" column; a count line at
+  the top reads "N securities: X proposed changes, Y left alone", naming how
+  many of those are option contracts. Apply semantics are unchanged.
+- **Letter case alone is never a proposal.** A stored spelling that differs from
+  its proposed identity, or a description that differs from the one already
+  recorded, by nothing but case is not a change: the row is shown unticked, not
+  tickable, counted as left alone, and no re-keying or re-naming happens. The
+  ONE exception is two DISTINCT stored rows whose spellings fold together
+  (`vgt` and `VGT`), which are one security stored twice and stay proposed as a
+  merge with a reason saying they differ only in case. User-reported: "requiring
+  approval to change case is annoying and stupid ... this just clutters the
+  table."
+- **Held periods are shown, and an overlap disqualifies a rename.** The
+  proposals table carries a **Held** column giving, per stored symbol, the date
+  ranges during which it actually had a position and in which direction
+  (`2004-03-12 - 2011-07-01`, an open one as `... - present`, a short one marked
+  `(short)`); at most three are spelled out, the rest counted, with the full
+  list in the cell's tooltip, and a symbol with no quantity rows shows nothing.
+  Ranges come from `investments.held_ranges`, which replays that stored
+  spelling's `investment_transactions` in date order in Decimal: a range opens
+  when the running quantity leaves zero, closes on the date it returns, and the
+  sign gives the direction. The user's ask: *"What would be helpful for the
+  securities table is if it showed the date ranges when it was owned (long or
+  short). Then you could disqualify a name change proposition if the time ranges
+  overlap."* So `securities.suggest_all` **refuses** any proposal that changes
+  the identity key when the target identity also exists as a distinct stored
+  symbol with held ranges of its own and ANY range of the two overlaps
+  (inclusive dates; an open range extends to today) -- two securities held at
+  the same time are not one renamed to the other. The refusal takes the same
+  shape as the option one (`old == symbol`, no description, non-actionable) with
+  a reason naming the other symbol and the overlapping period. Two EXEMPTIONS:
+  a case-only twin merge (above) is one security by definition and its total
+  overlap is evidence for the merge, not against it; and a target identity that
+  exists nowhere else in the data has no ranges and so can never overlap, which
+  leaves the ordinary rename-to-its-ticker case untouched.
+- **A proposal that would affect zero rows is never offered.** The proposals
+  table carries a **Rows** column counting the stored rows that carry the
+  spelling in "Stored as" -- the same key `apply_splits` and `_rekey` act on, so
+  the number states exactly how much approving the row would move. A row reading
+  **0** moves nothing and is therefore shown unticked and not tickable, counted
+  as left alone, with a "What happens" text saying plainly that it exists in the
+  security catalog only and no transaction, holding or price row uses it (or,
+  for a spelling nothing at all carries, that nothing carries it) -- never
+  described as a change worth approving. The usual source is a `securities`
+  catalog row that outlived its data: `suggest_all` draws its symbols from the
+  union of the symbol-bearing tables AND that catalog, and the catalog keeps
+  entries whose transactions were deleted, or that the allocation feature
+  recorded and nothing else ever used. `securities._settle_unused` runs last,
+  after the case and held-range passes, and reads the SAME `usage_counts` the
+  dialog displays, so the count on screen and the decision to offer the row
+  cannot drift apart; the refusal takes the established shape (`old == symbol`,
+  no description, non-actionable) so there is nothing to execute even if a
+  caller passes the whole list back. It is tallied separately from the option
+  contracts ("N used by no transaction, holding or price") because a catalog
+  orphan is not an option. Nothing is deleted or cleaned up -- the row is
+  listed, just not proposed. User-reported: *"I'm seeing a row that says 0
+  description recorded. Why would you propose something if it affects 0
+  items?"*
+- Covered by `mammon/tests/test_securities_legacy_options.py`,
+  `mammon/tests/test_securities_case.py`,
+  `mammon/tests/test_securities_ranges.py` and
+  `mammon/tests/test_securities_dialog.py`, plus the legacy decoder cases in
+  `mammon/tests/test_instruments.py`.
+
+
 ### 5.8e-3 Downloaded prices: as traded for DIVIDENDS, restated for SPLITS
 - `YFinanceQuoteSource` passes **`auto_adjust=False`** on both `get_quotes` and
   `get_history`. yfinance defaults it to True (1.7.0), returning a total-return
@@ -1302,14 +1875,281 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   deleting a split entered by accident could not put the old numbers back, and a
   second pass over the same history would divide twice. Recomputing from the
   split rows means editing or deleting one self-corrects the whole series.
-- **`latest_price` is deliberately NOT adjusted.** It prices a holding at a given
-  date against a share count replayed as of that same date, which has not had a
-  later split applied to it either; pre-split shares x pre-split price is the
-  consistent pairing, and a current valuation reads a post-split row on both
-  sides. Only the series that is DRAWN needs one common scale.
+- **`latest_price` reads on the share scale of the date it values** (corrected
+  2026-09-15). It prices a holding against a share count replayed as of that
+  date, which has every split up to that date applied and none after. So an
+  as-traded row is divided by the splits between its own date and the valuation
+  date, and a provider row -- already in today's units -- is multiplied back up
+  by the splits after the valuation date. It used to return every row raw, on
+  the reasoning that pre-split shares pair with pre-split prices; that holds
+  only for as-traded rows. A provider's back-adjusted close paired with the
+  pre-split share count valued a holding's shares before its 8:1 split at an
+  eighth of their worth, and the Investment Performance report measured from a
+  date inside that year showed a gain near 1,000% where the real figure was
+  under 30%. Every past-date valuation --
+  net worth history, the performance report's period start, allocation at a
+  date -- goes through this read.
+- **The split lookup is indexed** (migration 71, a partial index over split rows
+  alone). `latest_price` asks for a security's splits on every read, and
+  filtering by identity in SQL scanned every investment row: net worth history
+  took three times as long. `_split_events` fetches the split rows through the
+  index and matches identity in Python; the query's WHERE must stay textually
+  identical to the index's for SQLite to use it, and a test checks the plan.
+- **Known limit: a provider row fetched BEFORE a split is as traded, not
+  restated**, but its source says provider, so both reads treat it as today's
+  units once a split is recorded after its date. Re-fetching the history after
+  the split replaces those rows (`REFETCHABLE_SOURCES`) and restores one scale.
 - Covered by `mammon/tests/test_price_history_split_adjust.py` (the reported 8:1
   life cycle, the boundary date, compounding splits, a 3:2 ratio, a security with
-  no splits, the bounds read, and the plotted chart series).
+  no splits, the bounds read, the plotted chart series, past-date valuations on
+  both sides of a split, the performance report's period gain, and the index).
+
+
+### 5.8e-5 What an option position is WORTH (quantity x premium x multiplier)
+A quoted option premium is per UNIT of the underlying, and one contract controls
+`multiplier` units. Valuing ten contracts at a 4.20 premium as $42.00 instead of
+$4,200.00 is the net-worth error this section exists to stop.
+
+- **One chokepoint.** `investments._market_value(conn, symbol, qty, price)` is
+  the only place in the module where a quantity meets a price, and it is the
+  only place the multiplier is applied. `holding_values`, `_value_position`
+  (`security_positions`) and `holding_values_at` all route through it, so the
+  Holdings window, the register footer and a historical valuation cannot
+  disagree about a contract.
+- **The multiplier is READ, never assumed.** `securities.contract_multiplier` is
+  the one reader that knows a NULL multiplier column means 1 for a share and
+  UNSTATED for a contract; `investments.contract_multiplier` wraps it with
+  identity resolution and turns the UNSTATED sentinel into `Decimal(1)`, because
+  a valuation site cannot multiply by a sentinel. It does **not** guess 100: a
+  mini, an index contract and one adjusted for a split are exactly the cases a
+  guess gets wrong by 100x silently. The gap is reported instead (5.8e-6).
+- **A SHORT position signs as a liability.** A written contract is an
+  obligation, so its market value SUBTRACTS from net worth. This needs no
+  special case and gets none: `rebuild_holdings` keeps a negative quantity (it
+  drops only `qty == 0`), the sign flows through `_market_value`, and nothing on
+  the path takes an absolute value.
+- **Everything stays exact.** Quantity, price and multiplier are Decimal;
+  rounding is HALF_UP at the cents boundary; the result is signed integer cents.
+- **Known gap (Task 55 territory):** `_cost_of`/`_proceeds_of` use the row's
+  recorded `amount` when it has one -- the normal case, and already correct --
+  but their `price * qty` FALLBACK for a row with no amount is multiplier-blind.
+  `_apply_txn` takes no connection, so making the fallback kind-aware is a
+  refactor that belongs with the exercise/assignment/expiration basis rules, not
+  here. Only an option row imported without a cash amount is affected.
+- Covered by `mammon/tests/test_options_domain.py` (the x100, a x10 mini, a
+  short position at both the holding and the account rollup, all three valuation
+  entry points agreeing, and NULL-kind twins that must still value at x1).
+
+
+### 5.8e-6 An option position the data says cannot be true
+A contract that is still open after its expiration date is a DATA ERROR: the
+closing transaction -- exercise, assignment, a closing trade, or expiring
+worthless -- is missing from the ledger. The program reports it; it does not
+repair it.
+
+- **`investments.option_position_problems(conn, account_id, as_of=None)`** is
+  read-only and returns `OptionPositionProblem` records
+  (`account_id, symbol, quantity, problem, as_of, expiration, detail`). Two
+  problems today: `OPTION_PROBLEM_EXPIRED` (nonzero position past its recorded
+  expiration, long or short) and `OPTION_PROBLEM_NO_MULTIPLIER` (a classified
+  option with no recorded multiplier, so it is being valued at 1x -- 5.8e-5).
+- **Neither silently carried forward nor silently zeroed.** Zeroing it would
+  invent a disposal, a realized gain and a tax year the user never recorded;
+  carrying it silently shows an expired contract as a live asset forever. Both
+  are wrong in a way the user cannot see, so the position is left exactly as
+  recorded and the discrepancy is surfaced for them to resolve.
+- **A NULL-kind row is never reported.** UNCLASSIFIED is not "option", so an
+  un-backfilled ledger returns an empty list and nothing new appears in front of
+  the user until they classify a row (5.8e-2b).
+- Covered by `mammon/tests/test_options_domain.py` (long and short past
+  expiration, nothing before it, a closed position never reported, the missing
+  multiplier, and that reporting leaves the replayed position and its realized
+  P/L untouched).
+
+
+### 5.8e-7 How an option ends: exercise, assignment, expiry
+An option has four ways out that a share has no analogue for, and in three of
+them **the premium does not become a gain or a loss -- it moves.** These are the
+lot and basis rules (IRS Pub 550, "Options"); getting them wrong misstates the
+cost basis of shares the user may hold for a decade afterwards.
+
+- **The vocabulary is eight new actions**, stored in
+  `investment_transactions.action` like every other action and normalized the
+  same way: `Buy to Open`, `Sell to Close`, `Sell to Open`, `Buy to Close`,
+  `Exercise`, `Assign`, `Expire`, `Expire Short`. They are NEW spellings -- no
+  pre-existing ledger row carries one -- which is why the replay branches need no
+  kind test to stay safe on an unclassified ledger. The explicit `kind='option'`
+  gate lives in the writers.
+- **The rules, one row each:**
+
+  | Ending | Result |
+  |---|---|
+  | Long call exercised | Shares acquired at `strike + premium` |
+  | Written put assigned | Shares acquired at `strike - premium` |
+  | Long put exercised | Shares sold, premium reducing the proceeds |
+  | Written call assigned | Shares sold at `strike + premium` |
+  | Long option expiring | Proceeds of zero: the loss is the whole premium |
+  | Written option expiring | Gain of the whole premium, always SHORT-term |
+  | Closing trade (`Sell to Close` / `Buy to Close`) | Ordinary realized gain on the premium difference, x the multiplier |
+
+  The exercised or assigned contract's own holding period is **discarded**: the
+  share lot is dated the day of the exercise, and what matters afterwards is how
+  long the shares are held.
+- **`investments.record_option_exercise(conn, account_id, date, symbol,
+  quantity=None, *, memo=None)`** writes the exercise or assignment as **two
+  rows, and they are two for a reason.** The share leg is a plain `Buy`/`Sell`
+  carrying the adjusted figure, so lots, lot method, realized gain,
+  reconciliation and the register all apply to it with no option awareness
+  whatsoever. The option leg (`Exercise` when long, `Assign` when short) closes
+  the contract, books **no** realized gain, and carries the SIGNED premium being
+  rolled. That makes the pair cash-neutral on the premium: writing the share leg
+  at the adjusted basis alone would charge the user a premium that already left
+  the account when the contract was bought. `quantity` is in CONTRACTS and
+  defaults to the whole position; the share leg is `quantity x multiplier` units
+  of the underlying. It refuses a contract with no recorded right, no strike, or
+  **no underlying** -- a cash-settled index contract has nothing to deliver and is
+  closed with `Sell to Close` or an expiry, never an exercise -- and refuses any
+  combination that would give the shares a negative cost or proceeds.
+- **`investments.record_option_expiration(conn, account_id, date, symbol,
+  quantity=None, *, memo=None)`** writes ONE row, no cash, and **no shares**: an
+  expiring contract that leaves a phantom share position behind is the classic
+  option-as-a-share bug. It picks `Expire` or `Expire Short` from the position's
+  sign, so the caller cannot get it wrong. **Expiry is two actions rather than one
+  whose direction is read off the position** because a share-quantity row has to
+  state its own direction: the share reconciliation sums `share_qty_delta` per
+  row with no position to consult, so a single `Expire` would be counted with the
+  wrong sign for one of the two sides and would silently disagree with the
+  replay. Split in two, each expiry is an ordinary removal or an ordinary cover
+  and every existing path is already correct.
+- **A share leg's price is the contract's, not the market's**, so it never
+  becomes price history (5.5f).
+- **A written option's gain is short-term however long it was open.** Writing an
+  option is not holding property, so no holding period runs (`RealizedGain
+  .term_override`). Without this a LEAPS written two years ago and expiring
+  worthless would report a long-term gain -- wrong on the tax form.
+- **A written contract is relieved against its own short lots**, so the credit
+  released is lot-exact rather than the position average; a short position
+  carries negative quantity and negative cost, and `holdings_checkpoints` already
+  serializes lots, so short lots round-trip.
+- **Commission is not accepted by either writer.** An exercise fee is its own
+  row: folding it into an amount that also encodes a basis roll makes both
+  unreadable.
+- **Neither writer creates a `securities` row** for the underlying, and neither
+  rebuilds holdings -- call `rebuild_holdings` after. An unclassified underlying
+  stays UNCLASSIFIED (5.8e-2), which is the point.
+- Known gap, inherited from 5.8e-5: `_cost_of`'s `price x quantity` fallback is
+  not multiplier-aware, so an option row must carry an explicit `amount`.
+- Covered end to end by `mammon/tests/test_option_lifecycle.py` (one test per row
+  of the table above, plus the cash-settled refusal and a stock with two
+  contracts on it staying three independent positions, price series and
+  reconciliations).
+
+
+### 5.8e-8 Options in front of the user: holdings, the expiry cue, the verbs
+The domain sections above make a contract a first-class position; this one is
+what the user actually sees. Everything here keys off `securities.kind ==
+'option'` and NOTHING else -- not the shape of the symbol, not the presence of a
+multiplier. **An account holding no classified contract renders exactly as it
+did before options existed**, columns, titles and colors unchanged, which is the
+whole of an unclassified 40-year ledger.
+
+- **`investments.holdings_view(conn, account_id, as_of=None, prices=None,
+  soon_days=7)`** is the single read the UI makes. It returns `HoldingLine`
+  records wrapping each `held_positions` row with what a display needs and
+  cannot work out for itself: `is_option`, the `group` it sorts under, the terms
+  (`underlying`, `expiration`, `strike`, `right`, `multiplier`), the `problems`
+  reported for it, and a `cue`. When no line is an option it returns the
+  positions in plain symbol order and asks nothing further -- the unclassified
+  ledger pays neither an extra query nor a reordering.
+- **A contract sorts UNDER its underlying and counts SEPARATELY.** The sort key
+  is `(group, options-after-shares, expiration, strike, symbol)`, so `ACME` is
+  followed by the contracts written on it, oldest expiry first. `grouped` marks
+  a row whose underlying is itself held, and the holdings table indents that
+  row's symbol -- indentation only, because folding a contract into the share
+  count is the option-as-a-share bug in its most expensive form: 2 contracts on
+  100 shares are 2 contracts, never 300 shares. The un-indented true symbol
+  stays on the cell in `Qt.UserRole`, so charting an indented row charts that
+  contract.
+- **Its value is its own.** The Shares column reads CONTRACTS and the Price
+  column the per-share PREMIUM (the two columns are retitled "Shares /
+  Contracts" and "Price / Premium" when the account holds a contract); the
+  Market Value column is whatever `_market_value` returned, which is
+  `contracts x premium x multiplier` (5.8e-5). Three columns appear alongside --
+  Expires, Strike, Right -- and the arithmetic that is not visible in any of them
+  is spelled out in the row's tooltip, because a market value 100x a premium the
+  user can see is otherwise indistinguishable from a bug.
+- **A written contract reads as a liability.** Negative contracts, a negative
+  market value, and the row drawn in `ui/style.negative_color()` -- the same
+  theme color a negative balance uses, resolved at paint time so it is legible
+  in dark mode. Nothing here hardcodes a color.
+- **The expiry cue is SOURCED, not re-derived.** `holdings_view` calls
+  `option_position_problems` twice, once at `as_of` and once at
+  `as_of + soon_days`; a position reported at both is `expired`, one reported
+  only at the horizon is `expiring`, and the difference is the whole rule. There
+  is no second expiry comparison anywhere in the UI to drift from 5.8e-6. An
+  expired row is drawn in the negative color and an expiring one in the accent
+  color, and both carry the problem text as a tooltip.
+- **The register offers option verbs for an option row only.** Choosing a
+  security whose kind is `option` appends the four open/close verbs plus
+  Exercise, Assignment and Expire worthless to the action combo; choosing
+  anything else -- including any unclassified security -- removes them again and
+  leaves the pre-existing list byte for byte. `InvestmentTransactionDialog
+  .action_codes()` is the seam a test reads. Editing an existing row sets the
+  SYMBOL before resolving the action, or an option row's verb would find no
+  match and be offered as an "(as imported)" stray beside the real one.
+- **The three endings are routed to their domain writers**, not to
+  `record_investment`: Exercise and Assignment to `record_option_exercise` and
+  Expire worthless to `record_option_expiration` (5.8e-7), so the premium roll,
+  the share leg and the short-lot relief keep their single implementation. The
+  pair share one writer, which reads long-vs-short off the position, so a user
+  who picks the wrong one of the two still gets the right rows. A refusal from
+  the writer is shown as a warning and the row is not written.
+- **The UI writes NONE of the kind columns.** `securities.set_kinds` remains the
+  only writer of `kind`, `multiplier`, `underlying`, `expiration`, `strike`,
+  `option_right` and `kind_source` (5.8e-2).
+- Covered by `mammon/tests/test_options_ui.py`, which builds a synthetic ledger,
+  establishes the positions through the ordinary domain path, and asserts
+  grouping, the separate contract count, the terms and premium, the short row's
+  liability color, and the three cue states -- each with a **NULL-kind twin**
+  account whose symbol is deliberately OSI-SHAPED but unclassified, proving the
+  display keys off the kind and not the string.
+
+
+### 5.8e-9 Options and allocation: excluded, and SAID SO
+An allocation answers "where is my money", and a contract answers it badly in
+both directions. Counting one call as 100 shares of its underlying invents
+exposure the premium never bought -- $400 of premium becomes $1,200 of "domestic
+stock" and every percentage on the screen is wrong. Dropping it silently is no
+better: the user holds the position, and an allocation that omits it without
+saying so is a lie about the ledger. **The rule is exclusion plus a visible
+note.**
+
+- **`portfolio.allocation` removes an option contract from every number** it
+  reports -- `total`, `by_class`, `by_security`, and each account's slice --
+  before any of them is computed. The domain layer owns this, so the MCP tool
+  (7.3), the allocation view and `rebalance.drift` (5.8f, which builds on
+  `allocation`) all inherit one implementation and cannot drift apart.
+- **Excluding is not the same as being unpriced.** A contract with a price is
+  not reported in `unpriced`; it was valued perfectly well (5.8e-5) and then
+  deliberately left out.
+- **`Allocation.excluded_options`** names what was removed: `(symbol, cents)`
+  pairs carrying each contract's premium value, ordered by value descending then
+  symbol, with `option_value` their sum. A short contract's value is NEGATIVE
+  there, exactly as it is everywhere else.
+- **`Allocation.options_note` is the sentence a presenter shows verbatim**
+  beside the percentages, naming the excluded contracts and their premium value.
+  It is `""` when nothing was excluded -- an allocation holding no contract says
+  nothing about options at all, which is the whole of an unclassified ledger.
+- **Only an EXPLICIT `kind='option'` is removed**, tested through
+  `investments.is_option` and nothing else. A NULL-kind row allocates exactly as
+  it always did even when its symbol is OSI-shaped, because `kind IS NULL` means
+  unclassified, never "option" and never "equity" (5.8e-2).
+- Covered by `mammon/tests/test_portfolio.py` and
+  `mammon/tests/test_mcp_tools.py`: a synthetic ledger holding shares, a long
+  call and a short put asserts the exclusion, the named premium values and the
+  note, each with a **NULL-kind twin** whose symbol looks like a contract and is
+  still allocated -- and which, once classified, moves to the excluded list with
+  the multiplier applied.
 
 
 ### 5.8f Target asset mix and drift (SRD 5.8f)
@@ -1318,21 +2158,74 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   where I meant it to be", which is the question an allocation view exists to
   serve -- classes are worth separating because they behave differently, and the
   payoff for holding several is keeping them at chosen weights as they diverge.
-- Migration 44: `allocation_targets` (name, active, sleeve, the two bands) and
+- Migration 44: `allocation_targets` (name, active, sleeve, the two bands, and
+  v74's `rebalanced_on`), `allocation_target_accounts` (v74) and
   `allocation_target_lines` (`target_id, asset_class, pct`), shaped like
   `budgets`/`budget_lines`. Several NAMED targets, at most one active.
   Percentages are **Decimal-encoded TEXT**, like share prices: a mix is a precise
   quantity the user typed, and float drift in numbers that must total 100 shows
   up as phantom deviation.
-- **The sleeve.** A target governs the accounts it can be applied to
-  (`TARGET_SLEEVES`: `investments`, `with_cash`). `everything` is deliberately
-  absent -- a target including a house is a target you cannot rebalance to.
-  Property comes back in `DriftReport.fixed_rows` as CONTEXT, computed from the
-  asset accounts in their own right (NOT as "everything minus the sleeve", which
-  would count a chequing balance outside an investments-only sleeve as an
-  untradeable holding). A drift number dominated by an illiquid position is not
-  actionable, which is the failure most tools avoid only by not knowing the house
-  exists.
+- **The accounts are the user's, and they hold one kind of money** (migration 74,
+  four defects reported together on 2026-09-15).
+  - *"This mixes kinds of money. 401K + IRA shouldn't be mixed with ROTH which
+    shouldn't be mixed with non-tax special holdings."* `accounts.tax_treatment`
+    records which of `TAX_TREATMENTS` an account holds -- taxable, tax-deferred,
+    Roth, or special-purpose (529, HSA, money held for others) -- set in Account
+    details and never guessed from a name ("IRA" appears in Roth IRAs too).
+    `set_target_accounts` REFUSES a set holding more than one treatment, naming
+    them: averaging a Roth dollar with a 401(k) dollar hides that the Roth is all
+    bonds, and the two are rebalanced apart because they are taxed apart. An
+    account with no treatment set may still be chosen -- saying what it is, is a
+    separate decision.
+  - *"There is no customization for accounts. I wouldn't want to include the
+    [529] accounts here as those are for my kids."* `allocation_target_accounts` is the
+    target's own account list, picked from a check-list grouped by treatment. No
+    scope rule can know whose money an account holds.
+  - This REPLACES the `sleeve` enum, whose fourth defect was its own: *"The
+    difference between investments and cash and investments is unclear, as both
+    have cash, yet the advice changes."* Both values included cash -- a
+    brokerage's idle cash is cash -- so the difference was invisible while the
+    advice moved. Cash is now in the mix exactly when its account is ticked. A
+    target with no account list still reads its stored sleeve, so a file made
+    before this keeps working until its accounts are chosen, and the window says
+    so ("chosen by a rule, not by you").
+  - Property comes back in `DriftReport.fixed_rows` as CONTEXT, computed from the
+    asset accounts in their own right (NOT as "everything minus the sleeve", which
+    would count a chequing balance outside the chosen accounts as an untradeable
+    holding). A drift number dominated by an illiquid position is not actionable,
+    which is the failure most tools avoid only by not knowing the house exists.
+- **Each class expands into its holdings** (`ClassDrift.holdings`,
+  `HoldingDrift`). *"If the goal is to rebalance ... wouldn't it also make sense
+  to show which assets within the asset class have changed the most as those may
+  be the ones we'd want to sell/buy?"* Each holding carries its account, its
+  value, its share of the class and its CHANGE over the span -- total return,
+  dividends included (`portfolio.holding_performances`). The span is
+  `allocation_targets.rebalanced_on`, the date the user last acted ("Rebalanced
+  today"), falling back to the last year until one is set: what has moved since
+  you last rebalanced is exactly what put the class off target. A security split
+  across classes contributes its parts, and its change splits the same way. The
+  window proposes no per-holding trade -- which to sell is the user's call, and a
+  split of a class's dollars across its holdings would read as advice.
+- **The unclassified bucket is never traded or banded** (`ClassDrift.is_unclassified`,
+  action `classify`). It is not a class anyone holds: it is the stock slice of a
+  fund whose domestic/international split nobody has set (SRD 5.8g) plus any
+  security with no class. Judged against a band it produced a bold red "Sell"
+  of six figures for securities whose only problem was a gap in the records, and
+  it is left out of `to_move_cents` for the same reason.
+- **Holdings with no price are named** (`DriftReport.unpriced`). They count as
+  zero in every percentage, so silence about them made the whole mix wrong: a
+  wallet's coins valued at nothing because their prices were filed under the bare
+  symbol instead of the `SYM-USD` pair (SRD 5.8j).
+- **A crypto account is valued as crypto** (`portfolio.allocation`). It used to be
+  valued with the brokerage rule, which reads the cash `transactions` legs and
+  cannot see `crypto_transactions`: an exchange whose own balance was zero came
+  out as tens of thousands of NEGATIVE cash, and dragged the "no holdings
+  recorded" note with it.
+  One valuation per kind of account, the same one the accounts list and net worth
+  show.
+- **A stored percentage never carries an exponent.** `_pct_text` formats with
+  `format(..., "f")`: `Decimal.normalize()` turned 70 into `"7E+1"`, the same
+  stored-exponent defect that made an option multiplier read `1E+2`.
 - **Hidden accounts count for zero** in BOTH halves -- the sleeve and the
   property context (`scope_account_ids`/`list_accounts` with
   `include_hidden=False`, matching `net_worth`). Hiding is how a user flags
@@ -1416,6 +2309,21 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
 
 
 ### 5.8g Asset-class mixture per security (SRD 5.8g)
+- **The equity slice follows the class the security carries NOW**
+  (`security_mix._settle_stock_slice`, read-time, 2026-09-15). A provider states
+  what fraction of a fund is stock, bond and cash but never the domestic/overseas
+  split, so the stock slice is filed under the class the user gave that security;
+  with none, it is stored as `unclassified` and shown as such. Stored is not
+  settled, though: a fund marked `bond` by mistake when its composition was
+  fetched froze nearly all of itself into `unclassified`, and setting its class
+  afterwards changed nothing until someone re-fetched (user-reported: "when I
+  expand Unclassified it shows [a fund] ... but the other funds in that account
+  are listed under Domestic stock"). The read now moves the slice onto whatever
+  STOCK class the security carries, so the correction takes effect at once and
+  un-setting the class puts it back. Same principle as the split adjustment
+  (5.8e-4): the stored row is the source's statement, the read is what it means
+  today. A non-stock class never absorbs the slice -- `bond` is how the fund got
+  there.
 - **One security is not always one class.** A target-date fund is roughly 58%
   equity / 40% bonds / 2% cash. Counting the whole position under a single class
   does not merely coarsen the allocation, it makes every drift figure in
@@ -1887,6 +2795,24 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
     effect of a Buy/Sell), Cash Bal, Fee, Memo.
   - **WALLET** (a single address) — Date, Action, Coin / Wallet, Payee, Transfer,
     Memo, Coin Out, Coin In, Coin Bal, Fee.
+- **A crypto event keeps its time of day, and a day is ordered by it**
+  (migration 70, user request 2026-09-15: "Crypto has precise time, not just the
+  date. Sort by time as the primary key with balance as the secondary key.").
+  Every crypto source states the moment -- a block explorer's `UnixTimestamp`,
+  an exchange's `Timestamp` -- and the importers used to keep only the date.
+  `crypto_transactions.time` is `HH:MM:SS` on the same clock as `date` (UTC for
+  every current source; `importers.record.stamp_time` reads it from the same
+  stamp the date comes from), NULL when unknown, and a writer refuses anything
+  not in that form because the column is sorted as text. It rides a queued
+  review row (`review_items.time`) to the accept. The register orders by date,
+  time, cash-sleeve effect high to low, id (5.1b); the replay by date, time, id.
+  A row with no time sorts ahead of the timed ones on its day.
+- **Re-importing an export gives its rows their time back.** Rows imported before
+  migration 70 have none. The same file's hash identifies each event exactly, so
+  a re-import (direct, `crypto_core`; or through review,
+  `import_review.fill_crypto_times`) stamps the stated time on a posted row and
+  its transfer pair, and on a still-pending review row, and never replaces a
+  time already recorded. Holdings are rebuilt because the day's order may change.
     **The wallet register omits Price, Amount and Cash Bal** -- they are ABSENT, not
     blank. For a paper-wallet address there is no per-row USD, no fiat leg and no
     cash sleeve, so those columns are not merely empty — they invite a reading of
@@ -2120,6 +3046,68 @@ Quicken can export its own data; we import that. Options and their limits:
 - User to provide a representative sample export (a few accounts incl. one
   investment) so the parser is built and validated against real data.
 
+#### 6.2a What a fresh QIF import has to get right (2026-09-15)
+Other people will import their own Quicken history with no one to repair it
+afterwards, so the import itself has to land what Quicken held. Two sources of
+truth, and only these: the QIF specification (Quicken's own `QIF_Specification`
+document) for what a field means, and the balances Quicken itself reports for
+the same data. Never a ledger someone has since corrected by hand.
+
+- **The acceptance test.** Import every yearly export into an empty database and
+  compare against Quicken's reports: every non-investment account's balance at
+  several dates, and for investment accounts the SHARES of each security and the
+  cash -- not market value, which depends on prices Quicken may never have
+  exported. It runs locally against a real history and is never committed; each
+  fix it drove has a synthetic regression test. Last run (2026-09-15, the full
+  yearly set): every non-investment balance and all investment cash matched Quicken
+  at every date checked, and every share balance but six, which are exactly
+  the six "removed but not held" findings below.
+- **A transfer's other side is created only when the file carries no register for
+  that account at all** (`core._counterparty_absent`). Keyed by account and date,
+  a register the file DID carry but with nothing on that day counted as absent
+  and the other side was invented, doubling the money in the other account. That
+  is common in Quicken's exports: two sides of a card payment dated days apart, a
+  transfer whose other side is in next year's file. The file's register list
+  (`QifExtras.registers`) counts a register section even when it holds no
+  transactions.
+- **An opening balance counts from its date** (5.2b).
+- **An option's units come from its own trades** (5.8e-2, "multiplier"): Quicken
+  exports have `T = Q x I`, so the observed multiplier is 1 however the source
+  counted `Q`.
+- **A security's name is normalized once, the same way in every section.** The
+  `!Type:Security` master, the `Y` field of each trade and the `!Type:Prices`
+  fallback all go through `normalize_security_name`; left raw, the standard
+  option symbol's padded root ("ACME  260417C00045000") made the master one
+  security and its trades another, and almost no contract was recognized as an
+  option.
+- **An omitted item is blank.** The specification: "If an item is omitted from
+  the transaction in the QIF file, Quicken treats it as a blank item." A buy or
+  sell with a quantity and a price but no `T` moved no cash; Quicken writes an
+  option's expiry or assignment removal that way. Its cost or proceeds are zero
+  (`investments._states_no_cash`), so the whole premium is realized, instead of
+  quantity x price being charged as cash that never moved.
+- **The price list's strike closes are dropped** (5.5f), in whatever order the
+  yearly files arrive.
+- **What the import cannot settle is reported with it** (`reports/import_audit.py`,
+  shown under "Worth checking" in the import-complete message, audited once
+  after a whole set of files). The person importing is the only one who can
+  resolve these, and each was a real discrepancy against Quicken:
+  - *Shares removed that were not held*: a position that ENDS negative, dated
+    by the removal that last took it below zero. Quicken exports a plan fund
+    under two spellings across the years, so fee removals land on a name that
+    never received the purchases; or the arrival before a removal was exported
+    with no `Q`. Judged at the end of each day, and only for a position that
+    stays negative, so a same-day sale ahead of its purchase and an old-style
+    short (Sell, later Buy) are not reported. Written options are exempt.
+  - *Shares that arrived with no cost basis*: a `ShrsIn`/`AddShares`/`XIn` with
+    no price and no amount -- the new shares of a merger, as Quicken writes them.
+  - *Holdings with no recent price*: held in an open account, newest price more
+    than 90 days older than the newest price in the ledger (not today: an old
+    export is uniformly old). Quicken does not export every valuation it holds.
+  - *Options whose contract size the trades do not settle*: no trade shows what
+    quantity x price is in cash, so the value rests on the symbol's multiplier.
+    A person's own classification is not reported.
+
 #### 6.3 Ongoing import formats
 - QFX/OFX: the standard bank/CC/investment download format (SGML/XML). Direct
   parser -> normalized records. Preferred for institutions that offer it.
@@ -2130,6 +3118,40 @@ Quicken can export its own data; we import that. Options and their limits:
   as the exact-dedup key. See Section 5.8i for the import rules (gas attribution,
   historical FMV, own-wallet transfer detection).
 - JSON: canonical schema for webSlinger-scraped sites (Section 7.2).
+
+#### 6.3a Option contracts in an OFX/QFX investment statement
+- **The statement's `<SECLIST>` is the contract's definition.** An `<OPTINFO>`
+  states OPTTYPE, STRIKEPRICE, DTEXPIRE, SHPERCTRCT and the UNDERLYING's SECID;
+  the parser resolves it into the canonical OSI symbol (5.8e-2) and the
+  deliverable, keyed by UNIQUEID beside the existing CUSIP->ticker resolution, so
+  a transaction that names its security only by CUSIP still lands on the contract.
+  An `<OPTINFO>` carries TWO SECIDs -- its own and the underlying's -- and they
+  are told apart by POSITION; a flat scan reports the option as its own
+  underlying and aliases the contract onto itself. Where the feed states terms
+  too incomplete to name a contract (a pre-2010 OPRA symbol), what the spelling
+  does say is kept, the rest stays unknown, and the broker's own text remains the
+  symbol: an invented contract is worse than an unparsed one.
+- **`<BUYOPT>`/`<SELLOPT>` are imported, not dropped.** They were formerly
+  unmapped: reported by the unmapped-action audit and then discarded, which left
+  an options account's holdings permanently wrong. Their OPTBUYTYPE/OPTSELLTYPE open/close
+  flag is load-bearing and not cosmetic: a SELLTOOPEN WRITES a contract (a short
+  position), and importing it as a plain sale relieves units the account never
+  held and invents a realized gain out of the premium. Units are carried as a
+  MAGNITUDE: OFX signs them, but direction lives in the action alone, and the
+  domain layer negates a sale's quantity itself -- a negative quantity on a Sell
+  would ADD contracts to the position.
+- **`<CLOSUREOPT>` ends the position with its real outcome.** An expiry realizes
+  the whole premium (a disposal at a price of zero, or a cover of a written
+  contract); an assignment covers a short, since only a writer can be assigned;
+  an exercise is the one deliberately cash-neutral case, because its premium
+  becomes part of the basis of the shares arriving on the leg named by RELFITID,
+  which is carried through so the two halves can be tied together. Treating all
+  three as one cash-neutral removal, as the parser formerly did, discards the only
+  realized result an option position ever has.
+- These map onto the EXISTING action vocabulary (Buy / Sell / ShtSell / CvrShrt /
+  RemoveShares) -- no new action, no schema change. The parsed contract terms and
+  the RELFITID link ride on the normalized record (6.4) and are not yet persisted;
+  the handoff to the v67 `securities` columns (5.8e-2) is a later step.
 
 #### 6.4 Normalized import record (all parsers converge here)
 Cash transaction:
@@ -2439,6 +3461,26 @@ Investment transaction adds: action, symbol, quantity, price, commission.
   ledger, 552 of 599 `ShrsOut` rows carry no price at all.
 - A share move stating only a share count yields nothing, and nothing is
   invented for it.
+- **The share side of an option exercise or assignment is never learned as a
+  price** (`investments.option_delivery_leg_ids`, 2026-09-14). It changes hands at
+  the strike, or at strike +/- premium once the premium is rolled (5.8e-7), not at
+  market. Quicken makes this mistake in its own price list, recording the strike
+  as the close on assignment days, and a migrated ledger carried dozens of such
+  closes tens of percent away from the market. Two shapes
+  are recognized, both only for a contract explicitly classified
+  `kind='option'` with its underlying recorded: Mammon's own `Exercise`/`Assign`
+  pair, and the broker/Quicken pair of a share row priced at the strike plus an
+  unpriced, zero-amount close of that contract the same day. Shares match
+  one-for-one (Quicken counts option quantity in shares) or as contracts x
+  multiplier. A round-priced trade with no matching close keeps its price. The
+  accept-match price fill in review applies the same test.
+- **The strike closes already in a price list are removed at import**
+  (`investments.drop_delivery_strike_closes`): a recorded close equal to a
+  recognized share leg's price on its day. It runs after each file's rows and
+  prices have landed, over every account trading a symbol that file priced, not
+  only the accounts it traded in -- every yearly Quicken export repeats the whole
+  price list, so a later file with no rows for an account re-added the closes an
+  earlier import had removed.
 
 
 ### Implementation notes
@@ -3019,6 +4061,30 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   different bills that share a day. The suppression is one-directional: what
   the user defined always wins, an entered row and a reminder are never
   dropped, and two definitions never suppress each other.
+- **One payee can be several bills, and is predicted as several.** A payee
+  whose history is really several interleaved series — a phone carrier paid for
+  four family members in rotation, each line billed every four weeks, so the
+  payee posts about weekly — was read as ONE much-too-frequent series: a weekly
+  payment of an arbitrary amount, four estimates a month matching no real bill.
+  So a payee's rows are clustered into SUB-STREAMS before any interval is
+  fitted (`predictions.split_substreams`) and each sub-stream is fitted,
+  amounted and predicted on its own. Amount is the cluster key, within two
+  percent floored at fifty cents — tight on purpose, far tighter than the
+  one-third band that lets a single series' amount drift — and memo, then
+  category, break the tie when several lines cost the same. The split is kept
+  only when it is clearly the better reading: two or more sub-streams that EACH
+  pass the same interval, amount-consistency and minimum-occurrence tests a
+  whole series must pass, each still posting within one and a half of its own
+  periods of the payee's last row, together accounting for at least half its
+  occurrences. Anything less falls back to reading the payee as one series, so
+  an ordinary bill — including one whose amount drifts, which clusters into
+  singletons — keeps exactly the prediction it had before, and a bill whose
+  amount went up for good is predicted once at the new amount rather than twice
+  (the old amount's cluster is stale). A sub-stream with too few occurrences is
+  simply not predicted: predicting it badly is worse than leaving it out. The
+  sub-stream predictions are ordinary predictions — they pass through the same
+  merge, the same entered-row and reminder dedup above, and the same per-payee
+  dismissal (dismissing the payee dismisses all of its streams).
 - **The calendar colours what it shows**, in both themes: scheduled payment
   red, scheduled deposit green, predicted payment yellow (amber on white),
   predicted deposit blue, pending pre-entry muted, entered row plain; a legend
@@ -3040,6 +4106,30 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   choice is a display preference (`prefs.projection_slots`, QSettings), so
   the calendar opens on the same accounts next time; an explicit account
   passed to the dialog shows for that window without changing the memory.
+- **A transfer INTERNAL to the displayed account set is not shown at all —
+  neither leg.** User-stated: "when both ends of the transfer are in the list
+  of accounts we're showing info for, we have both a positive and negative
+  amount with the same Payee. Since such a transfer is net-neutral, we
+  shouldn't show either side. Only show transfers into or out of the account
+  set, not within." The rule is scoped to the accounts actually being
+  projected, so the same transfer keeps showing when only ONE end is displayed
+  — that is real money arriving or leaving. It applies to every source that
+  can produce a paired leg: an entered row, a transfer definition's two legs,
+  and a projected loan payment whose funding account is displayed beside the
+  loan. Suppression is read-side only and cannot move a number: the daily
+  balances, opening, closing and low are identical with and without the
+  internal transfer, because a dropped pair sums to zero and a leg dated
+  before the window sits on both sides of the opening balance. Keeping that
+  true is why an entered pair is dropped only when the two rows name each
+  other through `transfer_pair_id` AND their amounts cancel exactly — a
+  cross-currency transfer (legs in two currencies) and a split whose transfer
+  sits on a split line (a pre-entered loan payment, where the funder also pays
+  interest the loan account never receives) do NOT cancel, so those keep
+  showing both legs rather than understating an outflow.
+  The Projected Balances dialog goes through the same `projected_events` and
+  so behaves identically; `show_internal_transfers=True` is the one switch
+  back, and nothing in the app passes it. Coverage:
+  `mammon/tests/test_projection_internal_transfers.py`.
 
 
 ### Implementation notes
@@ -3522,7 +4612,7 @@ drift from: a split is represented by its lines (each inheriting the
 parent's payee/tag), a transfer is excluded unless a report asks for the
 legs whose other side is OUTSIDE its account set, and a scheduled placeholder
 (`scheduled = 1`) is excluded unless asked for. Hidden accounts are left out
-of every report unless asked for (§5.8d). Amounts are SIGNED cents throughout
+of every report unless asked for (§5.9c). Amounts are SIGNED cents throughout
 (negative = out), so a refund shrinks its expense category rather than
 counting as income.
 
@@ -3581,12 +4671,12 @@ The pure computations of §5.9a become on-screen windows through a reusable
 framework (`ui/report_window.ReportWindow`, a modeless `QDialog`) that gives
 every hosted report ONE look-and-feel: the shared **Period dropdown** on top
 (beside the enlarged gear that opens the `ReportFilterBar` as `CustomizeDialog`,
-§5.8d), a plain table below, and Export CSV, Export HTML and Print (PDF) actions.
+§5.9c), a plain table below, and Export CSV, Export HTML and Print (PDF) actions.
 The Period dropdown re-ranges the report from a preset (or "Custom", which opens
-the gear); its **Year-to-Date** default (§5.8d) makes the first paint answer "how
+the gear); its **Year-to-Date** default (§5.9c) makes the first paint answer "how
 am I doing this year", while Net Worth Over Time alone keeps the whole-ledger
 "Earliest to date" default. Its options are the UNION of the calendar and rolling
-preset families (§5.8d) — no previously offered range was dropped when the rolling
+preset families (§5.9c) — no previously offered range was dropped when the rolling
 ones were added. The same dropdown was retrofitted onto the three inline chart windows
 that lacked it (Net Worth over time, Income by category, Spending by category),
 so every window that shows money over a range now offers the identical control.
@@ -3675,8 +4765,9 @@ order UNLESS Amount is the sort key, where they order by their net), and **Inves
 (`reports.investment_performance`, a consolidated
 per-holding snapshot — cost basis, market value, unrealized/realized gain, %
 return, dividend/interest income and return of capital — valued at prices as of
-the "To" date, with portfolio totals. Its five columns — Account, Ticker, Amount
-(market value), Gain/Loss $, Gain/Loss % — override the shared three via
+the "To" date, with portfolio totals. Its seven columns — Account, Ticker, Amount
+(market value), Dividends, Gain/Loss $, Gain/Loss %, Annual Return % — override the
+shared three via
 `ReportSpec.columns`: the ticker and both gain figures each get their own header
 instead of the account landing under a generic "Section" and the gain being
 buried inside the label. Because it carries three distinct numeric columns and the
@@ -3687,25 +4778,32 @@ chokepoint and the percent — not money — as signed text). The last is a pure
 over `mammon.investments`: it reuses the same `security_positions` replay the
 Holdings window and a security-filtered register read, so the three never
 disagree; `as_of` caps only the valuation price, never the share/cost replay.
-**The Gain/Loss columns are bounded to the resolved period.** Given a `start`
-(the report window always passes the filter bar's From date), each open, priced
-holding's Gain/Loss $ and % are measured over the window as `value_at(To) −
-value_at(From) − net contributions in (From, To]` — buys add capital, sells
-return it, income and reinvestments are not contributions — so `Last 3 years`,
-`Last 5 years` and `Last 10 years` report DIFFERENT gains rather than the same
-inception-to-date figure they all used to show (the start date was previously
-decorative for this report). This period path rewinds the share count to BOTH
-dates (via `investments.holding_values_at` / `net_contributions_by_symbol`),
-unlike the inception path where `as_of` caps only the price. Called with no
-`start` (the `investment_performance` MCP tool, Holdings reconciliation) it stays
-inception-to-date, byte-for-byte as before. The Portfolio **Market Value**
-headline gain is the sum of the per-holding period gains, so it reconciles with
-the line items; the separate lifetime Unrealized / Realized / Dividend / Return
-of Capital total lines are unchanged. Clicking a column header sorts the holdings
-— by period Gain/Loss, ticker, account then ticker (ticker secondary), or
-Gain/Loss % — reusing the exact `sort_key`/`sort_desc` seam the Itemize tree uses
+**Dividends, Gain/Loss and Annual Return are bounded to the resolved period.**
+Given a `start` (the report window always passes the filter bar's From date),
+each open, priced holding's figures are its total return over `[From, To]` as
+§5.8d "One definition of a holding's return" defines it -- dividends included,
+each once -- so `Last 3 years`, `Last 5 years` and `Last 10 years` report
+DIFFERENT gains. The period path rewinds the share count to both dates. With no
+`start` the span is each holding's current holding, the same figures the
+Holdings window shows. The `unrealized_pl` / `pct_return` fields stay
+since-purchase and unchanged (the MCP tool reads them). The Portfolio **Market
+Value** headline is the open line items' gains summed, dividends included, with
+one pooled annual rate, so it reconciles with the lines above it; the
+Unrealized / Realized / Dividend Income lines below it are labelled "(since
+purchase)" because they do not follow the period and read as contradicting the
+headline unlabelled. Every figure column is right-aligned
+(`ReportSpec.right_align_from`). Clicking a column header sorts the holdings
+— by Dividends, Gain/Loss, Gain/Loss %, Annual Return %, ticker, or account then
+ticker — reusing the exact `sort_key`/`sort_desc` seam the Itemize tree uses
 (`ReportSpec.sortable` names which flat columns sort); a second click toggles
-direction and the Portfolio totals never move.
+direction and the Portfolio totals never move. **Right-clicking a holding row
+offers `Price history: SYM…`** — the same label and the same shared chart the
+investment register's context menu opens (§5.8), drawn in the currency of the
+account that row's holding sits in. The offer is gated by `ReportSpec.price_history`
+(true for this report alone) and by the row itself: the bare ticker is stashed on
+each populated cell at `Qt.UserRole`, so a re-sort can never chart the holding that
+used to occupy that row, and a Portfolio total line or a click over empty space —
+carrying no symbol — pops up no menu at all rather than an empty one.
 
 - **One money chokepoint feeds table, CSV, HTML and PDF.** A `ReportRow`
   carries `section`, `label`, and `amount` as **signed integer cents** (negative
@@ -3752,7 +4850,7 @@ direction and the Portfolio totals never move.
   QSettings. Order matters on re-apply: the include-hidden toggle is set BEFORE
   the account ticks, because flipping it rebuilds the account list (preserving
   surviving ticks by id), and setting the accounts first would lose them
-  (§5.8d).
+  (§5.9c).
   - **`category_ids` is the authoritative half, and the only one re-applied
     when a set has any.** It carries the picker's tick at whatever DEPTH the
     user set it (§5.9c), which names cannot express, and it survives
@@ -4059,13 +5157,14 @@ backups and for the MCP server). README.md points users at that file,
 so it stays where it is rather than folding in here.
 
 Code: `mammon/db.py` (schema + migrations only, no business logic),
-`mammon/backup.py`, `mammon/paths.py`.
+`mammon/backup.py`, `mammon/paths.py`, `mammon/last_db.py`.
 
 ### 4. Data model (canonical schema)
 One SQLite database. Core tables:
 
 - accounts(id, name, type[checking|savings|credit|cash|investment|asset|liability],
   currency, opening_balance, opening_date, institution, note, closed_flag) -
+  the opening balance is part of the balance from `opening_date` on (5.2b);
   `currency` is the account's native ISO 4217 code (TEXT NOT NULL DEFAULT 'USD',
   the base), chosen at creation and treated as immutable thereafter (see 5.4a).
 - categories(id, name, parent_id, type[income|expense], hidden) - hierarchical,
@@ -4112,6 +5211,27 @@ One SQLite database. Core tables:
   counts) - audit of each import run + dedup at file level.
 - transaction_matches(id, imported_txn_id, existing_txn_id, score, approved) -
   fuzzy dedup review on import.
+- allocation_target_accounts(target_id, account_id) - v74: the accounts one
+  target mix governs, all of one `accounts.tax_treatment` (5.8f).
+- holding_links(account_id, from_symbol, to_symbol, date) - v73: a fund
+  conversion the user kept as one holding for measuring its return (5.8d).
+- securities(symbol PRIMARY KEY, name, sec_type, asset_class, kind, multiplier,
+  underlying, expiration, strike, option_right, kind_source) - one row per
+  security identity; `holdings.symbol` and `price_history.symbol` resolve here.
+  The last seven columns (schema v67) carry the INSTRUMENT TAXONOMY: `kind` is
+  the instrument class with NULL meaning UNCLASSIFIED rather than equity, so
+  code branches on "known option" vs "not known to be an option" and an
+  unclassified row behaves exactly as it always has; `multiplier` and `strike`
+  are Decimal-encoded TEXT like every other quantity and price, never floats;
+  `underlying` names the root's identity and `expiration` is ISO with NULL
+  meaning perpetual; `option_right` is 'C' or 'P' and is spelled with the
+  prefix because RIGHT is a SQLite keyword (right joins, 3.39+) and a keyword
+  column name is a latent parse failure in the one context nobody tests;
+  `kind_source` ('source' | 'derived' | 'user') keeps a source-stated type, a
+  derived classification and a user decision distinguishable forever. They live
+  on `securities` rather than in a parallel options table because every read
+  path already looks a security up by symbol, and a second table would mean a
+  second lookup on every price, holdings and valuation path.
 - holdings(id, account_id, symbol, name, quantity, cost_basis) - investment
   positions.
 - price_history(id, symbol, date, close_price, source) - per-holding quotes.
@@ -4130,7 +5250,8 @@ One SQLite database. Core tables:
   TRANSFER_OUT|TRANSFER_IN|SEND|RECEIVE|REWARD|INTEREST|AIRDROP|MINING|FEE|FORK],
   symbol, quantity, price, amount, basis, fee_symbol, fee_quantity, fee_amount,
   transfer_account_id, transfer_pair_id, swap_group_id, tx_hash, memo, import_id,
-  fitid, created_at) - the event log for a cryptocurrency wallet-account (account
+  fitid, created_at, time) - `time` (v70) is the source's time of day, HH:MM:SS,
+  NULL when unknown (5.8j). The event log for a cryptocurrency wallet-account (account
   type 'crypto'), one row per single-asset delta (schema v51). Kept distinct from
   both cash `transactions` and equity `investment_transactions`: quantities and
   per-unit prices are text-encoded Decimal at wei scale (18 decimals), while the
@@ -4253,6 +5374,31 @@ Implemented in mammon/db.py (schema v1); smoke tests in mammon/tests/test_db.py.
   snapshot's summary. The UI reads it through `backup.snapshot_summary` only — no
   SQL and no money logic live in `ui/`.
 
+### 5.8y Which database a launch opens (the last one used)
+
+User request, 2026-09-14: "Can we change it so the last used db is the default
+db? For a GUI launched Mammon, there is no command line option for db name."
+A Start Menu or taskbar launch cannot pass `--db`, so before this a GUI launch
+always came up on `<data dir>/mammon.db`, even for someone whose ledger lives
+elsewhere.
+
+- **A launch with no `--db` opens the database last opened in the window**,
+  through File ▸ New Database, Open Database, Save Database As, or Restore from
+  Backup. It opens `<data dir>/mammon.db` only when nothing has been chosen yet.
+- **`--db` opens that file for one session and is NOT remembered.** Developers,
+  the screenshot tool, tests and automation agents all launch with
+  `--db <scratch>`. Remembering it would make the next Start Menu launch open a
+  scratch ledger in place of the real one.
+- **A remembered file that is missing is not forgotten.** The launch opens the
+  default instead and says so in a message naming the missing file. The
+  pointer is kept, because the usual cause is a drive or share that is not
+  connected yet; overwriting it would lose track of the ledger.
+- The MCP server's default (`python -m mammon.mcp_server` with no `--db`)
+  follows the same rule, so it serves the ledger the app would open.
+- A source checkout and an installed copy each remember their own last
+  database. They may be different versions of the code, and one shared pointer
+  would have each open whatever the other used last.
+
 
 ### Implementation notes
 
@@ -4346,16 +5492,31 @@ moved the snapshots and the log while leaving the database in the install.
 
 1. **`$MAMMON_DATA_DIR`** — wins outright. Tests and alternate installs use it, and it must move
    the database with everything else.
-2. **A packaged build** (PyInstaller sets `sys.frozen`) — `~/Documents/Mammon`. An installed app
-   cannot write beside itself: `Program Files` is read-only to a standard user, and Windows does not
-   fail cleanly, it redirects the writes into a per-user VirtualStore copy, so the ledger appears to
-   save and then appears to vanish. Documents over `%LOCALAPPDATA%` is deliberate — the whole promise
-   is that the user owns the file, and a file they cannot find is not one they own.
+2. **A packaged build** — `~/Documents/Mammon`. That means a copy put in place by the Windows
+   installer, which writes `mammon-install.json` beside the package (`paths.is_installed`), or a
+   frozen executable (`sys.frozen`). The marker is the test that matters. The installer runs the
+   stock embeddable Python, which sets no `sys.frozen`, so with that as the only test an installed
+   copy would have kept its ledger inside `%LOCALAPPDATA%\Mammon`, which every upgrade replaces and
+   uninstall removes. An installed app must never write beside itself anyway: `Program Files` is
+   read-only to a standard user, and Windows does not fail cleanly there, it redirects the writes
+   into a per-user VirtualStore copy, so the ledger appears to save and then appears to vanish.
+   Documents over `%LOCALAPPDATA%` is deliberate — the whole promise is that the user owns the file,
+   and a file they cannot find is not one they own.
 3. **A source checkout** — `data/` beside the package, resolved from the package location and never
    from the CWD. Resolving relative to the CWD meant launching from a different directory silently
    opened a *different*, empty database, and learned rules looked lost.
 
 `--db` is still authoritative and used verbatim, ahead of all of this.
+
+`paths.data_dir()` answers where data lives; which database a launch opens is one step further
+(5.8y). `app._resolve_db(None)` asks `last_db.startup_db()`: the path recorded in
+`<data dir>/last_database.json` when that file still exists, else `paths.default_db_path()`. The
+pointer lives in the data dir so `$MAMMON_DATA_DIR` isolates it like everything else. It is written
+only through `MainWindow`'s `on_database_opened` hook, which only the real launch in `mammon.app`
+connects to `last_db.remember`. Every test builds `MainWindow` without it, so no test can move the
+default, whether or not it remembered to redirect the data dir. Writes are atomic, and a pointer
+that is unreadable or unwritable counts as absent: failing to remember must never stop a database
+from opening.
 
 Nothing in `paths.py` creates directories; the callers that write do that, so importing it can never
 leave a stray folder behind. `backup.DEFAULT_BACKUP_DIR` stays a module attribute resolved at import,
@@ -4641,6 +5802,22 @@ writer) so the item legs actually reach the ledger. Locked behavior:
   `limit` with a `truncated` flag. `accounts.account_number`, `url` and
   `download_config` are never returned by any tool: the SQL tool runs under an
   authorizer that blanks those columns and denies every non-read operation.
+- **What an instrument IS travels with it.** Every position row -- `holdings`,
+  `lots`, `investment_performance` -- carries `kind` (the `securities.kind`
+  value, `null` when unclassified) and `option`: `null` for anything that is not
+  a contract, and otherwise `multiplier`, `underlying`, `expiration`, `strike`
+  and `right`, each a STRING or `null` when the term was never recorded. A model
+  must not have to infer a contract from the shape of a ticker, and `0.1` has no
+  exact binary form, so no term crosses as a float. An option row's `quantity`
+  is CONTRACTS and its `market_value` is `contracts x premium x multiplier`
+  (5.8e-5), negative for a written contract. A NULL-kind security reports
+  `kind: null, option: null` and is otherwise byte-for-byte what it was.
+- **`allocation` excludes option contracts and says so** (5.8e-9): they are out
+  of `total`, `by_class`, `by_security` and `by_account`, and the response
+  carries `excluded_options` (a `symbol` / `market_value` pair per contract),
+  `excluded_options_value` and a `note` -- the sentence to show the user, empty
+  when nothing was excluded. One contract is never reported as 100 shares of its
+  underlying, and never dropped in silence.
 - Conventions the model is told once (`mcp_tools.INSTRUCTIONS`): amounts are
   decimal dollar strings, negative = money out; dates ISO, ranges inclusive;
   accounts by name or id, hidden accounts excluded unless asked; categories by
@@ -4695,6 +5872,32 @@ IMPORTANT: the DB + domain layer (schema, ledger, transfers, importers, quotes)
 is Python in BOTH recommended options, so ledger-core work can proceed before the
 UI skin is chosen. Only the UI task depends on this decision.
 
+#### 9.2 Distribution: the Windows installer (RESOLVED 2026-09-14)
+Requested 2026-09-05: "a Windows installer so it can be run via the Windows
+launcher (or cross platform equivalents) and be pinned on the taskbar." Scope
+settled 2026-09-14: the release is the installer; it needs no clone and brings
+its own Python.
+
+- A GitHub Release carries `Mammon-<version>-Setup.zip`. The user extracts it
+  and runs `setup.bat`: no administrator rights, no Python or git of their own.
+- Program files go in `%LOCALAPPDATA%\Mammon` (replaced on upgrade, removed on
+  uninstall). Data goes in `Documents\Mammon` and is never touched by either.
+- Setup offers to move an existing ledger from a source checkout, with its
+  backups (approved 2026-09-14). It refuses a ledger that is in use, one whose
+  name is already taken, and one from a newer schema than the installer carries.
+- A Start Menu entry that can be pinned to the taskbar, and a Settings > Apps
+  entry to uninstall from.
+- An MCP launcher (`mammon-mcp.bat`) for MCP clients.
+- Windows only; macOS and Linux run from a clone. Not code-signed (SmartScreen
+  warns on first run) and no automatic updates, both accepted for now.
+
+Decision: the Python embeddable package plus pip-installed dependencies, not a
+frozen executable. It is the shape webSlinger's installer moved to after
+starting with PyInstaller, it needs no hidden-import or data-file lists for
+PyQt5, matplotlib or sqlcipher3, and the installed app runs exactly the code a
+clone runs. The build (`installer/build.py`) installs, runs and uninstalls its
+own payload before it will write a ZIP. `installer/README.md` has the details.
+
 
 ### 10. Open items / decisions to confirm
 - Q5: integer cents + Decimal-text prices/quantities - RESOLVED (confirmed).
@@ -4728,6 +5931,8 @@ carries no vendor echo. The Python package is `mammon`; the default database is
 - UI display preferences go to QSettings, never to the database (`ui/prefs.py`). This includes
   the PER-ACCOUNT one/two-line register layout (`account_view_mode`) and the
   transaction-accepted sound.
+- Installer-only env vars, used by the build's verification run to keep it off the real profile:
+  `MAMMON_INSTALL_DIR`, `MAMMON_START_MENU`, `MAMMON_SKIP_REGISTRY`.
 - Env vars: `MAMMON_WEBSLINGER_MCP_CMD` (MCP launch command), `MAMMON_DATA_DIR`,
   `MAMMON_DOWNLOAD_LOG`, `MAMMON_ACCEPTANCE_DB` (opt into the real-ledger acceptance tests).
 - `crashlog.py` installs a `sys.excepthook` early in startup because PyQt otherwise swallows

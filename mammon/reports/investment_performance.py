@@ -30,6 +30,18 @@ Definitions (locked, so the report always reconciles with the Holdings window):
   ``include_hidden`` is set. Closed (sold-out) positions are included by default
   so their realized gain and income still count; pass ``include_sold=False`` to
   drop them.
+- **Gain includes dividends, each counted once** (user request 2026-09-15).
+  Per holding, ``gain`` is the TOTAL return from
+  :func:`mammon.portfolio.holding_performances`: ending value, less the value at
+  the start, less the money put in, plus the money taken out -- sales and CASH
+  dividends. A reinvested dividend bought shares already in the ending value, so
+  it is neither added nor subtracted. ``income`` is every distribution in the
+  span (the Dividends column), cash and reinvested alike. The span is the
+  selected period when there is a ``start``; otherwise the CURRENT HOLDING, from
+  the day its share count last left zero. ``annual_return`` is the
+  money-weighted rate per year over that span, blank under a year. The lifetime
+  ``unrealized_pl`` / ``pct_return`` fields are unchanged: they still reconcile
+  with the Holdings window's cost basis and the MCP tool.
 """
 from __future__ import annotations
 
@@ -38,7 +50,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Optional
 
-from mammon import investments, ledger
+from mammon import investments, ledger, portfolio
 
 _HUNDRED = Decimal("100")
 
@@ -73,6 +85,13 @@ class HoldingPerformance:
     # net_contributions``; see :func:`investment_performance`.
     period_gain: Optional[int] = None
     period_basis: Optional[int] = None
+    # Total return over the report's span (the period, or the current holding
+    # when there is no start): cash dividends in, reinvested ones already in the
+    # value. None for an open holding with no price. See the module docstring.
+    income: int = 0                               # cents, distributions in the span
+    gain: Optional[int] = None                    # cents
+    gain_pct: Optional[Decimal] = None            # percent of the capital at work
+    annual_return: Optional[Decimal] = None       # percent per year; None under a year
 
     @property
     def avg_cost(self) -> Optional[Decimal]:
@@ -105,15 +124,14 @@ class HoldingPerformance:
 
     @property
     def display_gain(self) -> Optional[int]:
-        """The Gain/Loss to render: the period-bounded gain when the report was
-        built for a period, else the inception-to-date unrealized P/L."""
-        return self.period_gain if self.period_gain is not None else self.unrealized_pl
+        """The Gain/Loss to render: the total return over the report's span,
+        dividends included."""
+        return self.gain
 
     @property
     def display_pct(self) -> Optional[Decimal]:
-        """The Gain/Loss percent to render: period percent in period mode, else the
-        inception-to-date percent return."""
-        return self.period_pct if self.period_gain is not None else self.pct_return
+        """The Gain/Loss percent to render, dividends included."""
+        return self.gain_pct
 
 
 @dataclass
@@ -134,6 +152,13 @@ class InvestmentPerformanceReport:
     # inception-based ``investment_performance`` MCP tool.
     total_period_gain: Optional[int] = None
     total_period_basis: Optional[int] = None
+    # The portfolio's total return over the span: the per-holding gains summed,
+    # the percent over the capital at work, and one money-weighted annual rate
+    # solved over every holding's flows together (not an average of rates).
+    total_income: int = 0
+    total_gain: int = 0
+    total_gain_pct: Optional[Decimal] = None
+    total_annual_return: Optional[Decimal] = None
 
     @property
     def total_pl(self) -> int:
@@ -148,21 +173,14 @@ class InvestmentPerformanceReport:
 
     @property
     def display_total_gain(self) -> int:
-        """The headline portfolio Gain/Loss: the period total in period mode, else
-        the lifetime unrealized total."""
-        return (self.total_period_gain if self.total_period_gain is not None
-                else self.total_unrealized_pl)
+        """The headline portfolio Gain/Loss: the sum of the per-holding gains shown,
+        dividends included."""
+        return self.total_gain
 
     @property
     def display_total_pct(self) -> Optional[Decimal]:
-        """The headline portfolio percent: period percent in period mode, else the
-        lifetime percent return."""
-        if self.total_period_gain is not None:
-            if not self.total_period_basis:
-                return None
-            return (Decimal(self.total_period_gain)
-                    / Decimal(self.total_period_basis) * _HUNDRED)
-        return self.pct_return
+        """The headline portfolio percent, dividends included."""
+        return self.total_gain_pct
 
 
 def _return_of_capital(conn, account_id: int) -> dict:
@@ -216,25 +234,24 @@ def investment_performance(conn, as_of: Optional[str] = None, *,
         and (wanted is None or int(a["id"]) in wanted)
     ]
 
+    end = d or _dt.date.today().isoformat()
     holdings: list[HoldingPerformance] = []
+    counted: list = []                       # the Performance behind each shown gain
     for a in accounts:
         aid = int(a["id"])
         roc = _return_of_capital(conn, aid)
-        if period_mode:
-            start_vals = investments.holding_values_at(conn, aid, s)
-            end_vals = investments.holding_values_at(conn, aid, d, prices)
-            contribs = investments.net_contributions_by_symbol(conn, aid, s, d)
+        perfs = portfolio.holding_performances(
+            conn, aid, end, start=s if period_mode else None, prices=prices)
         for pos in investments.security_positions(conn, aid, d, prices):
             if not include_sold and not pos.is_open:
                 continue
-            period_gain = None
-            period_basis = None
-            if period_mode and pos.is_open and pos.price is not None:
-                v_start = start_vals.get(pos.symbol, 0)
-                v_end = end_vals.get(pos.symbol, 0)
-                net = contribs.get(pos.symbol, 0)
-                period_gain = v_end - v_start - net
-                period_basis = v_start + max(net, 0)
+            perf = perfs.get(pos.symbol)
+            priced = perf is not None and not (pos.is_open and pos.price is None)
+            if priced and pos.is_open:
+                # The headline sums the LINE ITEMS, and a sold-out position is
+                # not one; its realized gain stays on the since-purchase lines.
+                counted.append(perf)
+            gain = perf.gain if priced else None
             holdings.append(HoldingPerformance(
                 account_id=aid, account_name=a["name"], symbol=pos.symbol,
                 quantity=pos.quantity, cost_basis=pos.cost_basis,
@@ -242,9 +259,16 @@ def investment_performance(conn, as_of: Optional[str] = None, *,
                 realized_pl=pos.realized_pl, dividends=pos.dividends,
                 return_of_capital=roc.get(pos.symbol, 0),
                 price=pos.price, is_open=pos.is_open,
-                period_gain=period_gain, period_basis=period_basis,
+                period_gain=gain if period_mode else None,
+                period_basis=(perf.start_value + perf.money_in
+                              if period_mode and priced else None),
+                income=perf.income if perf is not None else 0,
+                gain=gain,
+                gain_pct=perf.gain_pct if priced else None,
+                annual_return=perf.annual_return if priced else None,
             ))
 
+    total = portfolio.combine_performances(counted, end) if counted else None
     period_holdings = [h for h in holdings if h.period_gain is not None]
     return InvestmentPerformanceReport(
         as_of=d,
@@ -260,4 +284,8 @@ def investment_performance(conn, as_of: Optional[str] = None, *,
                            if period_mode else None),
         total_period_basis=(sum(h.period_basis or 0 for h in period_holdings)
                             if period_mode else None),
+        total_income=sum(h.income for h in holdings),
+        total_gain=total.gain if total else 0,
+        total_gain_pct=total.gain_pct if total else None,
+        total_annual_return=total.annual_return if total else None,
     )

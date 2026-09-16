@@ -428,9 +428,46 @@ def search(conn, query: str, account=None, limit: Optional[int] = DEFAULT_LIMIT)
 # ---------------------------------------------------------------------------
 # investments, loans, scheduled
 # ---------------------------------------------------------------------------
+def _instrument(conn, symbol) -> dict:
+    """``{"kind": ..., "option": ...}`` for one symbol -- WHAT the position is,
+    added to every per-security payload so the model never has to infer an
+    instrument from the shape of its ticker (SRD 5.8e-2, 7.3).
+
+    ``kind`` is ``securities.kind`` verbatim (``"option"``, ``"money_market"``,
+    ...) and is ``None`` for an UNCLASSIFIED row -- which means "nobody has
+    said", never "ordinary share": a forty-year ledger is NULL-kind throughout
+    and every other field of these payloads reads exactly as it did before.
+
+    ``option`` is ``None`` unless ``kind == 'option'``; for a contract it is the
+    stored terms, every value a STRING or None. ``multiplier`` and ``strike``
+    are exact decimal strings rather than floats for the same reason money is
+    (0.1 has no binary form), and a ``None`` multiplier means the terms were
+    never recorded, NOT that it is 1 or 100 -- the model must not guess it."""
+    kind = investments.security_kind(conn, symbol)
+    terms = investments.option_terms(conn, symbol)
+    opt = None
+    if terms is not None:
+        opt = {
+            "multiplier": None if terms["multiplier"] is None else str(terms["multiplier"]),
+            "underlying": terms["underlying"],
+            "expiration": terms["expiration"],
+            "strike": None if terms["strike"] is None else str(terms["strike"]),
+            "right": terms["right"],
+        }
+    return {"kind": kind, "option": opt}
+
+
 def holdings(conn, account, as_of: Optional[str] = None) -> dict:
     """An investment account's positions valued at market: quantity, cost
-    basis, price, market value and gain per holding, plus cash and total."""
+    basis, price, market value and gain per holding, plus cash and total.
+
+    Each holding also carries `kind` (what the instrument IS -- null when the
+    security is unclassified) and, for `kind` "option", an `option` object with
+    the contract terms: `multiplier`, `underlying`, `expiration`, `strike` and
+    `right` ("C"/"P"), all strings. An option's `quantity` is CONTRACTS and its
+    `price` is the per-share premium, so `market_value` is contracts x premium x
+    multiplier -- a short (negative) contract count values negative, as the
+    liability it is."""
     aid = resolve_account(conn, account)
     d = _date(as_of, "as_of") if as_of else None
     v = investments.account_valuation(conn, aid, d)
@@ -442,7 +479,8 @@ def holdings(conn, account, as_of: Optional[str] = None) -> dict:
                           "cost_basis": dollars(h.cost_basis),
                           "price": None if h.price is None else str(h.price),
                           "market_value": dollars(h.market_value),
-                          "gain": dollars(h.gain)} for h in v.holdings],
+                          "gain": dollars(h.gain),
+                          **_instrument(conn, h.symbol)} for h in v.holdings],
             "unpriced": list(v.unpriced)}
 
 
@@ -584,7 +622,10 @@ def lots(conn, account, symbol: Optional[str] = None, as_of: Optional[str] = Non
     """Open tax lots in an investment account (optionally one symbol): when
     each was acquired, shares, cost, price, market value, gain, and whether
     selling it now would be a long- or short-term gain. Also the account's
-    cost-basis method (average, fifo or lifo)."""
+    cost-basis method (average, fifo or lifo).
+
+    Each lot carries `kind` and, for an option, the same `option` terms object
+    `holdings` returns; an option lot's `quantity` is CONTRACTS."""
     aid = resolve_account(conn, account)
     d = _date(as_of, "as_of") if as_of else None
     acct = ledger.get_account(conn, aid)
@@ -594,7 +635,8 @@ def lots(conn, account, symbol: Optional[str] = None, as_of: Optional[str] = Non
                       "quantity": str(l.quantity), "cost": dollars(l.cost),
                       "price": None if l.price is None else str(l.price),
                       "market_value": dollars(l.market_value), "gain": dollars(l.gain),
-                      "term": l.term, "days_held": l.days_held}
+                      "term": l.term, "days_held": l.days_held,
+                      **_instrument(conn, l.symbol)}
                      for l in portfolio.open_lots(conn, aid, symbol=symbol, as_of=d)]}
 
 
@@ -648,7 +690,15 @@ def allocation(conn, accounts=None, as_of: Optional[str] = None,
     `investments` (the investment accounts, Quicken's answer), `with_cash`
     (those plus checking/savings/cash) or `everything` (those plus property and
     other asset accounts, each counted under the asset class recorded for it).
-    Debt is never part of an allocation."""
+    Debt is never part of an allocation.
+
+    OPTION CONTRACTS are excluded from every number here -- the total, the
+    classes, the securities and the account slices -- because a contract is not
+    shares of its underlying: counting one as 100 shares would invent exposure
+    the premium never bought. They are not dropped silently either: each is
+    named in `excluded_options` with its premium value in dollars, and `note` is
+    the sentence to show alongside the percentages. Use `holdings` for what the
+    contracts themselves are worth."""
     ids = resolve_accounts(conn, accounts)
     d = _date(as_of, "as_of") if as_of else None
     if scope not in portfolio.ALLOCATION_SCOPES:
@@ -662,7 +712,11 @@ def allocation(conn, accounts=None, as_of: Optional[str] = None,
 
     return {"as_of": d or "latest", "scope": a.scope, "total": dollars(a.total),
             "by_class": slices(a.by_class), "by_security": slices(a.by_security),
-            "by_account": slices(a.by_account), "unpriced": a.unpriced}
+            "by_account": slices(a.by_account), "unpriced": a.unpriced,
+            "excluded_options": [{"symbol": sym, "market_value": dollars(v)}
+                                 for sym, v in a.excluded_options],
+            "excluded_options_value": dollars(a.option_value),
+            "note": a.options_note}
 
 
 def investment_performance(conn, accounts=None, as_of: Optional[str] = None) -> dict:
@@ -693,7 +747,8 @@ def investment_performance(conn, accounts=None, as_of: Optional[str] = None) -> 
                       "pct_return": pct(h.pct_return),
                       "realized_gain": dollars(h.realized_pl),
                       "dividends": dollars(h.dividends),
-                      "return_of_capital": dollars(h.return_of_capital)}
+                      "return_of_capital": dollars(h.return_of_capital),
+                      **_instrument(conn, h.symbol)}
                      for h in rep.holdings],
         "totals": {"cost_basis": dollars(rep.total_cost_basis),
                    "market_value": dollars(rep.total_market_value),
@@ -904,6 +959,11 @@ INSTRUCTIONS = (
     "income) and `allocation` (by asset class, over investments alone or "
     "everything owned -- see its `scope`) and `allocation_drift` (how far that "
     "mix has strayed from a target, and what would return it). "
+    "Each position carries `kind` and, for an option, an `option` object of "
+    "contract terms as strings; an option's quantity is CONTRACTS and its market "
+    "value is contracts x premium x multiplier, negative when written. "
+    "`allocation` leaves option contracts out of every number and names them in "
+    "`excluded_options`, with a `note` to show the user. "
     "For budgets: `list_budgets`, then `budget_vs_actual` (a month or "
     "range) or `budget_ytd` (year-to-date). Account numbers and login details "
     "are never available."

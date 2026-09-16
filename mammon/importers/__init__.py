@@ -23,6 +23,7 @@ from mammon.importers.jsonimp import parse_json
 from mammon.importers.ofx import (
     parse_ofx,
     parse_ofx_positions,
+    parse_ofx_securities,
     unmapped_investment_actions,
 )
 from mammon.importers.qif import QifExtras, parse_qif
@@ -146,6 +147,7 @@ def import_file(
     # accounts get priced holdings. Other formats have no such sidecar.
     extras = QifExtras() if fmt == "qif" else None
     positions = None
+    instruments = None
     if fmt == "qif":
         records = parse_qif(text, default_account=account, collector=extras)
     else:
@@ -157,6 +159,10 @@ def import_file(
             (pos.symbol, pos.date, pos.units, pos.unitprice)
             for pos in parse_ofx_positions(text)
         ]
+        # ...and a <SECLIST> that STATES what each security is. Transactions
+        # carry only the symbol, so without this sidecar a contract the file
+        # named outright would still land as an unclassified row.
+        instruments = parse_ofx_securities(text)
     result = import_records(
         conn,
         records,
@@ -169,8 +175,10 @@ def import_file(
         securities=extras.securities if extras else None,
         prices=extras.prices if extras else None,
         positions=positions,
+        instruments=instruments,
         categories=extras.categories if extras else None,
         tags=extras.tags if extras else None,
+        registers=extras.registers if extras else None,
         set_cutover=set_cutover,
     )
     # Post-import AUDIT: surface any OFX investment action types the parser could

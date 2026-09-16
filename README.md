@@ -115,7 +115,30 @@ developed and used daily on Windows, and the macOS and Linux paths are currently
 untested rather than known-good; the default font is picked per platform, and
 everything else should follow. Reports from either are welcome.
 
-From a clone of the repository:
+### Windows: the installer
+
+No Python or git needed. Download `Mammon-<version>-Setup.zip` from the
+[Releases](https://github.com/tczaugg/Mammon/releases) page, extract the whole ZIP (right-click, Extract
+All), and run `setup.bat`. Windows may warn that the file is unrecognized
+(More info, then Run anyway): the installer is not code-signed.
+
+Setup brings its own private copy of Python and installs everything for you
+alone. It needs no administrator rights and does not touch any other Python on
+the machine:
+
+* the program goes in `%LOCALAPPDATA%\Mammon`, which each upgrade replaces;
+* **your ledgers and backups live in `Documents\Mammon`**, which neither
+  upgrading nor uninstalling ever touches;
+* Mammon is added to the Start Menu (start it, then right-click its taskbar
+  button to pin it) and to Settings > Apps, which is where you uninstall it.
+
+If you have been running Mammon from a clone, setup offers to move that
+ledger, with its backups, into `Documents\Mammon`: drag its `mammon.db` onto the
+setup window. To upgrade, run the newer version's `setup.bat` with Mammon closed.
+
+### From a clone of the repository
+
+On any platform:
 
 ```
 pip install -r requirements.txt        # PyQt5, matplotlib, yfinance: the app itself
@@ -149,9 +172,14 @@ without installing anything beyond the requirements.
 python -m mammon.app
 ```
 
-The database defaults to `data/mammon.db`, anchored to the install directory —
-so the app opens the same file no matter which directory you launch it from.
-Point it somewhere else with `--db`:
+Mammon reopens the database you last opened with File ▸ New, Open or Save As, so
+a Start Menu or taskbar launch comes up on the right ledger. The first time, or
+if that file has gone missing, it opens `mammon.db` in its data folder:
+`data/` beside the code in a clone (no matter which directory you launch from), or
+`Documents\Mammon` for an installed copy. It says so when it had to fall back.
+
+Open a particular file for one session with `--db`. That does not change which
+database the next launch opens:
 
 ```
 python -m mammon.app --db /path/to/ledger.db
@@ -247,9 +275,12 @@ upcoming bills, loan terms), with a bounded transaction listing, free-text
 search and a read-only SQL tool for the long tail. Account numbers and login
 details are never returned.
 
-Requires the `mcp` package (`pip install -e .[mcp]`); the application itself
-does not need it. It cannot open an encrypted database, and it refuses one whose
-schema is older than the code (open it in Mammon once to migrate) or newer.
+The `mcp` package is part of `requirements.txt`. An installed copy has the
+server ready as `%LOCALAPPDATA%\Mammon\mammon-mcp.bat`: use that path as the
+command wherever the examples below say `python -m mammon.mcp_server`. With no
+`--db` it serves the ledger Mammon itself would open. It cannot open an
+encrypted database, and it refuses one whose schema is older than the code (open
+it in Mammon once to migrate) or newer.
 
 ### Connecting Claude Code
 

@@ -122,6 +122,9 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
             continue
         if rec.tx_hash and _already_imported(conn, account_id, rec.tx_hash):
             result.duplicates += 1
+            # A row imported before times were kept gets the one this file states.
+            if crypto.fill_missing_time(conn, account_id, rec.tx_hash, rec.time):
+                result.account_ids.add(account_id)
             continue
 
         # The parser guarantees clean Decimal-text for quantity/price ("0" at
@@ -153,7 +156,8 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
             crypto.record_wallet_transfer(
                 conn, frm, to, rec.date, rec.symbol, qty,
                 fee_symbol=fee_symbol, fee_quantity=fee_quantity,
-                fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
+                fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None,
+                time=rec.time or None)
             result.account_ids.update((frm, to))
         elif rec.direction == "out":
             # The counterparty IS the payee on an exchange row too: when the user
@@ -163,12 +167,14 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
                 conn, account_id, rec.date, rec.symbol, qty, fmv,
                 payee=rec.to_addr or None,
                 fee_symbol=fee_symbol, fee_quantity=fee_quantity,
-                fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None)
+                fee_amount=fee_amount, tx_hash=rec.tx_hash, memo=rec.memo or None,
+                time=rec.time or None)
         else:  # direction == "in"
             crypto.record_income(
                 conn, account_id, rec.date, "RECEIVE", rec.symbol, qty, fmv,
                 payee=rec.from_addr or None,
-                tx_hash=rec.tx_hash, memo=rec.memo or None)
+                tx_hash=rec.tx_hash, memo=rec.memo or None,
+                time=rec.time or None)
 
         result.imported += 1
         if gas_is_users:
@@ -211,6 +217,9 @@ def _import_wallet_records(conn: sqlite3.Connection, records: list[CryptoRecord]
             continue
         if rec.tx_hash and _already_imported(conn, account_id, rec.tx_hash):
             result.duplicates += 1
+            # A row imported before times were kept gets the one this file states.
+            if crypto.fill_missing_time(conn, account_id, rec.tx_hash, rec.time):
+                result.account_ids.add(account_id)
             continue
 
         qty = Decimal(rec.quantity)
@@ -231,19 +240,22 @@ def _import_wallet_records(conn: sqlite3.Connection, records: list[CryptoRecord]
             crypto.record_wallet_transfer(
                 conn, frm, to, rec.date, rec.symbol, qty,
                 fee_symbol=fee_symbol, fee_quantity=fee_quantity,
-                fee_amount=None, tx_hash=rec.tx_hash, memo=rec.memo or None)
+                fee_amount=None, tx_hash=rec.tx_hash, memo=rec.memo or None,
+                time=rec.time or None)
             result.account_ids.update((frm, to))
         elif rec.direction == "out":
             crypto.record_wallet_debit(
                 conn, account_id, rec.date, rec.symbol, qty,
                 payee=rec.to_addr or None, fee_symbol=fee_symbol,
                 fee_quantity=fee_quantity, tx_hash=rec.tx_hash,
-                memo=rec.memo or None)
+                memo=rec.memo or None,
+                time=rec.time or None)
         else:  # direction == "in": a coin credit, counterparty = the From address
             crypto.record_wallet_credit(
                 conn, account_id, rec.date, rec.symbol, qty,
                 payee=rec.from_addr or None, tx_hash=rec.tx_hash,
-                memo=rec.memo or None)
+                memo=rec.memo or None,
+                time=rec.time or None)
 
         result.imported += 1
         if book_fee:

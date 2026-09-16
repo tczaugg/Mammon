@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from mammon import db, investments, ledger, portfolio
+from mammon import db, instruments, investments, ledger, portfolio, securities
 
 
 @pytest.fixture
@@ -175,6 +175,104 @@ def test_allocation_scope_reaches_cash_accounts_and_property_but_never_debt(conn
     # Naming a liability outright still does not allocate it.
     mortgage = ledger.get_account_by_name(conn, "Mortgage")["id"]
     assert portfolio.allocation(conn, [mortgage], as_of="2025-12-31").total == 0
+
+
+# ---------------------------------------------------------------------------
+# option contracts are excluded from an allocation, and SAID SO (SRD 5.8e-9)
+# ---------------------------------------------------------------------------
+CALL = "ACME  260116C00050000"          # long, 2 contracts
+PUT = "ACME  260116P00045000"           # short, 1 contract
+TWIN = "ACME  260116C00055000"          # OSI-SHAPED but nobody classified it
+
+
+def _security_row(conn, symbol):
+    conn.execute("INSERT OR IGNORE INTO securities(symbol, name) VALUES (?,?)",
+                 (symbol, symbol))
+    conn.commit()
+
+
+def _classify_option(conn, symbol, right="C", strike="50"):
+    _security_row(conn, symbol)
+    securities.set_kinds(conn, [dict(symbol=symbol, kind=instruments.Kind.OPTION.value,
+                                     kind_source="user", multiplier="100",
+                                     underlying="ACME", expiration="2026-01-16",
+                                     strike=strike, option_right=right)])
+
+
+@pytest.fixture
+def contracts(conn, world):
+    """The brokerage from ``world`` plus a long call, a short put, and a
+    NULL-KIND twin whose symbol looks exactly like a contract's."""
+    inv = world["inv"]
+    _classify_option(conn, CALL, right="C", strike="50")
+    _classify_option(conn, PUT, right="P", strike="45")
+    _security_row(conn, TWIN)                       # left unclassified on purpose
+    investments.record_investment(conn, inv, "2025-11-03", "Buy", symbol=CALL,
+                                  quantity="2", price="3", amount=-600_00)
+    investments.record_investment(conn, inv, "2025-11-03", "ShtSell", symbol=PUT,
+                                  quantity="1", price="2", amount=200_00)
+    investments.record_investment(conn, inv, "2025-11-03", "Buy", symbol=TWIN,
+                                  quantity="5", price="4", amount=-20_00)
+    investments.rebuild_holdings(conn, inv)
+    for sym, px in ((CALL, "4"), (PUT, "3"), (TWIN, "5")):
+        investments.record_price(conn, sym, "2025-12-31", px)
+    portfolio.set_security(conn, "AAPL", asset_class="domestic_stock")
+    return world
+
+
+def test_allocation_leaves_option_contracts_out_and_names_them(conn, contracts):
+    """A contract is not shares of its underlying, so it is neither counted as
+    equity nor dropped in silence: it comes out of every number and is named,
+    with its premium value, in a note shown beside the percentages."""
+    inv = contracts["inv"]
+    cash = 200_00 - 600_00 + 200_00 - 20_00          # dividend, then the three trades
+    a = portfolio.allocation(conn, [inv], as_of="2025-12-31")
+
+    # Not in the total, the classes, the securities or the account slice.
+    assert a.total == 11000_00 + 25_00 + cash
+    assert dict((s.key, s.value) for s in a.by_class) == \
+        {"domestic_stock": 11000_00, "unclassified": 25_00, "cash": cash}
+    assert [s.key for s in a.by_security] == ["AAPL", TWIN]
+    assert [(s.label, s.value) for s in a.by_account] == [("Brokerage", a.total)]
+    # ...and excluding them is not the same as pretending they are unpriced.
+    assert a.unpriced == []
+
+    # Named, with the premium value the allocation is NOT reporting: the long
+    # call is worth 2 x 4.00 x 100, the short put is a liability of 1 x 3.00 x 100.
+    assert a.excluded_options == [(CALL, 800_00), (PUT, -300_00)]
+    assert a.option_value == 500_00
+    note = a.options_note
+    assert CALL in note and PUT in note
+    assert "800.00" in note and "-300.00" in note and "500.00" in note
+    assert "excluded" in note.lower()
+
+
+def test_allocation_with_no_contracts_says_nothing_about_options(conn, world):
+    """The note is empty when there is nothing to exclude -- no sentence about
+    options ever appears beside an allocation that has none."""
+    portfolio.set_security(conn, "AAPL", asset_class="domestic_stock")
+    a = portfolio.allocation(conn, [world["inv"]], as_of="2025-12-31")
+    assert a.excluded_options == [] and a.option_value == 0 and a.options_note == ""
+    assert a.total == 11000_00 + 200_00
+
+
+def test_a_null_kind_security_allocates_exactly_as_it_always_did(conn, contracts):
+    """TWIN's symbol is an OSI contract string, and it is STILL allocated: kind
+    IS NULL means unclassified, never "option" and never "equity". Forty years
+    of imported history is NULL throughout, and this task changes none of it."""
+    inv = contracts["inv"]
+    a = portfolio.allocation(conn, [inv], as_of="2025-12-31")
+    assert TWIN not in [sym for sym, _v in a.excluded_options]
+    assert dict((s.key, s.value) for s in a.by_security)[TWIN] == 25_00   # 5 x 5.00, no multiplier
+    assert investments.is_option(conn, TWIN) is False
+
+    # Classify it and the same ledger reports it as a contract instead -- the
+    # difference is the STATEMENT, nothing about the symbol or the trades.
+    _classify_option(conn, TWIN, right="C", strike="55")
+    b = portfolio.allocation(conn, [inv], as_of="2025-12-31")
+    assert dict(b.excluded_options)[TWIN] == 2500_00     # now 5 x 5.00 x 100
+    assert TWIN not in [s.key for s in b.by_security]
+    assert b.total == a.total - 25_00                    # the 25.00 it used to add
 
 
 def test_hidden_accounts_and_records_gaps_are_kept_out_of_the_way(conn, world):

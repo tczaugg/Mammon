@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from mammon import db, investments, ledger, securities
 from mammon.ui.securities_dialog import (
-    SecuritiesDialog, DESCRIPTION, IDENTITY, INCLUDE, STATUS,
+    SecuritiesDialog, DESCRIPTION, IDENTITY, INCLUDE, ROWS, STATUS,
 )
 
 
@@ -187,9 +187,134 @@ def test_the_summary_counts_rows_that_will_move(conn, world):
     assert "merge" in text
 
 
+def test_the_blurb_names_both_ways_to_keep_a_stored_name(conn, world):
+    """User-reported: "clear the Identity cell back to the stored name to say
+    so" read as an instruction to type the stored name back in. The label has
+    to name the checkbox route (in the user's own terms) and the empty-cell
+    route, in words that stand on their own."""
+    dlg = SecuritiesDialog(conn)
+    text = dlg.blurb.text()
+    assert "to say so" not in text
+    assert "checkbox" in text                      # the route the user expected
+    assert "keep the stored name as the identity" in text
+    assert "leave the Identity cell empty" in text  # the other route
+    assert "keeps the stored name" in text
+    assert "IDENTITY" in text and "DESCRIPTION" in text
+
+
+def test_emptying_the_identity_cell_keeps_the_stored_name_with_its_description(
+        conn):
+    """The blurb's second route, pinned to chosen(): an empty Identity cell
+    falls back to the stored name, and the row still carries its Description
+    edit because it is still ticked."""
+    acct = ledger.create_account(conn, "401k", "investment")
+    _buy(conn, acct, "INTL EQUITY INDEX")
+    dlg = SecuritiesDialog(conn)
+    row = _row_for(dlg, "INTL EQUITY INDEX")
+    dlg.table.item(row, IDENTITY).setText("")
+    dlg.table.item(row, DESCRIPTION).setText("International Equity Index")
+    picked = [s for s in dlg.chosen() if s.old == "INTL EQUITY INDEX"]
+    assert len(picked) == 1
+    assert picked[0].symbol == "INTL EQUITY INDEX"
+    assert picked[0].name == "International Equity Index"
+
+
+def test_unticking_a_row_yields_nothing_at_all_from_chosen(conn):
+    """The blurb's first route: an unticked row is skipped whole -- its
+    Description edit does not travel either."""
+    acct = ledger.create_account(conn, "401k", "investment")
+    _buy(conn, acct, "INTL EQUITY INDEX")
+    dlg = SecuritiesDialog(conn)
+    row = _row_for(dlg, "INTL EQUITY INDEX")
+    dlg.table.item(row, DESCRIPTION).setText("International Equity Index")
+    dlg.table.item(row, INCLUDE).setCheckState(Qt.Unchecked)
+    assert [s for s in dlg.chosen() if s.old == "INTL EQUITY INDEX"] == []
+
+
 def test_select_none_clears_every_tick(conn, world):
     dlg = SecuritiesDialog(conn)
     dlg._set_all(False)
     for row in range(dlg.table.rowCount()):
         assert dlg.table.item(row, INCLUDE).checkState() != Qt.Checked
     assert dlg.chosen() == []
+
+
+# ---------------------------------------------------------------------------
+# a proposal that would affect nothing
+# ---------------------------------------------------------------------------
+def _true_rows(conn, symbol) -> int:
+    """The number of stored rows carrying `symbol`, counted independently of
+    securities.usage_counts so the Rows column is checked against the file
+    rather than against the function that fills it."""
+    total = 0
+    for table in securities.SYMBOL_TABLES:
+        total += int(conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE symbol=?", (symbol,)).fetchone()[0])
+    return total
+
+
+def test_a_catalog_only_symbol_is_not_offered_as_a_change(conn, world):
+    """The user's report: "I'm seeing a row that says 0 description recorded.
+    Why would you propose something if it affects 0 items?"
+
+    A securities catalog row that outlived its transactions has no rows in any
+    SYMBOL_TABLES table, so applying anything for it would write a catalog name
+    and move nothing. It may be listed -- it is part of what the file knows --
+    but never ticked, never tickable, and never described as a change."""
+    conn.execute("INSERT INTO securities(symbol, name) VALUES(?,?)",
+                 ("ZZORPHAN ZZ ORPHAN CORP", None))
+    conn.commit()
+    assert _true_rows(conn, "ZZORPHAN ZZ ORPHAN CORP") == 0
+
+    dlg = SecuritiesDialog(conn)
+    row = _row_for(dlg, "ZZORPHAN ZZ ORPHAN CORP")
+    split = dlg._splits[row]
+
+    assert not split.actionable
+    assert split.symbol == split.old and split.name is None   # nothing to apply
+    assert dlg.table.item(row, ROWS).text() == "0"
+    tick = dlg.table.item(row, INCLUDE)
+    assert tick.checkState() == Qt.Unchecked
+    assert not tick.flags() & Qt.ItemIsUserCheckable
+    status = dlg.table.item(row, STATUS).text()
+    assert "catalog" in status and "nothing to change" in status
+    # ... and it does not travel through chosen(), nor get counted as an option
+    assert [s for s in dlg.chosen() if s.old == "ZZORPHAN ZZ ORPHAN CORP"] == []
+    assert "option contract" not in dlg.tally.text()
+
+
+def test_every_zero_row_symbol_is_left_alone(conn, world):
+    """The invariant behind the fix, over the whole list: the Rows column and
+    the tick agree, because both read the same counts."""
+    conn.execute("INSERT INTO securities(symbol, name) VALUES(?,?)",
+                 ("ZZORPHAN ZZ ORPHAN CORP", None))
+    conn.commit()
+    dlg = SecuritiesDialog(conn)
+    for row, split in enumerate(dlg._splits):
+        if dlg.table.item(row, ROWS).text() == "0":
+            assert not split.actionable, f"{split.old!r} proposed but moves nothing"
+            assert dlg.table.item(row, INCLUDE).checkState() == Qt.Unchecked
+
+
+def test_the_rows_column_counts_the_rows_the_symbol_actually_has(conn, world):
+    """Rows must be the TRUE number of stored rows carrying the stored spelling
+    -- the set apply_splits would move -- for a row that re-keys and for one
+    whose identity differs from its spelling only by letter case. A count read
+    under any other key (the proposed identity, a folded spelling) reads 0 or
+    reads another security's rows, and the number the user approves is a
+    fiction."""
+    _buy(conn, world["ib"], "zzta", date="2020-02-02")
+    _buy(conn, world["ib"], "ZZTA", date="2020-03-03")
+    investments.rebuild_holdings(conn, world["ib"])
+    dlg = SecuritiesDialog(conn)
+
+    rekeyed = _row_for(dlg, "VGT VANGUARD INFO TECH ETF")
+    assert dlg._splits[rekeyed].changes_key                  # it does re-key
+    assert dlg.table.item(rekeyed, ROWS).text() == \
+        f"{_true_rows(conn, 'VGT VANGUARD INFO TECH ETF'):,}"
+
+    for spelling in ("zzta", "ZZTA"):
+        row = _row_for(dlg, spelling)
+        truth = _true_rows(conn, spelling)
+        assert truth > 0
+        assert dlg.table.item(row, ROWS).text() == f"{truth:,}"

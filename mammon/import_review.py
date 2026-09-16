@@ -64,6 +64,7 @@ __all__ = [
     "build_exchange_review",
     "mapped_from_exchange_record",
     "crypto_import_counts",
+    "fill_crypto_times",
     "import_records_via_review",
     "resolve_or_create_transfer_account",
     "save_new",
@@ -266,6 +267,7 @@ class MappedRow:
     fee_symbol: str = ""          # coin the network fee was paid in (e.g. ETH)
     fee_quantity: str = ""        # Decimal text, unsigned fee magnitude
     tx_hash: str = ""             # on-chain hash: the exact dedup key
+    time: str = ""                # HH:MM:SS the source stated; orders a day (SRD 5.8j)
     raw: dict = field(default_factory=dict)
     # True when ``payee`` was carried in VERBATIM from the source record -- an OFX
     # <NAME>/<PAYEE>, a QIF payee, or a tabular importer's explicit payee column
@@ -869,6 +871,7 @@ def mapped_from_crypto_record(rec, *, with_price: bool = False) -> MappedRow:
         fee_symbol=fee_symbol,
         fee_quantity=fee_quantity,
         tx_hash=(rec.tx_hash or ""),
+        time=(getattr(rec, "time", "") or ""),
     )
 
 
@@ -910,6 +913,7 @@ def mapped_from_exchange_record(rec) -> MappedRow:
         price=(rec.price or ""),
         commission_cents=int(rec.fee_cents or 0),
         tx_hash=(rec.txn_id or ""),
+        time=(getattr(rec, "time", "") or ""),
         raw={"source_type": raw} if raw else {},
     )
 
@@ -1034,6 +1038,35 @@ def _find_crypto_transfer_leg(conn, account_id: int, mapped: MappedRow, act: str
                 continue
         return row
     return None
+
+
+def fill_crypto_times(conn, account_id: int, records) -> int:
+    """Give rows this account already knows the time of day the export states.
+
+    The review builders skip a known hash and never write, so this is the
+    re-import's one write: a posted event with no time (imported before
+    migration 70) gets it through :func:`crypto.fill_missing_time`, and a row
+    still pending review gets it on its queue row. A recorded time is never
+    replaced. Holdings are rebuilt when a posted row changed, since the day's
+    order may have. Returns the rows changed."""
+    from . import crypto
+    changed = posted = 0
+    for rec in records:
+        if not getattr(rec, "is_success", True):
+            continue
+        h = (getattr(rec, "tx_hash", "") or "").strip()
+        t = (getattr(rec, "time", "") or "").strip()
+        if not h or not t:
+            continue
+        n = crypto.fill_missing_time(conn, account_id, h, t)
+        posted += n
+        changed += n + conn.execute(
+            "UPDATE review_items SET time=? WHERE account_id=? AND tx_hash=? "
+            "AND state='pending' AND time IS NULL", (t, account_id, h)).rowcount
+    conn.commit()
+    if posted:
+        crypto.rebuild_holdings(conn, account_id)
+    return changed
 
 
 def crypto_import_counts(conn, account_id: int, records) -> tuple[int, dict]:
@@ -1741,7 +1774,8 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
     if use_action in crypto.CASH_ACTIONS:
         txn_id = crypto.record_cash(
             conn, account_id, use_date, cents, action=use_action,
-            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
 
     # A TRADE moves the cash sleeve; everything else coin-only leaves it alone.
@@ -1749,13 +1783,15 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
         txn_id = crypto.record_buy(
             conn, account_id, use_date, use_symbol, use_qty, abs(cents),
             price=(mapped.price or None), fee_amount=fee_cents, memo=(m or None),
-            tx_hash=(mapped.tx_hash or None))
+            tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
     if use_action == "SELL":
         txn_id = crypto.record_sell(
             conn, account_id, use_date, use_symbol, use_qty, abs(cents),
             price=(mapped.price or None), fee_amount=fee_cents, memo=(m or None),
-            tx_hash=(mapped.tx_hash or None))
+            tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
 
     # Coin leaving or arriving with no cash leg. On an EXCHANGE these still have
@@ -1774,19 +1810,22 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
             conn, account_id, use_date, use_action, symbol=use_symbol,
             quantity=signed, price=(mapped.price or None),
             basis=(fmv if use_action == "TRANSFER_IN" else None),
-            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
     if use_action in crypto.REMOVE_ACTIONS and fmv is not None:
         txn_id = crypto.record_send(
             conn, account_id, use_date, use_symbol, use_qty, fmv,
             payee=use_payee, fee_symbol=(mapped.fee_symbol or None),
             fee_quantity=(mapped.fee_quantity or None), fee_amount=fee_cents,
-            memo=(m or None), tx_hash=(mapped.tx_hash or None))
+            memo=(m or None), tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
     if use_action in crypto.ADD_ACTIONS and fmv is not None:
         txn_id = crypto.record_income(
             conn, account_id, use_date, use_action, use_symbol, use_qty, fmv,
-            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None))
+            payee=use_payee, memo=(m or None), tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
         return _finish_crypto(conn, account_id, txn_id, review_id)
 
     if use_action in crypto.WALLET_DEBIT_ACTIONS:
@@ -1795,12 +1834,14 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
             payee=use_payee, action=use_action,
             fee_symbol=(mapped.fee_symbol or None),
             fee_quantity=(mapped.fee_quantity or None),
-            memo=(m or None), tx_hash=(mapped.tx_hash or None))
+            memo=(m or None), tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
     else:
         txn_id = crypto.record_wallet_credit(
             conn, account_id, use_date, use_symbol, use_qty,
             payee=use_payee, action=use_action, memo=(m or None),
-            tx_hash=(mapped.tx_hash or None))
+            tx_hash=(mapped.tx_hash or None),
+            time=(mapped.time or None))
     return _finish_crypto(conn, account_id, txn_id, review_id)
 
 
@@ -2105,7 +2146,7 @@ def _fill_missing_price(conn, txn_id: int, entry) -> Optional[str]:
     """
     from mammon import investments
     row = conn.execute(
-        "SELECT symbol, date, price, amount, commission, quantity "
+        "SELECT id, account_id, symbol, date, price, amount, commission, quantity "
         "FROM investment_transactions WHERE id=?", (txn_id,)).fetchone()
     if row is None or (row["price"] not in (None, "")):
         return None                       # nothing missing; leave it alone
@@ -2122,7 +2163,11 @@ def _fill_missing_price(conn, txn_id: int, entry) -> Optional[str]:
     conn.execute("UPDATE investment_transactions SET price=? WHERE id=?",
                  (str(price), txn_id))
     symbol = (row["symbol"] or "").strip()
-    if symbol and row["date"]:
+    # The row keeps the price the download stated, but the share side of an
+    # option exercise or assignment is priced by the contract, not the market,
+    # so it never becomes price history (investments.option_delivery_leg_ids).
+    if (symbol and row["date"]
+            and row["id"] not in investments.option_delivery_leg_ids(conn, [row])):
         lo, hi = bounds if bounds else (None, None)
         investments.record_prices_if_absent(
             conn, [(symbol, row["date"], price, "txn", lo, hi)])
@@ -2344,8 +2389,8 @@ def persist_entries(conn, account_id: int, entries, batch_id=None) -> int:
             " check_number, is_transfer, transfer_account, raw_json, label, "
             " matched_txn_id, match_method, is_investment, action, symbol, quantity, "
             " price, commission, payee_supplied, batch_id, "
-            " is_crypto, fee_symbol, fee_quantity, tx_hash, state, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, "
+            " is_crypto, fee_symbol, fee_quantity, tx_hash, time, state, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, "
             "        'pending', datetime('now'))",
             (account_id, (m.transaction_id or None), m.account_ref, m.date,
              m.amount_cents, m.payee, m.memo, m.check_number,
@@ -2356,7 +2401,7 @@ def persist_entries(conn, account_id: int, entries, batch_id=None) -> int:
              (m.quantity or None), (m.price or None), (m.commission_cents or None),
              1 if m.payee_supplied else 0, batch_id,
              1 if m.is_crypto else 0, (m.fee_symbol or None),
-             (m.fee_quantity or None), (m.tx_hash or None)),
+             (m.fee_quantity or None), (m.tx_hash or None), (m.time or None)),
         )
         if cur.rowcount:
             entry.review_id = int(cur.lastrowid)
@@ -2405,6 +2450,7 @@ def _entry_from_row(row) -> ReviewEntry:
         fee_symbol=_g("fee_symbol", "") or "",
         fee_quantity=_g("fee_quantity", "") or "",
         tx_hash=_g("tx_hash", "") or "",
+        time=_g("time", "") or "",
         raw=json.loads(row["raw_json"] or "{}"),
     )
     return ReviewEntry(

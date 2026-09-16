@@ -36,6 +36,30 @@ What counts as a future event, and why each is not double-counted:
   be dismissed or turned into a definition. ``include_predictions=False``
   gives the reminders-only view.
 
+A transfer INTERNAL to the projected accounts is not an event at all. When
+both ends of a transfer are inside ``account_ids``, the calendar used to show
+the same payee twice on the same day, once positive and once negative --
+money that never left the set. Both legs are dropped, on every source that can
+produce a pair: an entered row (``_mirrored_inside``, which insists on a
+mutual ``transfer_pair_id`` and amounts that cancel), a scheduled transfer
+definition's two legs, and a projected loan payment whose funding account is
+displayed alongside the loan (both via ``_internal``). Only one end inside the
+set still shows, because that IS money arriving or leaving.
+
+The suppression must never move a balance, and the guard is that only exactly
+cancelling pairs are dropped; a leg dated before the window sits in
+``opening`` on both sides, so that nets out too. Two entered shapes therefore
+keep BOTH legs on purpose - a cross-currency transfer (legs are cents in two
+currencies, which ``project`` already sums raw, see compartment C) and a split
+whose transfer sits on a split line, the pre-entered loan payment being the
+live example: the funder pays interest the loan account never receives, so the
+pair is not net-neutral and hiding it would understate the outflow. The
+LOAN-source projection of that same payment IS dropped when both ends are
+displayed, on the user's rule that a loan shown beside the account paying it
+is a net-worth view; no UI can reach that combination today (calendar slots
+and the Projected Balances picker offer spending accounts only), so it is an
+API-level courtesy, not a balance the user reads.
+
 Predicted-vs-scheduled dedup, and why it lives HERE. Two guards used to be
 asked to keep a reminder and a prediction of the same bill apart, and both
 are month-shaped or text-shaped:
@@ -115,13 +139,56 @@ def _day_before(iso: str) -> str:
     return _iso(_dt.date.fromisoformat(iso) - _dt.timedelta(days=1))
 
 
+def _mirrored_inside(row, by_id: dict, inset: set) -> bool:
+    """True when this ENTERED row is one half of a transfer whose other half is
+    also being projected, so neither half is an event (see the module
+    docstring).
+
+    The test is deliberately strict: the two rows must point AT EACH OTHER
+    through ``transfer_pair_id`` and their amounts must cancel exactly. That is
+    what makes the suppression symmetric - whatever hides one leg hides the
+    other - and therefore incapable of moving a balance. Two real shapes fail
+    it on purpose: a split whose transfer lives on a split LINE (the parent row
+    carries the whole amount and no pair link, as a pre-entered loan payment
+    does, where the funder pays interest the loan account never receives), and
+    a cross-currency transfer, whose legs are cents in two different currencies
+    and so do not cancel. Both keep showing both legs, which is the honest
+    answer: the pair is not net-neutral."""
+    taid = row["transfer_account_id"]
+    pair = row["transfer_pair_id"]
+    if taid is None or pair is None or int(taid) not in inset:
+        return False
+    other = by_id.get(int(pair))
+    if other is None:                       # mirror leg outside the window
+        return False
+    back = other["transfer_pair_id"]
+    return (back is not None and int(back) == int(row["id"])
+            and int(other["amount"]) == -int(row["amount"]))
+
+
+def _internal(counter_account_id, inset: set, show_internal: bool) -> bool:
+    """True when this leg's counter-account is also being projected, i.e. the
+    money never leaves the displayed set, so NEITHER leg is an event (see the
+    module docstring). ``counter_account_id`` is ``None`` for anything that is
+    not a transfer."""
+    if show_internal or counter_account_id is None:
+        return False
+    return int(counter_account_id) in inset
+
+
 def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
                      include_predictions: bool = True,
-                     today: Optional[str] = None) -> list[ProjectedEvent]:
+                     today: Optional[str] = None,
+                     show_internal_transfers: bool = False) -> list[ProjectedEvent]:
     """Every future event on the accounts in ``[start, end]`` (see the module
     docstring for what counts), in date order. Predictions are read from
     history up to ``today`` (``start`` when omitted) and placed from their next
-    expected date on."""
+    expected date on.
+
+    ``show_internal_transfers=True`` restores the pre-suppression behavior and
+    lists both legs of a transfer internal to ``account_ids`` (see the module
+    docstring); nothing in the app asks for it, it exists so the rule has one
+    switch rather than a fork."""
     ids = [int(a) for a in account_ids]
     if not ids:
         return []
@@ -132,18 +199,25 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
     # (account_id, date, payee key, signed cents) of every SCHEDULED event put
     # in the window, so a prediction of the same bill can be dropped below.
     sched_marks: list[tuple[int, _dt.date, str, int]] = []
-    for t in conn.execute(
-            f"SELECT id, account_id, date, payee, amount, scheduled FROM transactions "
-            f"WHERE account_id IN ({marks}) AND date >= ? AND date <= ? ORDER BY date, id",
-            [*ids, start, end]).fetchall():
+    rows = conn.execute(
+        f"SELECT id, account_id, date, payee, amount, scheduled, transfer_account_id, "
+        f"transfer_pair_id FROM transactions "
+        f"WHERE account_id IN ({marks}) AND date >= ? AND date <= ? ORDER BY date, id",
+        [*ids, start, end]).fetchall()
+    by_id = {int(r["id"]): r for r in rows}
+    for t in rows:
+        if not show_internal_transfers and _mirrored_inside(t, by_id, inset):
+            continue
         out.append(ProjectedEvent(t["date"], int(t["account_id"]), t["payee"] or "",
                                   int(t["amount"]), ENTERED, pending=bool(t["scheduled"]),
                                   txn_id=int(t["id"])))
     for d in scheduled.list_scheduled(conn, active_only=True):
+        taid = d.get("transfer_account_id")
+        if d["account_id"] in inset and _internal(taid, inset, show_internal_transfers):
+            continue
         legs = []
         if d["account_id"] in inset:
             legs.append((d["account_id"], d["amount"]))
-        taid = d.get("transfer_account_id")
         if taid is not None and taid in inset:
             legs.append((taid, -d["amount"]))
         if not legs:
@@ -164,6 +238,11 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
         aid = int(r["account_id"])
         funder = loans.funding_account(conn, aid)
         if aid not in inset and (funder is None or funder not in inset):
+            continue
+        # Both ends of the payment displayed: it is an internal double entry
+        # like any other transfer, so neither leg is listed.
+        if aid in inset and funder is not None and _internal(funder, inset,
+                                                             show_internal_transfers):
             continue
         try:
             sched = loans.amortization_schedule(conn, aid)
@@ -228,7 +307,8 @@ def projected_events(conn, account_ids: Iterable[int], start: str, end: str, *,
 
 
 def project(conn, account_ids: Iterable[int], start: str, end: str, *,
-            include_predictions: bool = True, today: Optional[str] = None) -> Projection:
+            include_predictions: bool = True, today: Optional[str] = None,
+            show_internal_transfers: bool = False) -> Projection:
     """Balance at the end of every day from ``start`` through ``end`` across
     ``account_ids`` (summed), starting from the ledger balance the day before
     ``start`` and applying each day's events. ``low``/``low_date`` mark the
@@ -242,7 +322,8 @@ def project(conn, account_ids: Iterable[int], start: str, end: str, *,
     opening = sum(ledger.account_balance(conn, aid, _day_before(start)) for aid in ids)
     by_day: dict[str, list[ProjectedEvent]] = {}
     for e in projected_events(conn, ids, start, end,
-                              include_predictions=include_predictions, today=today):
+                              include_predictions=include_predictions, today=today,
+                              show_internal_transfers=show_internal_transfers):
         by_day.setdefault(e.date, []).append(e)
     days: list[ProjectedDay] = []
     balance = opening

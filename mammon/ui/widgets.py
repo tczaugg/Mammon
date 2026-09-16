@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 _GearMenu = QMenu
 
 from mammon import (backup, categorize, crypto, db, downloads, fx, import_review,
-                    investments, ledger, loans, scheduled)
+                    instruments, investments, ledger, loans, rebalance, scheduled)
 from mammon import webslinger as webslinger_mod
 from mammon.ui import prefs, sounds, style
 from mammon.ui.import_review_widget import ImportReviewPanel
@@ -1923,6 +1923,39 @@ _INV_ACTION_CHOICES = [
     ("Transfer cash out", "XOut"),
 ]
 
+# The option vocabulary (SRD 5.8e-8), offered ONLY while the chosen security is
+# explicitly kind='option'. It is a separate list, appended to the combo at that
+# moment and taken away again, for two reasons:
+#   * "Sell to Close" beside "Sell" in a list of 34 is a trap for someone
+#     entering an ordinary stock sale, and these seven verbs are meaningless for
+#     a share -- there is nothing to exercise;
+#   * a ledger whose securities are all UNCLASSIFIED never sees them, so the
+#     dialog it offers is byte for byte the one it offered before options
+#     existed.
+# The codes are investments' own stored spellings; nothing here invents one.
+_INV_OPTION_ACTION_CHOICES = [
+    ("Buy to open (long contract)", investments.OPTION_BUY_TO_OPEN),
+    ("Sell to close", investments.OPTION_SELL_TO_CLOSE),
+    ("Sell to open (write)", investments.OPTION_SELL_TO_OPEN),
+    ("Buy to close (cover)", investments.OPTION_BUY_TO_CLOSE),
+    ("Exercise", investments.OPTION_EXERCISE),
+    ("Assignment", investments.OPTION_ASSIGN),
+    ("Expire worthless", investments.OPTION_EXPIRE),
+]
+_INV_OPTION_CODES = {code for _label, code in _INV_OPTION_ACTION_CHOICES}
+
+# The three ENDINGS are not written field-by-field like a trade: each has lot and
+# basis rules (a rolled premium, a share leg, a short-lot relief) that live in
+# exactly one place, the domain writer named here. The dialog collects the
+# contract and the count; investments does the rest. Assignment is not listed --
+# record_option_exercise reads long-vs-short off the position and picks Exercise
+# or Assign itself, so the user cannot pick the wrong one.
+_INV_OPTION_ENDINGS = {
+    investments.OPTION_EXERCISE: "record_option_exercise",
+    investments.OPTION_ASSIGN: "record_option_exercise",
+    investments.OPTION_EXPIRE: "record_option_expiration",
+}
+
 # A stock split is STORED as Quicken stores it: new shares per TEN old, so a
 # 2-for-1 is 20 and a 1-for-2 reverse is 5 (investments._apply_txn multiplies the
 # running quantity by q/10, and the OFX importer's <SPLIT> handler writes the
@@ -1990,12 +2023,27 @@ _INV_ACTION_FIELDS = {
     "StkSplit": {"security", "split", "memo"},
     "XIn":      {"amount", "catxfer"},
     "XOut":     {"amount", "catxfer"},
+    # An opening or closing option TRADE is an ordinary trade: contracts, a
+    # premium per unit, the cash that moved. (The amount matters more here than
+    # for a share -- the quantity x price fallback is multiplier-blind, SRD
+    # 5.8e-5 -- which resolve_qpa already computes with the multiplier.)
+    investments.OPTION_BUY_TO_OPEN:   _TRADE_FIELDS,
+    investments.OPTION_SELL_TO_CLOSE: _TRADE_FIELDS,
+    investments.OPTION_SELL_TO_OPEN:  _TRADE_FIELDS,
+    investments.OPTION_BUY_TO_CLOSE:  _TRADE_FIELDS,
+    # An ending carries no price and no amount to type: the premium being rolled,
+    # the strike cash and the share leg are all computed by the domain writer
+    # (SRD 5.8e-7). Quantity is in CONTRACTS and may be left blank for "all".
+    investments.OPTION_EXERCISE: {"security", "quantity", "memo"},
+    investments.OPTION_ASSIGN:   {"security", "quantity", "memo"},
+    investments.OPTION_EXPIRE:   {"security", "quantity", "memo"},
 }
 
 # Actions whose stored amount is cash OUT (negative); the rest store a positive
 # amount -- cash in for Sell/Div/MiscInc/RtrnCap/XIn, or a cash-neutral gross
 # trade value used for cost basis for Reinvest/ShrsIn.
-_INV_CASH_OUT = {"Buy", "MiscExp", "XOut"}
+_INV_CASH_OUT = {"Buy", "MiscExp", "XOut",
+                 investments.OPTION_BUY_TO_OPEN, investments.OPTION_BUY_TO_CLOSE}
 
 
 class InvestmentTransactionDialog(QDialog):
@@ -2042,13 +2090,23 @@ class InvestmentTransactionDialog(QDialog):
         for sym in investments.symbols_used(conn, account_id):
             self.security.addItem(sym)
         self._add_field(form, "security", "Security", self.security)
+        # The option verbs follow the SECURITY, so they can only be chosen for a
+        # contract. Wired before _load so an existing option row finds a real
+        # item rather than the "(as imported)" fallback.
+        self._option_actions_shown = False
+        self.security.currentTextChanged.connect(self._refresh_action_choices)
 
         self.quantity = QLineEdit()
         self._add_field(form, "quantity", "Quantity", self.quantity)
         self.price = QLineEdit()
         self._add_field(form, "price", "Price", self.price)
         self.amount = QLineEdit()
-        self.amount.setPlaceholderText("$ gross (Quantity x Price)")
+        # The cash that moved, commission included -- what a broker statement and
+        # Quicken's total show, and what the cash balance and realized P/L read
+        # (investments._proceeds_of). It used to invite the GROSS figure, which
+        # the replay then charged the commission against a second time.
+        self.amount.setPlaceholderText(
+            "$ total cash (Qty x Price, + commission on a buy, - on a sale)")
         self._add_field(form, "amount", "Amount", self.amount)
         self.commission = QLineEdit()
         self._add_field(form, "commission", "Commission", self.commission)
@@ -2102,6 +2160,44 @@ class InvestmentTransactionDialog(QDialog):
         form.addRow(lbl, widget)
         self._field_rows.setdefault(key, []).append((lbl, widget))
 
+    def _refresh_action_choices(self, *_args):
+        """Offer the option verbs when -- and only when -- the chosen security is
+        EXPLICITLY ``kind='option'`` (SRD 5.8e-8).
+
+        The gate is ``investments.is_option``, which is false for a NULL kind, so
+        an unclassified security offers precisely the 34 actions it always did.
+        The verbs are appended and removed rather than permanently listed because
+        "Sell to Close" sitting beside "Sell" is a mis-click waiting to happen on
+        a stock row. They are never taken away while one of them is SELECTED --
+        removing the current item would silently move the action to another."""
+        want = False
+        symbol = self.security.currentText().strip().upper()
+        if symbol:
+            try:
+                want = investments.is_option(self.conn, symbol)
+            except Exception:
+                want = False
+        if want == self._option_actions_shown:
+            return
+        if want:
+            for label, code in _INV_OPTION_ACTION_CHOICES:
+                if self.action.findData(code) < 0:
+                    self.action.addItem(label, code)
+            self._option_actions_shown = True
+            return
+        if self.action.currentData() in _INV_OPTION_CODES:
+            return
+        for _label, code in _INV_OPTION_ACTION_CHOICES:
+            idx = self.action.findData(code)
+            if idx >= 0:
+                self.action.removeItem(idx)
+        self._option_actions_shown = False
+
+    def action_codes(self) -> list:
+        """The action codes the combo is currently offering, in order -- the seam
+        a test reads instead of walking the widget."""
+        return [self.action.itemData(i) for i in range(self.action.count())]
+
     def _apply_action(self):
         """Show only the field rows relevant to the current action."""
         show = _INV_ACTION_FIELDS.get(self.action.currentData(), set())
@@ -2150,30 +2246,66 @@ class InvestmentTransactionDialog(QDialog):
 
     # ---- interdependent Quantity / Price / Amount -------------------------
     @staticmethod
-    def resolve_qpa(qty, price, amount):
+    def resolve_qpa(qty, price, amount, multiplier=None):
         """Pure solver for the Quantity/Price/Amount trio. ``qty``/``price`` are
         Decimals (or None); ``amount`` is integer cents (or None). Returns
         ``(qty, price, amount, status)`` where status is ``computed_amount`` /
         ``computed_price`` / ``computed_qty`` (two supplied, third derived),
         ``consistent`` (all three agree), ``conflict`` (all three supplied but
-        Qty*Price != Amount) or ``insufficient`` (fewer than two, or a zero
-        divisor)."""
+        Qty*Price*multiplier != Amount) or ``insufficient`` (fewer than two, or a
+        zero divisor).
+
+        ``multiplier`` is how many underlying units ONE unit of ``qty``
+        controls. None -- everything that is not a derivative -- means one, and
+        the arithmetic is exactly what it always was. For an option it is the
+        contract size, because ``price`` there is a per-share premium while
+        ``qty`` counts CONTRACTS: 2 contracts at 1.75 costs $350, and a solver
+        that does not know this both computes $3.50 and calls the user's correct
+        $350 a conflict.
+
+        ``instruments.UNKNOWN`` means no source has ever stated the size --
+        pre-2010 symbols carry none, and an adjusted root's is not 100. Then
+        NOTHING is derived and nothing is called a conflict (an inconsistency
+        indistinguishable from an unknown multiplier is not a finding to put in
+        front of a user): the three values come back verbatim as ``unstated``,
+        or as ``needs_amount`` when the cash is the missing one, since that is
+        the one value that cannot be recovered without the contract size."""
         have = sum(v is not None for v in (qty, price, amount))
         if have < 2:
             return qty, price, amount, "insufficient"
+        if multiplier is instruments.UNKNOWN:
+            return qty, price, amount, ("needs_amount" if amount is None
+                                        else "unstated")
+        m = Decimal(1) if multiplier is None else Decimal(multiplier)
         if amount is None:
-            return qty, price, _round_cents(qty * price * _INV_HUNDRED), "computed_amount"
+            return qty, price, _round_cents(qty * price * m * _INV_HUNDRED), "computed_amount"
         if price is None:
             if qty == 0:
                 return qty, price, amount, "insufficient"
-            return qty, Decimal(amount) / (qty * _INV_HUNDRED), amount, "computed_price"
+            return qty, Decimal(amount) / (qty * m * _INV_HUNDRED), amount, "computed_price"
         if qty is None:
             if price == 0:
                 return qty, price, amount, "insufficient"
-            return Decimal(amount) / (price * _INV_HUNDRED), price, amount, "computed_qty"
-        if _round_cents(qty * price * _INV_HUNDRED) == amount:
+            return Decimal(amount) / (price * m * _INV_HUNDRED), price, amount, "computed_qty"
+        if _round_cents(qty * price * m * _INV_HUNDRED) == amount:
             return qty, price, amount, "consistent"
         return qty, price, amount, "conflict"
+
+    def _multiplier(self):
+        """The contract size for the security currently named in this dialog.
+
+        Decimal(1) for a share (and for anything unclassified -- NULL kind means
+        unclassified, never equity, and one is what the arithmetic has always
+        assumed), the stated size for a classified contract, and
+        ``instruments.UNKNOWN`` when the row is an option nothing has stated a
+        size for. The lookup lives in :mod:`mammon.securities` so this layer
+        holds no SQL of its own."""
+        from mammon import securities as _sec
+        conn = getattr(self, "conn", None)
+        if conn is None:
+            return Decimal(1)
+        symbol = self.security.currentText().strip().upper()
+        return _sec.contract_multiplier(conn, symbol or None)
 
     # ---- edit-mode population --------------------------------------------
     def _load(self, txn):
@@ -2181,6 +2313,12 @@ class InvestmentTransactionDialog(QDialog):
             return
         _set_date_edit(self.date, txn["date"])
         code = (txn["action"] or "").strip()
+        # The SYMBOL first, because it decides which actions the combo offers:
+        # looking an option verb up before its contract was known found nothing,
+        # added a bogus "Exercise (as imported)" entry, and then the security
+        # added the real one beside it.
+        if txn["symbol"]:
+            self.security.setEditText(txn["symbol"])
         idx = self.action.findData(code)
         if idx < 0 and code:
             # An action the list does not know -- raw activity text an importer
@@ -2229,9 +2367,13 @@ class InvestmentTransactionDialog(QDialog):
             _q, _p, _a, status = self.resolve_qpa(
                 _dec_or_none(self.quantity.text()),
                 _dec_or_none(self.price.text()),
-                self._amount_or_none())
+                self._amount_or_none(), self._multiplier())
             if status == "insufficient":
                 return False, "Enter at least two of Quantity, Price and Amount."
+            if status == "needs_amount":
+                return False, ("Enter the Amount: no source has stated this "
+                               "contract's multiplier, so the cash cannot be "
+                               "derived from Quantity x Price.")
             if status == "conflict":
                 return False, ("Quantity x Price does not equal Amount -- "
                                "choose which value to recompute.")
@@ -2274,7 +2416,8 @@ class InvestmentTransactionDialog(QDialog):
             qraw = _dec_or_none(self.quantity.text()) if "quantity" in fields else None
             praw = _dec_or_none(self.price.text()) if "price" in fields else None
             araw = self._amount_or_none() if "amount" in fields else None
-            quantity, price, amount, status = self.resolve_qpa(qraw, praw, araw)
+            quantity, price, amount, status = self.resolve_qpa(
+                qraw, praw, araw, self._multiplier())
             if status == "insufficient":
                 quantity, price, amount = qraw, praw, araw
 
@@ -2319,7 +2462,8 @@ class InvestmentTransactionDialog(QDialog):
             qraw = _dec_or_none(self.quantity.text())
             praw = _dec_or_none(self.price.text())
             araw = self._amount_or_none()
-            _q, _p, _a, status = self.resolve_qpa(qraw, praw, araw)
+            _q, _p, _a, status = self.resolve_qpa(qraw, praw, araw,
+                                                  self._multiplier())
             if status == "conflict":
                 self._prompt_recompute(qraw, praw, araw)
                 return  # leave open; user re-confirms with the fixed value
@@ -2336,12 +2480,23 @@ class InvestmentTransactionDialog(QDialog):
             "recomputed?", ["Amount", "Price", "Quantity"], 0, False)
         if not ok:
             return
+        # Through the solver, not inline: this used to repeat the arithmetic and
+        # a second copy is a second place for the contract multiplier to be
+        # forgotten -- which is how the recompute would "fix" a correct $350
+        # into $3.50.
+        m = self._multiplier()
         if choice == "Amount":
-            self.amount.setText(fmt_cents(_round_cents(qty * price * _INV_HUNDRED)))
+            _q, _p, a, status = self.resolve_qpa(qty, price, None, m)
+            if status == "computed_amount":
+                self.amount.setText(fmt_cents(a))
         elif choice == "Price" and qty:
-            self.price.setText(str(Decimal(amount) / (qty * _INV_HUNDRED)))
+            _q, p, _a, status = self.resolve_qpa(qty, None, amount, m)
+            if status == "computed_price":
+                self.price.setText(str(p))
         elif choice == "Quantity" and price:
-            self.quantity.setText(str(Decimal(amount) / (price * _INV_HUNDRED)))
+            q, _p, _a, status = self.resolve_qpa(None, price, amount, m)
+            if status == "computed_qty":
+                self.quantity.setText(str(q))
 
 
 # ---------------------------------------------------------------------------
@@ -3115,7 +3270,9 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
         and net worth use -- so the header total matches the sidebar balance."""
         self.header.setText(self.model.account_name())
         as_of = investments.valuation_as_of(self.conn)
-        val = investments.account_valuation(self.conn, self.account_id, as_of)
+        val = investments.account_valuation(
+            self.conn, self.account_id, as_of,
+            money_market_as_cash=prefs.money_market_as_cash())
         self.valuation_label.setText(
             f"Cash: {fmt_money(val.cash)}     "
             f"Securities: {fmt_money(val.securities)}     "
@@ -3304,6 +3461,9 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
         dlg = InvestmentTransactionDialog(self.conn, self.account_id, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             v = dlg.values()
+            if v["action"] in _INV_OPTION_ENDINGS:
+                self._record_option_ending(v)
+                return
             investments.record_investment(
                 self.conn, self.account_id, v["date"], v["action"],
                 symbol=v["symbol"], quantity=v["quantity"], price=v["price"],
@@ -3311,6 +3471,25 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
                 transfer_account_id=v["transfer_account_id"],
                 split_num=v["split_num"], split_den=v["split_den"])
             self._after_write()
+
+    def _record_option_ending(self, v: dict) -> None:
+        """Write one of the three ENDINGS (exercise, assignment, expiration)
+        through its domain writer instead of record_investment (SRD 5.8e-8).
+
+        The premium of an exercised contract moves into the basis of the shares
+        that change hands, and an expiring contract must leave no phantom
+        position; both rules live in mammon.investments and are not restated
+        here. Exercise and assignment share one writer, which picks between them
+        from the sign of the position, so a user who chose the wrong one of the
+        pair still gets the right row."""
+        writer = getattr(investments, _INV_OPTION_ENDINGS[v["action"]])
+        try:
+            writer(self.conn, self.account_id, v["date"], v["symbol"],
+                   v["quantity"], memo=v["memo"])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Option", str(exc))
+            return
+        self._after_write()
 
     def on_edit(self):
         self._edit_row(self._selected_row())
@@ -3360,12 +3539,21 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
         internally-named funds -- "DOMESTIC BOND INDEX", "S&P 500 EQUITY INDEX"
         -- yield none and are reported as skipped.
 
+        A security whose KIND says it is never quotable
+        (:func:`securities.never_quote`: a money-market sweep, or a classified
+        mutual fund with no ticker of its own) is skipped even when the leading
+        token IS ticker-shaped. That is the case the token test cannot catch --
+        "INTL EQUITY INDEX" offers INTL, a real listed company -- so once the
+        row carries a kind, the offer itself is withdrawn.
+
         The pairing matters as much as the filter: ``price_history`` is keyed by
         the security name a holding is stored under (see
         :func:`investments.latest_price`), so a quote fetched for "ALTY" has to
         be recorded against "ALTY GLOBAL X SUPERDIVIDEND ALTER" to price the
         holding. Recording it under the bare ticker would look like it worked
         and value nothing."""
+        from mammon import securities as _sec
+
         pairs: list = []
         skipped: list = []
         for h in investments.list_holdings(self.conn, self.account_id):
@@ -3377,7 +3565,7 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
                     continue                      # closed position
             except (InvalidOperation, ValueError):
                 pass
-            tick = investments.ticker_of(name)
+            tick = "" if _sec.never_quote(self.conn, name) else investments.ticker_of(name)
             if tick:
                 pairs.append((name, tick))
             else:
@@ -3821,7 +4009,16 @@ class HoldingsDialog(QDialog):
     an UNPRICED holding (no recorded price) shows blank Price / Market Value /
     Gain-Loss, matching Quicken. Double-clicking a holding opens its price-history
     line chart -- or, when nothing is recorded for that security, an informational
-    message rather than an empty chart."""
+    message rather than an empty chart.
+
+    An OPTION contract (a security explicitly classified ``kind='option'``) is
+    listed indented under its underlying but counted entirely separately -- its
+    own contracts, its own premium, its own market value (SRD 5.8e-8). Three
+    columns appear for the account that holds one (Expires, Strike, Right), a
+    written contract reads as the liability it is, and an expiring or expired
+    contract is flagged from ``investments.option_position_problems`` rather than
+    from any expiry rule restated here. None of that appears for an account with
+    no classified contract, which is every account of an unclassified ledger."""
 
     # Currently-Held tab columns. (Dividends slots in before Gain/Loss; the
     # older constant names/indices for Symbol..Market are unchanged.)
@@ -3829,13 +4026,35 @@ class HoldingsDialog(QDialog):
     # columns because they are two facts (SRD 5.8e-2). One column carrying
     # "VGT VANGUARD INFO TECH ETF" is how a bare ticker from a later import had
     # nowhere to go but a second security.
-    SYMBOL, DESCRIPTION, SHARES, COST, PRICE, MARKET, DIVIDENDS, GAIN = range(8)
+    # Dividends, Gain/Loss, Gain % and Annual % measure the CURRENT HOLDING --
+    # from the day its share count last left zero -- with each dividend counted
+    # once: cash dividends added, reinvested ones already in Market Value
+    # (portfolio.holding_performances, the same figures the Investment
+    # Performance report shows for a report with no period).
+    SYMBOL, DESCRIPTION, SHARES, COST, PRICE, MARKET, DIVIDENDS, GAIN, GAIN_PCT, ANNUAL = range(10)
     HEADERS = ["Symbol", "Description", "Shares", "Cost Basis", "Price",
-               "Market Value", "Dividends", "Gain/Loss"]
+               "Market Value", "Dividends", "Gain/Loss", "Gain %", "Annual %"]
+    # Three MORE columns, and two retitled, when the account actually holds a
+    # contract (SRD 5.8e-8). They appear only then: an account with no
+    # kind='option' row -- which is every row of an unclassified ledger -- gets
+    # the eight columns above, with their original titles, unchanged.
+    EXPIRES, STRIKE, RIGHT = 10, 11, 12
+    OPTION_HEADERS = ["Symbol", "Description", "Shares / Contracts", "Cost Basis",
+                      "Price / Premium", "Market Value", "Dividends", "Gain/Loss",
+                      "Gain %", "Annual %", "Expires", "Strike", "Right"]
+    # securities.option_right stores OSI's LETTER ('C'/'P'); the word is for the
+    # reader only, so the mapping lives here and not in the domain layer.
+    RIGHT_WORDS = {"C": "Call", "P": "Put"}
+    # Roles on the Symbol cell, beside Qt.UserRole (which stays the TRUE symbol,
+    # so charting an indented option row still charts that contract).
+    CUE_ROLE = Qt.UserRole + 1        # investments.OPTION_CUE_*, or None
+    GROUP_ROLE = Qt.UserRole + 2      # the symbol this row sorts under
     # Previously-Held tab columns: a sold-out position keeps no shares/market
-    # value, so it reports its symbol, dividend total, and realized P/L only.
-    C_SYMBOL, C_DESCRIPTION, C_DIV, C_PL = range(4)
-    CLOSED_HEADERS = ["Symbol", "Description", "Dividends", "Realized P/L"]
+    # value, so it reports its dividend total, realized P/L, and the total return
+    # of its last holding (realized gain plus cash dividends) with its annual rate.
+    C_SYMBOL, C_DESCRIPTION, C_DIV, C_PL, C_GAIN, C_ANNUAL = range(6)
+    CLOSED_HEADERS = ["Symbol", "Description", "Dividends", "Realized P/L",
+                      "Gain/Loss", "Annual %"]
 
     def __init__(self, conn, account_id, parent=None):
         super().__init__(parent)
@@ -3854,18 +4073,30 @@ class HoldingsDialog(QDialog):
         # One replay feeds both tabs (and reconciles to the security-filtered
         # register): currently-held positions tie to holding_values row-for-row;
         # previously-held ones (now zero shares) carry their realized P/L.
-        self._held = investments.held_positions(conn, account_id, as_of=self.as_of)
+        # The currently-held tab is built from DISPLAY LINES, not bare positions:
+        # the domain layer does the grouping, the terms lookup and the expiration
+        # cue, so no option rule and no SQL lands here. With no contracts in the
+        # account the lines are the positions in the same order, so this is the
+        # old ``held_positions`` call by another name.
+        self._lines = investments.holdings_view(conn, account_id, as_of=self.as_of)
+        self._held = [ln.position for ln in self._lines]
+        self._has_options = any(ln.is_option for ln in self._lines)
         self._closed = investments.closed_positions(conn, account_id, as_of=self.as_of)
+        # Each holding's total return over its current holding, dividends included.
+        self._load_performance()
         # The one number the accounts list shows for this account. Taken from the
         # same function it uses rather than re-added here, so the two cannot drift.
-        self.valuation = investments.account_valuation(conn, account_id, self.as_of)
+        self.valuation = investments.account_valuation(
+            conn, account_id, self.as_of,
+            money_market_as_cash=prefs.money_market_as_cash())
 
         outer = QVBoxLayout(self)
         self.tabs = QTabWidget()
 
         # --- Currently Held tab (self.table kept as the public handle) ---
-        self.table = QTableWidget(len(self._held) + 1, len(self.HEADERS))
-        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        headers = self.OPTION_HEADERS if self._has_options else self.HEADERS
+        self.table = QTableWidget(len(self._held) + 1, len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -3873,8 +4104,11 @@ class HoldingsDialog(QDialog):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(self.SYMBOL, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(self.DESCRIPTION, QHeaderView.Stretch)
-        for col in (self.SHARES, self.COST, self.PRICE, self.MARKET,
-                    self.DIVIDENDS, self.GAIN):
+        cols = [self.SHARES, self.COST, self.PRICE, self.MARKET,
+                self.DIVIDENDS, self.GAIN, self.GAIN_PCT, self.ANNUAL]
+        if self._has_options:
+            cols += [self.EXPIRES, self.STRIKE, self.RIGHT]
+        for col in cols:
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3892,7 +4126,7 @@ class HoldingsDialog(QDialog):
         ch = self.closed_table.horizontalHeader()
         ch.setSectionResizeMode(self.C_SYMBOL, QHeaderView.ResizeToContents)
         ch.setSectionResizeMode(self.C_DESCRIPTION, QHeaderView.Stretch)
-        for col in (self.C_DIV, self.C_PL):
+        for col in (self.C_DIV, self.C_PL, self.C_GAIN, self.C_ANNUAL):
             ch.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.closed_table.cellDoubleClicked.connect(self._on_closed_double_clicked)
         self.closed_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3904,7 +4138,10 @@ class HoldingsDialog(QDialog):
 
         # Footer: the three figures the account bar is built from. Total is the
         # accounts-list balance for this account.
-        securities = sum(p.market_value for p in self._held)
+        # ``cash_equivalents`` is 0 unless the user asked for sweeps to count as
+        # cash, in which case the valuation already moved them into cash --
+        # leaving them in this sum too would make Securities + Cash exceed Total.
+        securities = sum(p.market_value for p in self._held) - self.valuation.cash_equivalents
         self.total_label = QLabel(
             f"Securities: {fmt_money(securities)}     "
             f"Cash: {fmt_money(self.valuation.cash)}     "
@@ -3921,7 +4158,62 @@ class HoldingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         outer.addWidget(buttons)
-        self.resize(620, 400)
+        self.resize(820, 400)
+
+    def _load_performance(self):
+        """Each holding's total return over its current holding, dividends
+        included, and which sold-out funds continue as a current one (a fund
+        conversion the user linked, investments.link_holding)."""
+        import datetime as _dt
+        from mammon import portfolio
+        self._perf = portfolio.holding_performances(
+            self.conn, self.account_id, self.as_of or _dt.date.today().isoformat())
+        self._successors = investments.holding_successors(self.conn, self.account_id)
+
+    def link_candidates(self, symbol):
+        """``[(from, to, date, cents)]`` funds this holding can continue from: on a
+        day it was bought, that fund was wholly sold for exactly the money."""
+        return investments.conversion_candidates(self.conn, self.account_id, symbol)
+
+    def links_into(self, symbol):
+        """``[(from, to, date)]`` links that make up ``symbol``'s holding."""
+        group = {f for f, t in self._successors.items() if t == symbol} | {symbol}
+        return [ln for ln in investments.holding_links(self.conn, self.account_id)
+                if ln[1] in group]
+
+    def link_holding(self, from_symbol, to_symbol, date):
+        investments.link_holding(self.conn, self.account_id, from_symbol, to_symbol, date)
+        self._refresh_performance()
+
+    def unlink_holding(self, from_symbol):
+        investments.unlink_holding(self.conn, self.account_id, from_symbol)
+        self._refresh_performance()
+
+    def _refresh_performance(self):
+        self._load_performance()
+        self._fill_table()
+        self._fill_closed_table()
+
+    @staticmethod
+    def _pct_text(pct) -> str:
+        return "" if pct is None else "%+.1f%%" % pct
+
+    def _gain_cells(self, perf, priced):
+        """``(dividends, gain, gain %, annual %)`` cells for one holding. Blank
+        gain cells for an unpriced holding (Quicken), and red for a loss."""
+        income = self._cell(fmt_cents(perf.income if perf else 0), right=True)
+        if perf is None or not priced:
+            return income, self._cell("", right=True), self._cell("", right=True), \
+                self._cell("", right=True)
+        gain = self._cell(fmt_cents(perf.gain), right=True)
+        pct = self._cell(self._pct_text(perf.gain_pct), right=True)
+        annual = self._cell(self._pct_text(perf.annual_return), right=True)
+        if perf.gain < 0:
+            for cell in (gain, pct):
+                cell.setForeground(QBrush(QColor(style.negative_color())))
+        if perf.annual_return is not None and perf.annual_return < 0:
+            annual.setForeground(QBrush(QColor(style.negative_color())))
+        return income, gain, pct, annual
 
     def _description_cell(self, symbol):
         """The security's DESCRIPTION as its own cell.
@@ -3935,31 +4227,81 @@ class HoldingsDialog(QDialog):
         return self._cell(name or "")
 
     def _fill_table(self):
-        for i, p in enumerate(self._held):
+        for i, ln in enumerate(self._lines):
+            p = ln.position
             priced = p.price is not None
-            sym = self._cell(p.symbol)
+            # An option indents under its underlying but keeps its own symbol in
+            # Qt.UserRole -- the grouping is visual only, and charting the row
+            # must still chart the CONTRACT, not the stock it is written on.
+            sym = self._cell(f"    {p.symbol}" if ln.grouped else p.symbol)
             sym.setData(Qt.UserRole, p.symbol)
+            sym.setData(self.CUE_ROLE, ln.cue)
+            sym.setData(self.GROUP_ROLE, ln.group)
             self.table.setItem(i, self.SYMBOL, sym)
             self.table.setItem(i, self.DESCRIPTION,
                                self._description_cell(p.symbol))
-            self.table.setItem(i, self.SHARES, self._cell(fmt_qty(p.quantity), right=True))
+            # CONTRACTS for an option, and never added to the underlying's share
+            # count -- they are different quantities of different instruments.
+            shares = self._cell(fmt_qty(p.quantity), right=True)
+            self.table.setItem(i, self.SHARES, shares)
             self.table.setItem(i, self.COST, self._cell(fmt_cents(p.cost_basis), right=True))
             # Unpriced holding: blank Price / Market Value / Gain-Loss (Quicken).
             self.table.setItem(
                 i, self.PRICE,
                 self._cell(fmt_qty(p.price) if priced else "", right=True))
-            self.table.setItem(
-                i, self.MARKET,
-                self._cell(fmt_cents(p.market_value) if priced else "", right=True))
-            self.table.setItem(
-                i, self.DIVIDENDS, self._cell(fmt_cents(p.dividends), right=True))
-            gain = self._cell(
-                fmt_cents(p.unrealized_pl) if p.unrealized_pl is not None else "",
-                right=True)
-            if p.unrealized_pl is not None and p.unrealized_pl < 0:
-                gain.setForeground(QBrush(QColor(style.negative_color())))
+            market = self._cell(
+                fmt_cents(p.market_value) if priced else "", right=True)
+            self.table.setItem(i, self.MARKET, market)
+            income, gain, pct, annual = self._gain_cells(self._perf.get(p.symbol), priced)
+            self.table.setItem(i, self.DIVIDENDS, income)
             self.table.setItem(i, self.GAIN, gain)
+            self.table.setItem(i, self.GAIN_PCT, pct)
+            self.table.setItem(i, self.ANNUAL, annual)
+            if self._has_options:
+                self._fill_option_cells(i, ln, sym, shares, market)
         self._fill_cash_row(len(self._held))
+
+    def _fill_option_cells(self, row, ln, sym, shares, market):
+        """The three option columns, the short-as-a-liability colouring and the
+        expiration cue for one row. Reached only when the account holds at least
+        one contract, and a no-op for the share rows in that account.
+
+        Colours come from :mod:`mammon.ui.style` (never a literal), so both the
+        liability sign and the cue follow the theme into dark mode."""
+        self.table.setItem(row, self.EXPIRES,
+                           self._cell(fmt_date(ln.expiration) if ln.expiration else ""))
+        self.table.setItem(
+            row, self.STRIKE,
+            self._cell(fmt_qty(ln.strike) if ln.strike is not None else "", right=True))
+        # Stored as OSI's single letter; shown as the word, because "C" beside a
+        # strike is exactly the abbreviation a user mis-reads as "cash".
+        right = (ln.right or "").strip().upper()[:1]
+        self.table.setItem(row, self.RIGHT,
+                           self._cell(self.RIGHT_WORDS.get(right, "")))
+        if ln.is_option and ln.multiplier is not None:
+            shares.setToolTip(f"{fmt_qty(ln.quantity)} contracts x "
+                              f"{fmt_qty(ln.multiplier)} units per contract")
+        # A written contract (or a short position) is an OBLIGATION: its market
+        # value is already negative upstream, and it reads as one here.
+        if ln.is_short:
+            liability = QBrush(QColor(style.negative_color()))
+            shares.setForeground(liability)
+            if market.text():
+                market.setForeground(liability)
+        expires_item = self.table.item(row, self.EXPIRES)
+        tip = "; ".join(p.detail for p in ln.problems if p.detail)
+        if not tip and ln.cue == investments.OPTION_CUE_EXPIRING and ln.expiration:
+            tip = f"Expires {fmt_date(ln.expiration)}"
+        if tip:
+            sym.setToolTip(tip)
+            expires_item.setToolTip(tip)
+        if ln.cue is None:
+            return
+        colour = (style.negative_color() if ln.cue == investments.OPTION_CUE_EXPIRED
+                  else style.accent_color())
+        brush = QBrush(QColor(colour))
+        sym.setForeground(brush)
+        expires_item.setForeground(brush)
 
     def _fill_cash_row(self, row):
         """The account's uninvested cash, as the last row of Currently Held.
@@ -3974,8 +4316,11 @@ class HoldingsDialog(QDialog):
         font.setItalic(True)
         cash.setFont(font)
         self.table.setItem(row, self.SYMBOL, cash)
-        for col in (self.DESCRIPTION, self.SHARES, self.COST, self.PRICE,
-                    self.DIVIDENDS, self.GAIN):
+        blank = [self.DESCRIPTION, self.SHARES, self.COST, self.PRICE,
+                 self.DIVIDENDS, self.GAIN, self.GAIN_PCT, self.ANNUAL]
+        if self._has_options:
+            blank += [self.EXPIRES, self.STRIKE, self.RIGHT]
+        for col in blank:
             self.table.setItem(row, col, self._cell(""))
         market = self._cell(fmt_cents(self.valuation.cash), right=True)
         if self.valuation.cash < 0:
@@ -3995,6 +4340,15 @@ class HoldingsDialog(QDialog):
             if p.realized_pl < 0:
                 pl.setForeground(QBrush(QColor(style.negative_color())))
             self.closed_table.setItem(i, self.C_PL, pl)
+            successor = self._successors.get(p.symbol)
+            if successor:
+                # Its return is part of the fund it was converted into.
+                gain = self._cell(f"continued as {successor}")
+                annual = self._cell("")
+            else:
+                _income, gain, _pct, annual = self._gain_cells(self._perf.get(p.symbol), True)
+            self.closed_table.setItem(i, self.C_GAIN, gain)
+            self.closed_table.setItem(i, self.C_ANNUAL, annual)
 
     @staticmethod
     def _cell(text, right=False):
@@ -4027,8 +4381,29 @@ class HoldingsDialog(QDialog):
             return
         menu = QMenu(self)
         act = menu.addAction(f"Price history: {symbol}…")
-        if menu.exec_(table.viewport().mapToGlobal(pos)) is act:
+        # A fund conversion (SRD 5.8d): measure this holding's return from the
+        # fund it replaced. Offered only where the rule holds, so nothing here can
+        # link two ordinary trades.
+        choices = {}
+        if table is self.table:
+            for frm, to, date, cents in self.link_candidates(symbol):
+                choices[menu.addAction(
+                    f"Continues from {frm} (converted {fmt_date(date)}, "
+                    f"{fmt_money(cents)})")] = ("link", frm, to, date)
+            for frm, to, date in self.links_into(symbol):
+                choices[menu.addAction(f"Stop continuing from {frm}")] = ("unlink", frm)
+        elif self._successors.get(symbol):
+            choices[menu.addAction(
+                f"Stop continuing as {self._successors[symbol]}")] = ("unlink", symbol)
+        chosen = menu.exec_(table.viewport().mapToGlobal(pos))
+        if chosen is act:
             self.show_price_history(symbol)
+        elif chosen in choices:
+            what = choices[chosen]
+            if what[0] == "link":
+                self.link_holding(*what[1:])
+            else:
+                self.unlink_holding(what[1])
 
     @staticmethod
     def _symbol_at(table, row):
@@ -4241,6 +4616,27 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
             "Fetch the latest USD close for every coin held here and record it "
             "in price history.")
         self.act_quotes.triggered.connect(self.get_quotes)
+        # The parity the investment register has had: a coin can be renamed
+        # (user-reported: "the crypto accounts don't have a Rename Security like
+        # the investment accounts"). Its price series moves with it, since that
+        # is keyed by the SYM-USD pair rather than by the bare coin.
+        self.act_rename_coin = self.gear_menu.addAction("Rename Coin…")
+        self.act_rename_coin.setToolTip(
+            "Rename a coin across this wallet's events, its review rows and its "
+            "price history.")
+        # A lambda, not the bound method: QAction.triggered hands a `checked`
+        # bool to any slot that can take one, and these take an argument for
+        # the tests. Connected directly, the bool arrived as the ANSWER --
+        # `fix_coin_prices(confirmed=False)` -- and the menu item did nothing.
+        self.act_rename_coin.triggered.connect(lambda *_: self.rename_coin())
+        # Shown only when there IS something to repair: prices filed under the
+        # bare coin symbol, which the valuation (keyed by SYM-USD) cannot see, so
+        # the holding reads as worth nothing.
+        self.act_fix_prices = self.gear_menu.addAction("Fix Coin Prices…")
+        self.act_fix_prices.setToolTip(
+            "Some prices are filed under the bare coin symbol instead of its "
+            "SYM-USD pair, so the coin values at zero. Move them.")
+        self.act_fix_prices.triggered.connect(lambda *_: self.fix_coin_prices())
         self.gear_button = QToolButton()
         self.gear_button.setObjectName("registerGear")
         self.gear_button.setText("⚙")
@@ -4250,6 +4646,7 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
         self.gear_button.setMenu(self.gear_menu)
         header_layout.addWidget(self.gear_button)
         layout.addWidget(self.header_box)
+        self._sync_price_repair()
 
         # Coin filter: pick one coin to see only its transactions (with the
         # running Coin Bal). '(All coins)' clears the filter.
@@ -4361,6 +4758,80 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
 
         self._refresh_header()
         self._sync_review_action()
+
+    # ---- coins: rename, and prices filed under the wrong symbol -----------
+    def _say(self, title, text):
+        """Report an outcome. A seam: a headless test overrides it, because a
+        QMessageBox exec_-ed under the offscreen platform never returns
+        (CLAUDE.md)."""
+        QMessageBox.information(self, title, text)
+
+    def _sync_price_repair(self):
+        """Offer the price repair only when this wallet actually has one."""
+        self._misfiled = crypto.misfiled_prices(self.conn, self.account_id)
+        self.act_fix_prices.setVisible(bool(self._misfiled))
+
+    def coins_held(self) -> list:
+        """Every coin this wallet's events name, for the rename picker."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT symbol FROM crypto_transactions WHERE account_id=? "
+            "AND symbol IS NOT NULL AND symbol<>'' ORDER BY symbol",
+            (self.account_id,))]
+
+    def _ask_coin_rename(self):
+        """``(old, new)`` from the user, or None. A seam: headless tests call
+        :meth:`rename_coin` with the pair directly and open no modal."""
+        coins = self.coins_held()
+        if not coins:
+            self._say("Rename Coin", "This wallet records no coin yet.")
+            return None
+        current = self.coin_filter.currentData()
+        old, ok = QInputDialog.getItem(self, "Rename Coin", "Coin:", coins,
+                                       coins.index(current) if current in coins else 0,
+                                       False)
+        if not ok or not old:
+            return None
+        new, ok = QInputDialog.getText(self, "Rename Coin", f"Rename {old} to:",
+                                       text=old)
+        new = (new or "").strip()
+        return (old, new) if ok and new and new != old else None
+
+    def rename_coin(self, pair=None):
+        """Rename one coin here, its review rows and its price series."""
+        pair = pair or self._ask_coin_rename()
+        if not pair:
+            return 0
+        old, new = pair
+        renamed = crypto.apply_coin_renames(self.conn, self.account_id, [(old, new)])
+        self._reload_coin_filter()
+        self.refresh()
+        self._sync_price_repair()
+        self._say("Rename Coin",
+                  f"{renamed} row{'' if renamed == 1 else 's'} renamed from "
+                  f"{old} to {new}.")
+        return renamed
+
+    def fix_coin_prices(self, confirmed=None):
+        """Move prices filed under a bare coin symbol to its SYM-USD pair."""
+        if not self._misfiled:
+            return 0
+        names = ", ".join(f"{c} ({n})" for c, n in sorted(self._misfiled.items()))
+        if confirmed is None:
+            confirmed = QMessageBox.question(
+                self, "Fix Coin Prices",
+                f"Move these prices to the symbol the valuation reads "
+                f"({', '.join(crypto.pair_symbol(c) for c in sorted(self._misfiled))})?"
+                f"\n\n{names}\n\nThe coin itself keeps its name.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+        if not confirmed:
+            return 0
+        moved = sum(crypto.adopt_misfiled_prices(self.conn, coin)
+                    for coin in list(self._misfiled))
+        self.refresh()
+        self._sync_price_repair()
+        self._say("Fix Coin Prices",
+                  f"{moved} price{'' if moved == 1 else 's'} moved.")
+        return moved
 
     def _configure_columns(self):
         """Fixed widths for Date + the right-aligned numeric columns, a tight
@@ -5406,7 +5877,22 @@ class AccountDetailsDialog(QDialog):
             "Exchange: a custodial account holding coins plus cash, trading coin "
             "for dollars.\n"
             "Reopen the register after changing this.")
+        # What KIND OF MONEY this account holds. A target mix covers one
+        # treatment at a time (SRD 5.8f): a Roth dollar and a 401(k) dollar are
+        # taxed differently on the way out and are rebalanced apart. Never
+        # guessed from the name -- "IRA" appears in Roth IRAs too.
+        self.tax_treatment = QComboBox()
+        self.tax_treatment.addItem("Not set", "")
+        for key in rebalance.TAX_TREATMENTS:
+            self.tax_treatment.addItem(rebalance.TAX_TREATMENT_LABELS[key], key)
+        i = self.tax_treatment.findData(rebalance.account_treatment(account))
+        self.tax_treatment.setCurrentIndex(max(i, 0))
+        self.tax_treatment.setToolTip(
+            "Which kind of money this account holds. Target & Drift groups "
+            "accounts by it, so a 401(k) mix is never averaged with a Roth one, "
+            "and money held for someone else can be left out entirely.")
         self._details_form = form
+        form.addRow("Tax treatment", self.tax_treatment)
         form.addRow("Crypto kind", self.crypto_kind)
         form.addRow("Cost basis", self.lot_method)
         self._populate_secured_by(account)
@@ -5560,6 +6046,9 @@ class AccountDetailsDialog(QDialog):
         from mammon import asset_values
         kind = (type_text or "").strip()
         for widget, show in ((self.lot_method, kind == "investment"),
+                             (self.tax_treatment,
+                              kind in (ledger.INVESTMENT_LIKE_TYPES
+                                       + ("checking", "savings", "cash"))),
                              (self.crypto_kind, kind == crypto.CRYPTO_ACCOUNT_TYPE),
                              (self.property_address, kind == "asset"),
                              (self.institution, kind != "asset"),
@@ -5574,6 +6063,7 @@ class AccountDetailsDialog(QDialog):
             "name": self.name.text().strip(),
             "type": self.type.currentText(),
             "lot_method": self.lot_method.currentData(),
+            "tax_treatment": self.tax_treatment.currentData() or None,
             # Only meaningful for a crypto account; a NULL kind means "not
             # crypto", so a non-crypto type must not be stamped with one.
             "crypto_kind": (self.crypto_kind.currentData()
@@ -7645,7 +8135,7 @@ class DownloadLogDialog(QDialog):
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
     def __init__(self, conn, db_path=None, parent=None, webslinger=None,
-                 db_key=None):
+                 db_key=None, on_database_opened=None):
         super().__init__(parent)
         self.conn = conn
         self.db_path = db_path
@@ -7653,6 +8143,11 @@ class MainWindow(QMainWindow):
         # the database, or any file (mammon.ui.password_dialog). None means the
         # ledger is plaintext, which is the default and stays completely silent.
         self.db_key = db_key
+        # Called with the path each time open_database() switches the window to
+        # a file. The real launch connects it to mammon.last_db.remember, so the
+        # next Start Menu launch reopens this ledger; left None, as every test
+        # leaves it, nothing is recorded (see the mammon.last_db docstring).
+        self._on_database_opened = on_database_opened
         # The automated-download collaborator. It degrades gracefully when
         # nothing is configured (Download simply explains what is missing);
         # tests inject a fake. Mammon holds NO credentials of its own -- the
@@ -7792,6 +8287,10 @@ class MainWindow(QMainWindow):
         # one register would leave the others broken, so it does not belong on
         # the investment register's gear beside the per-account actions.
         tools.addAction("Securities…", self._securities_dialog)
+        # Sits beside Securities because it is the other half of the same
+        # question -- that one settles WHICH instrument a row is, this one
+        # settles WHAT KIND of instrument it is -- and it is likewise file-wide.
+        tools.addAction("Security Kinds…", self._security_kinds_dialog)
         # Exchange Rates is FILE-wide, not per-account: one dated rate for a
         # currency pair values every account in that currency, so it lives here
         # beside the other file-wide managers, not on a register's gear.
@@ -8163,6 +8662,11 @@ class MainWindow(QMainWindow):
                 old.close()
             except Exception:
                 pass
+        if self._on_database_opened is not None:
+            try:
+                self._on_database_opened(path)
+            except Exception:                   # remembering is a convenience
+                pass
 
     def _ask_db_password(self, path):
         """Seam: ask the user for ``path``'s password. Overridden by tests, which
@@ -8474,6 +8978,10 @@ class MainWindow(QMainWindow):
                        f"imported directly.")
             msg.append(f"{dups} duplicates skipped, {errors} errors.")
         msg.extend(review_lines)
+        # Audited once, after the whole set: a removal in one year's file is
+        # often answered by an arrival in the next.
+        msg.extend(self._import_findings_lines(sorted(
+            {aid for r in direct_results for aid in r.investment_account_ids})))
         if failed:
             msg.append("")
             msg.append("Could not read: " + ", ".join(failed))
@@ -8617,11 +9125,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Import failed", str(exc))
             return
         self._refresh_all()
-        QMessageBox.information(
-            self, "Import complete",
-            f"Added {res.added} transactions "
-            f"({res.transfers} transfers, {res.investments} investments).\n"
-            f"{res.duplicates} duplicates skipped, {res.errors} errors.")
+        self._report_import("Import complete", res)
 
     # ---- registers --------------------------------------------------------
     def _resolve_open_edit(self, register) -> bool:
@@ -9206,6 +9710,9 @@ class MainWindow(QMainWindow):
         # same distinction in _import_report.)
         parsed, prior = import_review.crypto_import_counts(
             self.conn, account_id, records)
+        # Rows already known still take the time of day this file states, so
+        # re-importing an export orders a day's events that predate the column.
+        import_review.fill_crypto_times(self.conn, account_id, records)
         entries = builder(self.conn, account_id, records)
         inserted = import_review.persist_entries(
             self.conn, account_id, entries, batch_id=batch_id)
@@ -9560,7 +10067,25 @@ class MainWindow(QMainWindow):
             f"Added {imp.added} transactions "
             f"({imp.transfers} transfers, {imp.investments} investments).\n"
             f"{imp.duplicates} duplicates skipped, {imp.errors} errors."
-            + recon_line)
+            + recon_line
+            + "".join("\n" + line for line in self._import_findings_lines(
+                imp.investment_account_ids)))
+
+    def _import_findings_lines(self, account_ids):
+        """What an investment import could not settle, as report lines (SRD 6.2a),
+        or none. The person importing is the only one who can resolve these, so
+        they are shown with the import rather than left for a later surprise."""
+        from mammon.reports import import_audit
+        if not account_ids:
+            return []
+        try:
+            findings = import_audit.audit(self.conn, account_ids)
+        except Exception:                  # pragma: no cover - never block the report
+            return []
+        if not findings:
+            return []
+        return ["", "Worth checking before relying on these accounts:",
+                *import_audit.format_findings(findings)]
 
     def _accounts_list_dialog(self):
         """Open the classic accounts list (reachable from the toolbar and
@@ -9600,6 +10125,19 @@ class MainWindow(QMainWindow):
         held it, so this refreshes the open registers rather than only itself."""
         from mammon.ui.securities_dialog import SecuritiesDialog
         dlg = SecuritiesDialog(self.conn, parent=self)
+        dlg.changed.connect(self._refresh_all)
+        dlg.exec_()
+
+    def _security_kinds_dialog(self):
+        """Open the classification review (Tools menu): what each security IS --
+        equity, fund, option contract -- proposed by the audit report and
+        confirmed by the user. It writes only the kind and the option-terms
+        columns through mammon.securities.set_kinds; no symbol, ticker, holding,
+        lot or transaction moves, so this cannot restate a position. The open
+        registers refresh anyway, because a contract's multiplier changes what
+        derived amounts are checked against."""
+        from mammon.ui.securities_dialog import SecurityKindDialog
+        dlg = SecurityKindDialog(self.conn, parent=self)
         dlg.changed.connect(self._refresh_all)
         dlg.exec_()
 
@@ -10053,7 +10591,7 @@ class MainWindow(QMainWindow):
         (the smallest categories that together make up 10% of the total), and
         clicking ``Other`` drills into its components -- the same rollup + drill
         the Income and Asset-Allocation pies use, all three reusing
-        ``SlicesPieCanvas`` / ``group_small_slices`` (SRD 5.9c) so the logic
+        ``SlicesPieCanvas`` / ``group_small_slices`` (SRD 5.8d) so the logic
         lives in one place. Wedge percentages read against the whole period
         total even inside the drill. The Back button (or a click off the pie)
         returns."""
@@ -10129,7 +10667,7 @@ class MainWindow(QMainWindow):
         slice (everything under 10% of the total), and clicking ``Other`` drills
         into its component categories -- the same rollup + drill-down the
         asset-allocation pie uses. Both reuse ``SlicesPieCanvas`` /
-        ``group_small_slices`` (SRD 5.9c), so the threshold/rollup logic lives in
+        ``group_small_slices`` (SRD 5.8d), so the threshold/rollup logic lives in
         exactly one place. The Back button (or a click off the pie) returns."""
         from mammon import reports
         from mammon.ui.report_filters import (CATEGORY_KIND_INCOME,
