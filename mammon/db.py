@@ -1685,7 +1685,7 @@ DELETE FROM category_rules;
 # A webSlinger script returns one array per extraction, and the gather-every-list
 # fallback in ``webslinger._rows_from`` concatenated ALL of them. America First's
 # script declares "The subAccountList maps shortName to accountId", so its
-# lookup table -- ``{"id": 6239395, "shortName": "Checking"}`` -- was flattened in
+# lookup table -- ``{"id": 1234567, "shortName": "Checking"}`` -- was flattened in
 # with the transactions and became review rows with no date, no amount and no
 # text: eleven blank lines at the top of the user's review list on a fresh
 # reload. ``_rows_from`` now tests each array's row SHAPE (a per-bank key name
@@ -1800,7 +1800,7 @@ DELETE FROM rename_meta WHERE key = 'ranking_version';
 """
 
 
-# Migration 61: the crypto redesign (SRD §5.8; design locked in review 55a2d8a0).
+# Migration 61: the crypto redesign (SRD §5.8h; design locked in review 55a2d8a0).
 # Two crypto account KINDS share ``type='crypto'`` and are BOTH multi-token and valued
 # like securities (a quantity per token, priced at market):
 #   * 'wallet'   -- a single address / paper wallet holding coins/ERC-20 tokens ONLY,
@@ -1941,6 +1941,144 @@ ALTER TABLE allocation_target_lines ADD COLUMN locked INTEGER NOT NULL DEFAULT 0
 """
 
 
+# 67: instrument kind and option terms on securities (SRD 5.8). Mammon has so
+# far had exactly one instrument shape -- a thing with a symbol and a share
+# count -- and an option contract is not that thing: it has a multiplier, an
+# underlying, an expiration and a strike, and it stops existing on a date. This
+# migration only makes those facts STORABLE. It classifies nothing, backfills
+# nothing and rewrites no identity; every existing row comes out the far side
+# with NULL kind and behaves exactly as it did before.
+#
+# The shape, and why:
+#   * `option_right`, NOT `right`. RIGHT became a SQLite keyword in 3.39 (right
+#     joins). It still happens to parse as a bare column name in ALTER TABLE,
+#     SELECT, ORDER BY and named INSERT, but a keyword as a column name is a
+#     latent parse failure waiting in the one context nobody tests, and the
+#     prefix costs nothing.
+#   * Columns on `securities`, not a parallel `options` table. Every read path
+#     already looks a security up by symbol; a second table would mean a second
+#     lookup on every price, holdings and valuation path -- exactly the fan-out
+#     that made this defect systemic in the first place.
+#   * `multiplier` is Decimal-encoded TEXT, matching the existing share-quantity
+#     and per-share-price encoding. Never a float, never an int.
+#   * NULL `kind` means UNCLASSIFIED, not `equity`. Code must branch on "known
+#     option" versus "not known to be an option", so an unclassified row keeps
+#     behaving as it does today and nothing changes under the user until they
+#     say so.
+#   * `kind_source` so a source-stated type, a derived classification and a user
+#     decision stay distinguishable forever -- the same three-valued reasoning
+#     that `securities.recorded_ticker` already earns its keep with.
+_V67 = """
+ALTER TABLE securities ADD COLUMN kind TEXT;            -- NULL = unclassified
+ALTER TABLE securities ADD COLUMN multiplier TEXT;      -- Decimal TEXT, NULL = 1
+ALTER TABLE securities ADD COLUMN underlying TEXT;      -- the root's identity
+ALTER TABLE securities ADD COLUMN expiration TEXT;      -- ISO, NULL = perpetual
+ALTER TABLE securities ADD COLUMN strike TEXT;          -- Decimal TEXT
+ALTER TABLE securities ADD COLUMN option_right TEXT;    -- 'C' | 'P'
+ALTER TABLE securities ADD COLUMN kind_source TEXT;     -- 'source'|'derived'|'user'
+"""
+
+
+# 68 -- realized P/L is replayed by the position's sign, and a sale's amount is
+# net cash (investments._apply_trade / _proceeds_of). Covering a short used to
+# realize nothing and every sale charged its commission twice, and each year-end
+# snapshot stored that year's realized total and lots. They are DERIVED, so they
+# are dropped rather than corrected: a read without snapshots is a from-inception
+# replay under the new rules, and the next rebuild_holdings writes them again.
+# The same shape as _V37, which dropped them when lots arrived.
+_V68 = """
+DELETE FROM holdings_checkpoints;
+"""
+
+# 69 -- an opening balance counts from its OPENING DATE (ledger.opening_balance_on),
+# as Quicken's balances do; it used to be added to every date, so an account
+# opened in 2002 carried its opening balance in 2000. Year-end balance snapshots
+# for years that END before an account's opening date were written with the
+# opening balance in them. Only those rows are wrong -- a snapshot for the
+# opening year or later includes it under both readings -- so only they are
+# dropped; a read without a snapshot is the exact full sum.
+_V69 = """
+DELETE FROM balance_checkpoints
+WHERE account_id IN (SELECT id FROM accounts
+                     WHERE opening_balance <> 0 AND opening_date IS NOT NULL AND opening_date <> '')
+  AND year < (SELECT CAST(substr(opening_date, 1, 4) AS INTEGER) FROM accounts
+              WHERE accounts.id = balance_checkpoints.account_id);
+"""
+
+# 70 -- a crypto event's TIME OF DAY. Every crypto source states one (a block
+# explorer's UnixTimestamp, an exchange's Timestamp) and the importers used to
+# keep only the date, so a wallet's same-day events had no order but the order
+# they happened to be inserted in. `time` is HH:MM:SS on the same clock as the
+# row's `date` (UTC for every current source); NULL means unknown -- a manual
+# entry or a row imported before this column existed, which a re-import of the
+# same file fills in (SRD 5.8j). Carried on `review_items` too, so a row queued
+# for review keeps its time until it is accepted.
+_V70 = """
+ALTER TABLE crypto_transactions ADD COLUMN time TEXT;
+ALTER TABLE review_items ADD COLUMN time TEXT;
+"""
+
+# 71 -- a partial index over the stock-split rows alone. Every valuation at a
+# past date asks whether a split falls between a price's date and the date being
+# valued (investments.latest_price -> _split_events), and without an index that
+# question scanned every investment transaction: net worth history took three
+# times as long. The WHERE expression is matched TEXTUALLY by SQLite's planner,
+# so _split_events must query with exactly this term.
+_V71 = """
+CREATE INDEX IF NOT EXISTS idx_invtxn_splits ON investment_transactions(symbol)
+    WHERE lower(replace(action,' ',''))='stksplit';
+"""
+
+# 72 -- "Dividend" and "Cash Dividend", a broker download's words for a cash
+# dividend, now count as dividends (investments._DIVIDEND_ACTIONS). The year-end
+# holdings snapshots store each position's dividend total, summed without them,
+# so they are dropped and the next rebuild_holdings writes them again -- the
+# same shape as _V68.
+_V72 = """
+DELETE FROM holdings_checkpoints;
+"""
+
+# 73 -- a fund CONVERSION kept as one holding for its return. A plan that closes
+# a fund and moves the money into a new one records it as the old fund sold and
+# the new one bought, often at a different share price, so the share count
+# changes by a ratio no split could state. The row says, for ONE account, that
+# `from_symbol` continues as `to_symbol` from `date`; investments.link_holding
+# only writes it when all of the old fund was sold that day and exactly the
+# proceeds bought the new one. It changes nothing but how a return is measured:
+# prices, charts, holdings and every stored row stay as they are, which is why
+# this is not a security_aliases row (an alias pools price history and folds
+# holdings into one identity everywhere).
+_V73 = """
+CREATE TABLE IF NOT EXISTS holding_links (
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    from_symbol TEXT NOT NULL,
+    to_symbol   TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    PRIMARY KEY (account_id, from_symbol)
+);
+"""
+
+# 74 -- a target mix governs ACCOUNTS THE USER CHOOSES, of ONE tax treatment.
+# User, 2026-09-15: "This mixes kinds of money. 401K + IRA shouldn't be mixed
+# with ROTH which shouldn't be mixed with non-tax special holdings" and "There is
+# no customization for accounts. I wouldn't want to include the [529] accounts
+# here as those are for my kids and not something I consider part of my assets."
+# `accounts.tax_treatment` says what kind of money an account holds (NULL until
+# the user says); `allocation_target_accounts` is the target's own account list,
+# which replaces the sleeve (an enum whose two values both included cash and so
+# never explained why the advice changed); `rebalanced_on` is the date the user
+# last acted, which is the span each holding's drift is measured over.
+_V74 = """
+ALTER TABLE accounts ADD COLUMN tax_treatment TEXT;
+ALTER TABLE allocation_targets ADD COLUMN rebalanced_on TEXT;
+CREATE TABLE IF NOT EXISTS allocation_target_accounts (
+    target_id  INTEGER NOT NULL REFERENCES allocation_targets(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (target_id, account_id)
+);
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -2008,6 +2146,14 @@ MIGRATIONS: list[str] = [
     _V64,
     _V65,
     _V66,
+    _V67,
+    _V68,
+    _V69,
+    _V70,
+    _V71,
+    _V72,
+    _V73,
+    _V74,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

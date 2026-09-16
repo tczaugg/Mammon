@@ -312,7 +312,7 @@ def _looks_like_rows(vals: list) -> bool:
     A script may return several arrays and only some of them are rows. The
     America First script declares "The subAccountList maps shortName to
     accountId", so its ``output_data`` carries a lookup table of
-    ``{"id": 6239395, "shortName": "Checking"}`` beside the per-sub-account
+    ``{"id": 1234567, "shortName": "Checking"}`` beside the per-sub-account
     transaction arrays. Gathered blindly, those 11 lookup entries became 11
     review rows with no date, no amount and no text -- blank lines at the top of
     the user's review list, and a tell that the payload was being flattened

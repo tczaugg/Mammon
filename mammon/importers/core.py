@@ -29,6 +29,7 @@ from mammon.importers.record import (
     NormalizedTxn,
     iso_shift,
     normalize_payee,
+    normalize_security_name,
 )
 
 # Fuzzy-dedup window and acceptance threshold.
@@ -51,9 +52,11 @@ def import_records(
     securities=None,
     prices=None,
     positions=None,
+    instruments=None,
     categories=None,
     tags=None,
     set_cutover: bool = True,
+    registers=None,
 ) -> ImportResult:
     """Ingest ``records`` into the ledger, dedup, and record the run.
 
@@ -61,7 +64,18 @@ def import_records(
     close) tuples) come from a QIF's security master / price history: prices are
     recorded (keyed by the security NAME, which is what investment_transactions
     store), and holdings are rebuilt for every investment account touched, so the
-    accounts can be valued at market."""
+    accounts can be valued at market.
+
+    ``instruments`` are OFX ``<SECLIST>`` entries -- what the FEED stated each
+    security is (an option and its contract terms, a mutual fund, a bond).
+    Kept apart from ``securities`` because it is a statement about KIND, not
+    identity, and it is applied under a precedence rule that lets a person's
+    classification stand (see :func:`mammon.securities.record_stated_kinds`).
+
+    ``registers`` ((account name, type) pairs) names every account whose register
+    the FILE carries, including one with no transactions in it (a QIF's
+    ``QifExtras.registers``). A transfer's other side is created only for an
+    account the file does not carry at all; see :func:`_counterparty_absent`."""
     # An import is a bulk, re-runnable write, so it runs with fsync relaxed and
     # strict durability restored on the way out (db.bulk_write). This is the one
     # choke point every file import passes through, which is why the scope lives
@@ -73,7 +87,9 @@ def import_records(
             default_account=default_account,
             default_account_type=default_account_type,
             securities=securities, prices=prices, positions=positions,
-            categories=categories, tags=tags, set_cutover=set_cutover)
+            instruments=instruments,
+            categories=categories, tags=tags, set_cutover=set_cutover,
+            registers=registers)
 
 
 def _import_records(
@@ -88,9 +104,11 @@ def _import_records(
     securities=None,
     prices=None,
     positions=None,
+    instruments=None,
     categories=None,
     tags=None,
     set_cutover: bool = True,
+    registers=None,
 ) -> ImportResult:
     """The body of :func:`import_records`, which wraps it in db.bulk_write."""
     import_id = conn.execute(
@@ -136,9 +154,9 @@ def _import_records(
     claimed_inv: set[int] = set()
     _apply_categories(conn, categories)
     _apply_tag_master(conn, tags)
-    # Which accounts this FILE carries a register for, by date: the test for
-    # whether the counter-side of a transfer will arrive on its own.
-    covered = _covered_accounts(conn, plain + transfers + investments, acct_cache)
+    # Which accounts this FILE carries a register for: the test for whether the
+    # counter-side of a transfer will arrive on its own.
+    covered = _covered_accounts(conn, plain + transfers + investments, acct_cache, registers)
     for r in plain:
         _import_plain(conn, r, import_id, acct_cache, cat_cache, result, claimed, covered)
     _import_transfers(conn, transfers, import_id, acct_cache, result, claimed, covered)
@@ -148,8 +166,10 @@ def _import_records(
         if aid is not None:
             inv_account_ids.add(aid)
 
-    _apply_securities_and_prices(conn, securities, prices, inv_account_ids)
+    _apply_securities_and_prices(conn, securities, prices, inv_account_ids, instruments,
+                                 traded_symbols={r.symbol for r in investments if r.symbol})
     _apply_positions(conn, positions, inv_account_ids, result)
+    result.investment_account_ids = sorted(inv_account_ids)
 
     # Build the year-end cash balance snapshots for every account this import
     # touched, so the live read path (ledger.account_balance) serves balances
@@ -220,7 +240,8 @@ def _apply_tag_master(conn, tags) -> None:
     conn.commit()
 
 
-def _apply_securities_and_prices(conn, securities, prices, inv_account_ids) -> None:
+def _apply_securities_and_prices(conn, securities, prices, inv_account_ids,
+                                 instruments=None, traded_symbols=None) -> None:
     """After investment rows land: record the parsed price history and rebuild
     holdings for every investment account touched. Prices are keyed by the
     security NAME (Quicken's ``Y`` field, which investment_transactions and hence
@@ -241,6 +262,23 @@ def _apply_securities_and_prices(conn, securities, prices, inv_account_ids) -> N
     if securities:
         securities_mod.record_master(conn, securities)
 
+    # What an OFX <SECLIST> STATED each security is. Separate from the QIF
+    # master above because it answers a different question -- kind, not
+    # identity -- and because it must run AFTER the investment rows and the
+    # master: a classification cannot conjure a row, it only classifies one
+    # that exists. What lands is decided by precedence (user > source >
+    # derived), so re-importing a file a person has since corrected changes
+    # nothing.
+    if instruments:
+        securities_mod.record_seclist(conn, instruments)
+
+    # An option's multiplier is the factor between its quoted price and its
+    # value, and that is a fact about how the SOURCE counted quantity, not about
+    # the contract: the symbol says 100, but a Quicken export's own totals are
+    # quantity x price. Taken from the trades just recorded, before any price is
+    # learned or any delivery leg is matched against a contract size.
+    securities_mod.record_observed_multipliers(conn, traded_symbols)
+
     # Capture transaction-carried prices (the QIF ``I`` field on Buy/Sell/ReinvDiv)
     # into price_history, recorded with source 'qif-txn' and DO-NOTHING precedence
     # so an explicit !Type:Prices quote (recorded just below, DO-UPDATE) always
@@ -256,10 +294,25 @@ def _apply_securities_and_prices(conn, securities, prices, inv_account_ids) -> N
             if symbol and name:
                 sym_to_name.setdefault(symbol, name)
         rows = [
-            (sym_to_name.get(sym, sym), date, close, "qif")
+            (sym_to_name.get(sym, normalize_security_name(sym)), date, close, "qif")
             for (sym, date, close) in prices
         ]
         investments.record_prices(conn, rows)
+
+    # Quicken's price list states an option delivery's STRIKE as that day's close
+    # for the shares. Dropped here, after this file's rows and prices have both
+    # landed. The accounts to check are not only the ones this file traded in:
+    # every yearly export repeats the WHOLE price list, so a later file with no
+    # rows for an account re-adds the strike closes an earlier import removed.
+    # Any account trading a symbol this file priced is checked again.
+    drop_accounts = set(inv_account_ids)
+    if prices:
+        priced = {name for name, _date, _close, _src in rows}
+        drop_accounts.update(
+            aid for aid, symbol in conn.execute(
+                "SELECT DISTINCT account_id, symbol FROM investment_transactions")
+            if symbol in priced)
+    investments.drop_delivery_strike_closes(conn, drop_accounts)
 
     for aid in inv_account_ids:
         investments.rebuild_holdings(conn, aid)
@@ -484,31 +537,45 @@ def _loan_payment_splits(conn, account_id, r):
 # ---------------------------------------------------------------------------
 # transfers (collapse mirror pairs; dedup against existing)
 # ---------------------------------------------------------------------------
-def _covered_accounts(conn, records, acct_cache) -> set:
-    """``{(account_id, date)}`` for every record in the batch, keyed by the
-    account the record BELONGS to. A transfer leg whose counter-account is not
-    in this set has no other side coming: nothing later in the file will
-    supply it (see :func:`_import_transfer_leg`)."""
+def _covered_accounts(conn, records, acct_cache, registers=None) -> set:
+    """The ids of every account whose register this FILE carries: each account a
+    record belongs to, plus each account the parser saw a register section for
+    (``registers``), which catches a register with no transactions in it. A
+    transfer leg whose counter-account is not in this set has no other side
+    coming (see :func:`_counterparty_absent`)."""
     out: set = set()
     for r in records:
         name = (r.external_account or "").strip()
-        if not name or not r.date:
+        if not name:
             continue
-        out.add((_resolve_account(conn, name, r.account_type or "checking", acct_cache,
-                                  currency=r.account_currency), r.date))
+        out.add(_resolve_account(conn, name, r.account_type or "checking", acct_cache,
+                                 currency=r.account_currency))
+    for name, account_type in registers or ():
+        name = (name or "").strip()
+        if name:
+            out.add(_resolve_account(conn, name, account_type or "checking", acct_cache))
     return out
 
 
-def _counterparty_absent(conn, covered, account_name, date, acct_cache) -> bool:
-    """True when the file carries no register for ``account_name`` on ``date``,
-    so this leg is the only record of the transfer and its mirror must be
-    created here."""
+def _counterparty_absent(conn, covered, account_name, acct_cache) -> bool:
+    """True when the file carries no register at all for ``account_name``, so
+    this leg is the only record of the transfer and its mirror must be created.
+
+    Deliberately by ACCOUNT, not by date. Keyed on (account, date), a register
+    the file DID carry but with nothing on that day counted as absent, and the
+    other side was invented. Quicken's own exports make that common: the two
+    sides of a card payment dated days apart, a transfer whose other side is
+    in next year's file, a transfer one register simply does not contain. Each
+    invention was a second copy of the money in the other account, and against
+    Quicken's balances that was an account wrong by the full transfer. When the
+    other register is in the file, it supplies exactly what Quicken holds, and
+    the balances then agree with Quicken's to the cent."""
     if covered is None:
         return False
     name = (account_name or "").strip()
     if not name:
         return False
-    return (_resolve_account(conn, name, "checking", acct_cache), date) not in covered
+    return _resolve_account(conn, name, "checking", acct_cache) not in covered
 
 
 def _import_transfers(conn, transfers, import_id, acct_cache, result, claimed,
@@ -571,9 +638,9 @@ def _import_transfers(conn, transfers, import_id, acct_cache, result, claimed,
                 # down payment).
                 if r.amount_cents == 0:
                     _import_plain(conn, r, import_id, acct_cache, {}, result, claimed, covered)
-                elif _counterparty_absent(conn, covered, r.transfer_account, r.date, acct_cache):
-                    # The file holds no register for the counter-account on this
-                    # date, so no other side is coming and this leg is the whole
+                elif _counterparty_absent(conn, covered, r.transfer_account, acct_cache):
+                    # The file holds no register for the counter-account at all,
+                    # so no other side is coming and this leg is the whole
                     # transfer: create the linked pair, as Quicken does with a
                     # one-sided [Account] line. (mammon.export writes each
                     # transfer once for exactly this reason -- given both sides,
@@ -1035,8 +1102,8 @@ def _insert_split(conn, txn_id, cat, amt, memo, acct_cache, cat_cache,
     """Insert one split leg. A bracketed ``[Account]`` category is a TRANSFER leg
     -- the account is resolved (get-or-create) and stored as the split row's
     ``transfer_account_id`` (category_id NULL). Its MIRROR on the counter-account
-    is created here only when the file carries no register for that account on
-    this date; when it does, that register supplies the other side and
+    is created here only when the file carries no register for that account at
+    all; when it does, that register supplies the other side and
     fabricating one would double-count it (the same rule
     _import_transfer_pair follows). Anything else is a plain category leg."""
     text = (cat or "").strip()
@@ -1047,7 +1114,7 @@ def _insert_split(conn, txn_id, cat, amt, memo, acct_cache, cat_cache,
         )
         mirror_id = None
         if (transfer_account_id is not None and date
-                and _counterparty_absent(conn, covered, name, date, acct_cache)):
+                and _counterparty_absent(conn, covered, name, acct_cache)):
             parent = ledger.get_transaction(conn, txn_id)
             if parent is not None and int(parent["account_id"]) != transfer_account_id:
                 mirror_id = ledger._create_split_mirror(

@@ -378,7 +378,8 @@ class RegisterModel(QAbstractTableModel):
         # above the blank quick-entry row.
         self._pending: dict | None = None
         self._transfer_targets: dict[str, int] = {}
-        # The rows the VIEW shows: _rows (ledger order: date, then insertion)
+        # The rows the VIEW shows: _rows (register order: date, then amount high
+        # to low, then insertion -- ledger.register_rows)
         # projected through the current sort and filter. Every row-indexed
         # method reads _view; only reload() and _project() touch _rows. The
         # dicts are shared, so an edit through a sorted/filtered row reaches
@@ -460,7 +461,7 @@ class RegisterModel(QAbstractTableModel):
 
     def set_sort(self, column, order=Qt.AscendingOrder) -> None:
         """Order the displayed rows by ``column``. Date ascending is the ledger
-        order itself (date, then insertion), so it is the identity projection;
+        order itself (ledger.register_rows), so it is the identity projection;
         Date descending is its exact reverse. Ties in any other column fall
         back to ledger order, so the result is stable across reloads."""
         column = int(column)

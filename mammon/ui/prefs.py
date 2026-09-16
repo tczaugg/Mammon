@@ -464,6 +464,31 @@ def set_allocation_scope(scope: str, settings: QSettings | None = None) -> None:
     s.sync()
 
 
+# ---------------------------------------------------------------------------
+# money market: does a sweep count as CASH or as a SECURITY? Both answers are
+# defensible -- a sweep is a fund you hold shares of, and it is also the
+# account's spendable balance -- so it is a view choice, not a fact about the
+# ledger. OFF by default, deliberately: ON would change the cash-vs-securities
+# split of every existing file the first time it opened, with nothing on
+# screen to say why. Totals never move either way (SRD 5.8e-2c).
+# ---------------------------------------------------------------------------
+_MONEY_MARKET_AS_CASH_KEY = "allocation/money_market_as_cash"
+DEFAULT_MONEY_MARKET_AS_CASH = False
+
+
+def money_market_as_cash(settings: QSettings | None = None) -> bool:
+    """True to roll money-market holdings up as cash rather than securities."""
+    return _as_bool(_settings(settings).value(_MONEY_MARKET_AS_CASH_KEY,
+                                              DEFAULT_MONEY_MARKET_AS_CASH),
+                    DEFAULT_MONEY_MARKET_AS_CASH)
+
+
+def set_money_market_as_cash(on: bool, settings: QSettings | None = None) -> None:
+    s = _settings(settings)
+    s.setValue(_MONEY_MARKET_AS_CASH_KEY, bool(on))
+    s.sync()
+
+
 def auto_enter_on_launch(settings: QSettings | None = None) -> bool:
     return _as_bool(_settings(settings).value(_AUTO_ENTER_KEY, DEFAULT_AUTO_ENTER),
                     DEFAULT_AUTO_ENTER)

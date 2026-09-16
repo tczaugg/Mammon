@@ -6,11 +6,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from decimal import Decimal
 
 import pytest
 
-from mammon import (budgets, crypto, db, investments, ledger, loans, mcp_server,
-                    mcp_tools, rebalance, scheduled, sqldriver)
+from mammon import (budgets, crypto, db, instruments, investments, ledger, loans,
+                    mcp_server, mcp_tools, portfolio, rebalance, scheduled,
+                    securities, sqldriver)
 
 
 @pytest.fixture
@@ -227,6 +229,121 @@ def test_holdings_upcoming_and_loan_shapes(conn, seeded):
     assert ln["payoff_date"] > ln["next_payments"][0]["date"]
     with pytest.raises(ValueError, match="loan parameters"):
         mcp_tools.loan(conn, "Checking")
+
+
+# ---------------------------------------------------------------------------
+# what an instrument IS, across the tool surface (SRD 5.8e-2, 5.8e-9, 7.3)
+# ---------------------------------------------------------------------------
+CALL = "ACME  260116C00050000"          # long, 2 contracts
+PUT = "ACME  260116P00045000"           # short, 1 contract
+TWIN = "ACME  260116C00055000"          # OSI-SHAPED but nobody classified it
+
+
+def _classify_option(conn, symbol, right, strike):
+    conn.execute("INSERT OR IGNORE INTO securities(symbol, name) VALUES (?,?)",
+                 (symbol, symbol))
+    conn.commit()
+    securities.set_kinds(conn, [dict(symbol=symbol, kind=instruments.Kind.OPTION.value,
+                                     kind_source="user", multiplier="100",
+                                     underlying="ACME", expiration="2026-01-16",
+                                     strike=strike, option_right=right)])
+
+
+@pytest.fixture
+def contracts(conn):
+    """One synthetic investment account holding ACME shares, a long call, a
+    short put, and a NULL-KIND twin whose symbol looks just like a contract."""
+    aid = ledger.create_account(conn, "Contracts", "investment", opening_balance=5000_00)
+    _classify_option(conn, CALL, "C", "50")
+    _classify_option(conn, PUT, "P", "45")
+    conn.execute("INSERT OR IGNORE INTO securities(symbol, name) VALUES (?,?)",
+                 (TWIN, TWIN))                                # left unclassified
+    conn.commit()
+    investments.record_investment(conn, aid, "2025-11-03", "Buy", symbol="ACME",
+                                  quantity="100", price="10", amount=-1000_00)
+    investments.record_investment(conn, aid, "2025-11-03", "Buy", symbol=CALL,
+                                  quantity="2", price="3", amount=-600_00)
+    investments.record_investment(conn, aid, "2025-11-03", "ShtSell", symbol=PUT,
+                                  quantity="1", price="2", amount=200_00)
+    investments.record_investment(conn, aid, "2025-11-03", "Buy", symbol=TWIN,
+                                  quantity="5", price="4", amount=-20_00)
+    investments.rebuild_holdings(conn, aid)
+    for sym, px in (("ACME", "12"), (CALL, "4"), (PUT, "3"), (TWIN, "5")):
+        investments.record_price(conn, sym, "2025-12-31", px)
+    portfolio.set_security(conn, "ACME", asset_class="domestic_stock")
+    return aid
+
+
+def test_holdings_tool_says_what_each_instrument_is(conn, contracts):
+    """A model reading a position must not have to infer an option from the
+    SHAPE of its ticker: the kind and the contract terms are on the payload,
+    and every term is a string (0.1 has no binary form, so no floats here)."""
+    h = mcp_tools.holdings(conn, "Contracts", as_of="2025-12-31")
+    rows = {r["symbol"]: r for r in h["holdings"]}
+
+    call = rows[CALL]
+    assert call["kind"] == "option"
+    assert call["option"] == {"multiplier": "100", "underlying": "ACME",
+                              "expiration": "2026-01-16", "strike": "50", "right": "C"}
+    assert all(isinstance(v, str) for v in call["option"].values())
+    # 2 contracts x 4.00 premium x 100 -- the multiplier applied once.
+    assert Decimal(call["quantity"]) == 2 and call["market_value"] == "800.00"
+
+    put = rows[PUT]
+    assert put["option"]["right"] == "P" and put["option"]["strike"] == "45"
+    # A short contract is a liability and values NEGATIVE, never as an asset.
+    assert Decimal(put["quantity"]) == -1 and put["market_value"] == "-300.00"
+
+    # NULL-kind twin: unclassified, so no terms, no multiplier -- 5 x 5.00.
+    assert rows["ACME"]["kind"] is None and rows["ACME"]["option"] is None
+    assert rows[TWIN]["kind"] is None and rows[TWIN]["option"] is None
+    assert rows[TWIN]["market_value"] == "25.00"
+    assert _json(h) == h                                  # crosses as JSON unchanged
+
+    # The same two fields ride along on the lot and performance payloads.
+    lots = mcp_tools.lots(conn, "Contracts", symbol=CALL, as_of="2025-12-31")
+    assert lots["lots"][0]["kind"] == "option"
+    assert lots["lots"][0]["option"]["expiration"] == "2026-01-16"
+    assert Decimal(lots["lots"][0]["quantity"]) == 2      # CONTRACTS, not shares
+    perf = mcp_tools.investment_performance(conn, accounts=["Contracts"],
+                                            as_of="2025-12-31")
+    prows = {r["symbol"]: r for r in perf["holdings"]}
+    assert prows[CALL]["kind"] == "option" and prows[CALL]["option"]["underlying"] == "ACME"
+    assert prows["ACME"]["kind"] is None and prows[TWIN]["option"] is None
+
+
+def test_allocation_tool_excludes_contracts_and_says_so_out_loud(conn, contracts):
+    """One contract is not 100 shares of the underlying, so it is out of every
+    number -- and named, with its premium value, rather than dropped in silence."""
+    cash = 5000_00 - 1000_00 - 600_00 + 200_00 - 20_00
+    a = mcp_tools.allocation(conn, accounts=["Contracts"], as_of="2025-12-31")
+
+    syms = [s["key"] for s in a["by_security"]]
+    assert CALL not in syms and PUT not in syms
+    assert a["total"] == mcp_tools.dollars(1200_00 + 25_00 + cash)
+    assert dict((s["key"], s["value"]) for s in a["by_class"]) == \
+        {"domestic_stock": "1200.00", "unclassified": "25.00",
+         "cash": mcp_tools.dollars(cash)}
+
+    assert a["excluded_options"] == [{"symbol": CALL, "market_value": "800.00"},
+                                     {"symbol": PUT, "market_value": "-300.00"}]
+    assert a["excluded_options_value"] == "500.00"
+    assert CALL in a["note"] and PUT in a["note"]
+    assert "800.00" in a["note"] and "-300.00" in a["note"] and "500.00" in a["note"]
+    assert "excluded" in a["note"].lower()
+    assert _json(a) == a
+
+    # NULL-kind twin: an unclassified OSI-shaped symbol is allocated exactly as
+    # it always was, and no note is invented for it.
+    assert TWIN in syms
+    assert dict((s["key"], s["value"]) for s in a["by_security"])[TWIN] == "25.00"
+    assert TWIN not in a["note"]
+
+    # ...and an account with no contracts says nothing about options at all.
+    ledger.create_account(conn, "Savings", "savings", opening_balance=100_00)
+    plain = mcp_tools.allocation(conn, accounts=["Savings"])
+    assert plain["excluded_options"] == [] and plain["note"] == ""
+    assert plain["excluded_options_value"] == "0.00"
 
 
 # ---------------------------------------------------------------------------

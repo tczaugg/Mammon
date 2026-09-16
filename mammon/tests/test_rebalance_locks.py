@@ -199,9 +199,10 @@ def world(conn):
     return {"chk": chk, "inv": inv}
 
 
-def _row_for(dlg, label: str) -> int:
-    return next(i for i in range(dlg.table.rowCount())
-                if dlg.table.item(i, dlg.CLASS).text() == label)
+def _row_for(dlg, label: str):
+    """The class row named ``label``, as a QTreeWidgetItem."""
+    return next(dlg.tree.topLevelItem(i) for i in range(dlg.tree.topLevelItemCount())
+                if dlg.tree.topLevelItem(i).text(dlg.CLASS) == label)
 
 
 def test_the_dialog_locks_a_class_and_keeps_the_column_at_100(qapp, conn, world):
@@ -212,7 +213,7 @@ def test_the_dialog_locks_a_class_and_keeps_the_column_at_100(qapp, conn, world)
 
     # Lock cash through the checkbox the user actually clicks.
     cash_row = _row_for(dlg, "Cash")
-    box = dlg.table.cellWidget(cash_row, dlg.LOCK).findChild(QCheckBox)
+    box = dlg.tree.itemWidget(cash_row, dlg.LOCK).findChild(QCheckBox)
     assert box is not None and not box.isChecked()
     box.setChecked(True)
     qapp.processEvents()
@@ -220,9 +221,9 @@ def test_the_dialog_locks_a_class_and_keeps_the_column_at_100(qapp, conn, world)
 
     # A locked weight is not editable in place, and the unlocked one is.
     cash_row = _row_for(dlg, "Cash")
-    assert not dlg.table.cellWidget(cash_row, dlg.TARGET).isEnabled()
+    assert not dlg.tree.itemWidget(cash_row, dlg.TARGET).isEnabled()
     stock_row = _row_for(dlg, "Domestic stock")
-    spin = dlg.table.cellWidget(stock_row, dlg.TARGET)
+    spin = dlg.tree.itemWidget(stock_row, dlg.TARGET)
     assert spin.isEnabled()
     spin.setValue(50.0)
     qapp.processEvents()
@@ -233,6 +234,6 @@ def test_the_dialog_locks_a_class_and_keeps_the_column_at_100(qapp, conn, world)
     assert lines["bond"] == Decimal("40")
     assert rebalance.target_total(conn, tid) == HUNDRED
     # And the redrawn table shows the recomputed numbers, not the stale ones.
-    assert dlg.table.cellWidget(_row_for(dlg, "Bonds"), dlg.TARGET).value() == \
+    assert dlg.tree.itemWidget(_row_for(dlg, "Bonds"), dlg.TARGET).value() == \
         pytest.approx(40.0)
     dlg.deleteLater()

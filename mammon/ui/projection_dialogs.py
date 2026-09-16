@@ -808,9 +808,14 @@ class CalendarPanel(QWidget):
         """Turn a predicted event into a definition (the editor lets the user
         correct the amount and date first); the prediction then stops, since
         a scheduled payee is never predicted. Returns the definition id."""
-        p = next((p for p in predictions.predict_recurring(
+        # A payee can be several interleaved bills, so it can have several
+        # predictions on one account (predictions.split_substreams): match the
+        # event's amount too, and only fall back to the payee alone.
+        cands = [p for p in predictions.predict_recurring(
             self.conn, self.today, account_ids=[e.account_id], include_dismissed=True)
-            if p.key == e.payee_key), None)
+            if p.key == e.payee_key]
+        p = next((p for p in cands if p.amount == e.amount), None) or \
+            (cands[0] if cands else None)
         entry = p.entry() if p is not None else {
             "account_id": e.account_id, "payee": e.payee, "amount": e.amount,
             "frequency": "monthly", "next_date": e.date, "category_id": None}

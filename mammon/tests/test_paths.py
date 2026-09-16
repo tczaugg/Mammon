@@ -81,6 +81,34 @@ def test_resolving_a_path_creates_nothing(tmp_path, monkeypatch):
     assert not target.exists()
 
 
+def test_the_installer_marker_makes_a_copy_packaged(tmp_path, monkeypatch):
+    """THE installer regression. The installer runs the stock embeddable Python,
+    which sets no sys.frozen, so with that as the only test an installed copy
+    took itself for a source checkout and kept the ledger inside the install
+    folder -- the folder the uninstaller deletes and every upgrade replaces."""
+    root = tmp_path / "LocalAppData" / "Mammon"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(paths, "install_root", lambda: root)
+    assert not paths.is_installed()
+    assert paths.data_dir() == root / "data"          # a checkout, until marked
+
+    (root / paths.INSTALL_MARKER).write_text("{}")
+    assert paths.is_installed() and paths.is_packaged()
+    assert paths.data_dir() == paths.user_data_dir()
+    assert root not in paths.data_dir().parents
+
+
+def test_a_directory_named_like_the_marker_is_not_an_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "install_root", lambda: tmp_path)
+    (tmp_path / paths.INSTALL_MARKER).mkdir()
+    assert not paths.is_installed()
+
+
+def test_the_last_db_pointer_follows_the_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAMMON_DATA_DIR", str(tmp_path))
+    assert paths.last_db_record_path() == tmp_path / paths.LAST_DB_RECORD
+
+
 def test_an_explicit_db_argument_still_wins(tmp_path):
     """--db is authoritative and used verbatim, whatever the data dir says."""
     explicit = tmp_path / "elsewhere.db"

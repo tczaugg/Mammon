@@ -276,3 +276,42 @@ def test_mixtures_never_write_a_transaction(conn, world):
     assert conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == before
     assert conn.execute(
         "SELECT COUNT(*) FROM investment_transactions").fetchone()[0] == inv_before
+
+
+# ---------------------------------------------------------------------------
+# the equity slice follows the security's CURRENT class (user-reported)
+# ---------------------------------------------------------------------------
+# "In Target & Drift when I expand Unclassified it shows [a fund] ... But the
+# other funds in that account are listed under Domestic stock. They all are
+# classified as mutual funds. What gives?" -- the fund was marked 'bond' when its
+# composition was fetched, so its STOCK slice had no stock class to land in and
+# froze as unclassified.
+def test_the_equity_slice_follows_the_class_the_security_carries_now(conn):
+    from mammon import portfolio, security_mix
+    conn.execute("INSERT INTO securities(symbol, name) VALUES ('ANONSEL','ANON Select')")
+    conn.commit()
+    portfolio.set_security(conn, "ANONSEL", asset_class="bond")
+    security_mix.set_mixture(conn, "ANONSEL", security_mix.map_positions(
+        {"stockPosition": 97.72, "cashPosition": 2.28}, stock_class=None))
+    stored = {r[0]: r[1] for r in conn.execute(
+        "SELECT asset_class, pct FROM security_mixtures WHERE symbol='ANONSEL'")}
+    assert "unclassified" in stored                     # as fetched, and stays so
+
+    portfolio.set_security(conn, "ANONSEL", asset_class="domestic_stock")
+    mix = security_mix.get_mixture(conn, "ANONSEL")
+    assert mix == {"domestic_stock": Decimal("97.72"), "cash": Decimal("2.28")}
+    assert security_mix.all_mixtures(conn)["ANONSEL"] == mix
+    # The stored row is untouched, so un-setting the class puts it back.
+    portfolio.set_security(conn, "ANONSEL", asset_class="")
+    assert "unclassified" in security_mix.get_mixture(conn, "ANONSEL")
+
+
+def test_a_non_stock_class_does_not_absorb_the_equity_slice(conn):
+    """Only a STOCK class can take it: 'bond' was how the fund got here."""
+    from mammon import portfolio, security_mix
+    conn.execute("INSERT INTO securities(symbol, name) VALUES ('ANONSEL','ANON Select')")
+    conn.commit()
+    portfolio.set_security(conn, "ANONSEL", asset_class="bond")
+    security_mix.set_mixture(conn, "ANONSEL", security_mix.map_positions(
+        {"stockPosition": 90, "cashPosition": 10}, stock_class=None))
+    assert security_mix.get_mixture(conn, "ANONSEL")["unclassified"] == Decimal("90")

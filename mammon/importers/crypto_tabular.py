@@ -49,6 +49,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from mammon.importers.coinbase_csv import ExchangeRecord
+from mammon.importers.record import stamp_time
 from mammon.importers.tabular import (Frame, locate_and_frame, parse_date_flex,
                                       read_grid, _column_values, _pick)
 
@@ -416,7 +417,7 @@ def _read_event(row, roles, header_asset=None) -> Optional[ExchangeRecord]:
         return None
     return ExchangeRecord(
         txn_id=str(row.get(roles.get("external_id"), "") or "").strip(),
-        date=date, action=action,
+        date=date, time=stamp_time(row.get(roles["date"])) or "", action=action,
         symbol="" if is_cash else asset,
         quantity=format(qty, "f"),
         price="" if (is_cash or price is None) else format(price, "f"),
@@ -488,7 +489,8 @@ def _read_legs(frame: Frame, roles: dict) -> list[ExchangeRecord]:
         if gross is not None and qty != 0:
             price = abs(gross) / abs(qty)
         out.append(ExchangeRecord(
-            txn_id=gid, date=date, action=action, symbol=symbol,
+            txn_id=gid, date=date, time=stamp_time(first.get(roles["date"])) or "",
+            action=action, symbol=symbol,
             quantity=format(qty, "f"),
             price=format(price, "f") if price is not None else "",
             currency=(fiat[0] if fiat else "USD"),
@@ -496,5 +498,5 @@ def _read_legs(frame: Frame, roles: dict) -> list[ExchangeRecord]:
             payee="", memo=str(first.get(roles.get("note"), "") or "").strip(),
             raw_type=kind or "trade",
         ))
-    out.sort(key=lambda r: (r.date, r.txn_id))
+    out.sort(key=lambda r: (r.date, r.time, r.txn_id))
     return out

@@ -51,6 +51,9 @@ def test_crypto_transactions_columns(tmp_path):
         # ``payee`` (migration 61): the on-chain From/To counterparty that IS the
         # row's payee on a coin-native wallet -- no separate "counterparty" concept.
         "memo", "payee", "import_id", "fitid", "created_at",
+        # ``time`` (migration 70): the time of day the source stated, which
+        # orders a day's events (SRD 5.8j).
+        "time",
     }
 
 

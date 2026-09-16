@@ -63,6 +63,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
+from mammon.importers.record import stamp_time
+
 
 @dataclass
 class CryptoRecord:
@@ -78,6 +80,7 @@ class CryptoRecord:
 
     tx_hash: str = ""             # on-chain hash -- the exact-dedup key
     date: str = ""                # ISO YYYY-MM-DD (derived from the unix stamp)
+    time: str = ""                # HH:MM:SS UTC, same stamp; "" when unstated
     symbol: str = "ETH"           # bare coin ticker; native coin only for now
     direction: str = ""           # "in" (acquire) | "out" (dispose)
     quantity: str = ""            # Decimal text, UNSIGNED magnitude of coin moved
@@ -252,6 +255,7 @@ def parse_etherscan(text: str, default_account: Optional[str] = None) -> list[Cr
         out.append(CryptoRecord(
             tx_hash=cell(row, i_hash),
             date=_iso_date(cell(row, i_unix), cell(row, i_dt)),
+            time=stamp_time(cell(row, i_unix)) or stamp_time(cell(row, i_dt)) or "",
             symbol="ETH",
             direction=direction,
             quantity=str(qty),

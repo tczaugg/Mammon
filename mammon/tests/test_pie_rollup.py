@@ -1,4 +1,4 @@
-"""The pie-chart Other rollup, drill-down and whole-total percentages (SRD 5.9c).
+"""The pie-chart Other rollup, drill-down and whole-total percentages (SRD 5.8d).
 
 All three category pies -- Spending by Category, Income by Category and Asset
 Allocation -- share ``ui/charts.SlicesPieCanvas`` and its ``group_small_slices``

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Iterable, Optional
 
-from mammon import asset_values, investments, ledger, security_mix
+from mammon import asset_values, crypto, investments, ledger, security_mix
 from mammon.investments import RealizedGain, _D, _HUNDRED, _cents
 
 ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "real_estate", "other")
@@ -138,6 +138,87 @@ def _value_of(t) -> int:
         return abs(int(amount))
     q = _D(t["quantity"])
     return _cents(q * _D(t["price"]) * _HUNDRED) if t["price"] and q else 0
+
+
+# Share removals and additions, the only way Quicken can express shares moving
+# between accounts: it has no share transfer, so a move reads as shares removed
+# in one account and the same shares added in another.
+_SHARE_REMOVALS = {"shrsout", "removeshares"}
+_SHARE_ADDITIONS = {"shrsin", "addshares"}
+#: How far apart the two sides of a share move may be dated and still pair.
+SHARE_MOVE_WINDOW_DAYS = 10
+
+
+def share_moves(conn) -> dict:
+    """``{txn_id: cents}`` for every share removal and addition that is one side
+    of shares MOVED between two of the user's accounts, valued at what the move
+    was worth.
+
+    User rule, 2026-09-15: "Quicken doesn't have a way to move shares from one
+    account to another. You would just see shares removed in one and shares added
+    in the other. So treat shares removed as fees unless you see that." Unpaired,
+    a removal is a FEE -- a 401(k) takes its administrative and recordkeeping
+    fees as shares -- and counting it as money handed back added every fee to the
+    return instead of taking it off. Paired, the removal is money leaving that
+    account's position and the addition money arriving in the other's.
+
+    A pair is a removal and an addition in DIFFERENT accounts, of exactly the
+    same number of shares of the same security (same canonical symbol, or the
+    same recorded ticker), dated within :data:`SHARE_MOVE_WINDOW_DAYS`; nearest
+    date wins and each row pairs once. A removal and an addition in the SAME
+    account are a reorganization (a CUSIP change), not a move. The value is the
+    row's own amount (or price x shares), else its partner's -- a broker records
+    the arriving shares with no price at all."""
+    alias_map = {a: c for a, c in investments.list_aliases(conn)}
+    tickers = {r[0]: (r[1] or "").strip().upper() for r in conn.execute(
+        "SELECT symbol, ticker FROM securities WHERE ticker IS NOT NULL")}
+
+    def canon(sym):
+        seen = {sym}
+        while sym in alias_map and alias_map[sym] not in seen:
+            sym = alias_map[sym]
+            seen.add(sym)
+        return sym
+
+    def same_security(a, b):
+        if canon(a) == canon(b):
+            return True
+        ta, tb = tickers.get(a), tickers.get(b)
+        return bool(ta) and ta == (tb or canon(b).upper()) or bool(tb) and tb == canon(a).upper()
+
+    removals, additions = [], []
+    for t in conn.execute(
+            "SELECT id, account_id, date, action, symbol, quantity, price, amount, memo "
+            "FROM investment_transactions WHERE symbol IS NOT NULL AND symbol<>'' "
+            "ORDER BY date, id"):
+        a = _action(t)
+        if investments.is_void_investment(t) or not (a in _SHARE_REMOVALS or a in _SHARE_ADDITIONS):
+            continue
+        q = abs(_D(t["quantity"]))
+        if q == 0:
+            continue
+        (removals if a in _SHARE_REMOVALS else additions).append((t, q))
+    out: dict = {}
+    used: set = set()
+    for rem, q in removals:
+        day = _dt.date.fromisoformat(rem["date"])
+        best = None
+        for add, aq in additions:
+            if add["id"] in used or aq != q or add["account_id"] == rem["account_id"]:
+                continue
+            gap = abs((_dt.date.fromisoformat(add["date"]) - day).days)
+            if gap > SHARE_MOVE_WINDOW_DAYS or not same_security(rem["symbol"], add["symbol"]):
+                continue
+            if best is None or gap < best[0]:
+                best = (gap, add)
+        if best is None:
+            continue
+        add = best[1]
+        used.add(add["id"])
+        value = _value_of(rem) or _value_of(add)
+        out[rem["id"]] = value
+        out[add["id"]] = _value_of(add) or value
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +366,193 @@ class Performance:
         period earned, income and price change together."""
         return self.end_value - self.start_value - (self.money_in - self.money_out)
 
+    @property
+    def gain_pct(self) -> Optional[Decimal]:
+        """:attr:`gain` as a percent of the capital at work -- the starting value
+        plus every dollar put in -- or None when there was none."""
+        base = self.start_value + self.money_in
+        if base <= 0:
+            return None
+        return Decimal(self.gain) / Decimal(base) * _HUNDRED
+
+    @property
+    def annual_return(self) -> Optional[Decimal]:
+        """The money-weighted return per year as a percent, over the span the
+        flows actually cover (from the first dollar at work to ``end``), or None
+        under a year. Annualizing a few months compounds noise into a rate
+        nobody earned -- a 5% month reads as 80% a year -- so a return shorter
+        than a year is shown only as its plain :attr:`gain_pct`."""
+        if self.irr is None:
+            return None
+        dated = [d for d, c in self.flows if c]
+        if not dated:
+            return None
+        span = (_dt.date.fromisoformat(self.end) - _dt.date.fromisoformat(min(dated))).days
+        if span < MIN_ANNUALIZED_DAYS:
+            return None
+        return Decimal(str(round(self.irr * 100, 4)))
+
+
+#: The shortest span a return is annualized over (see Performance.annual_return).
+MIN_ANNUALIZED_DAYS = 365
+
+
+def combine_performances(perfs, end: str) -> "Performance":
+    """Several securities' performance as ONE: values and money summed, and the
+    rate solved over all their dated flows together. Averaging the rates would
+    weight a $500 position like a $50,000 one; one rate over the pooled flows
+    weights each dollar by how long it was at work.
+
+    Only a security with capital at work (a starting value or money put in)
+    joins the pooled RATE; every one still counts in the dollar totals. A
+    position that returned money without any going in -- shares that arrived
+    from a merger with no cost recorded, a written option that expired -- has
+    no rate of return at all, and pooling it left a real 30-year ledger with no
+    rate that nets its flows to zero, so the portfolio's annual return was blank."""
+    perfs = list(perfs)
+    flows = [f for p in perfs if p.start_value + p.money_in > 0 for f in p.flows]
+    starts = [p.start for p in perfs] or [end]
+    return Performance(
+        perfs[0].account_id if perfs else 0, min(starts), end,
+        sum(p.start_value for p in perfs), sum(p.end_value for p in perfs),
+        money_in=sum(p.money_in for p in perfs), money_out=sum(p.money_out for p in perfs),
+        income=sum(p.income for p in perfs), irr=xirr(flows), flows=flows)
+
+
+def holding_performances(conn, account_id: int, end: str, *,
+                         start: Optional[str] = None,
+                         prices: Optional[dict] = None) -> dict:
+    """``{symbol: Performance}`` for every security the account held on or
+    before ``end``, keyed by canonical symbol (aliases folded, as the replay
+    folds them). One replay per boundary date for the whole account, not two
+    per security.
+
+    With ``start``: each security over ``[start, end]``, its value the day
+    before ``start`` as money put in -- the report's selected period.
+
+    Without ``start``: each security over its CURRENT HOLDING -- from the day
+    its share count last left zero (for a position now closed, its last round
+    trip) -- so a fund sold out in 2010 and bought again in 2021 is measured
+    from 2021, and nothing was at work the day before.
+
+    The gain counts every dividend exactly once. A cash dividend left the
+    position, so it is money taken out; a reinvested one bought shares that are
+    already in the ending value, so it is neither money in nor out. Adding the
+    reinvestment as income on top of the value would count it twice; leaving
+    cash dividends out would count them not at all, which is what the
+    Investment Performance report and the Holdings window used to do."""
+    alias_map = {a: c for a, c in investments.list_aliases(conn)}
+
+    def canon(sym):
+        seen = {sym}
+        while sym in alias_map and alias_map[sym] not in seen:
+            sym = alias_map[sym]
+            seen.add(sym)
+        return sym
+
+    # A fund converted into another (investments.link_holding) is one holding
+    # here: its rows count under the fund it continues as, and the conversion
+    # day's sale and purchase move no money -- the value simply carries over at
+    # the new fund's share count, like a split with an uneven ratio.
+    successors = investments.holding_successors(conn, account_id)
+    exchanged: set = set()
+    for frm, to, day in investments.holding_links(conn, account_id):
+        if canon(frm) not in successors:
+            continue
+        for t in conn.execute("SELECT id, action, symbol FROM investment_transactions "
+                              "WHERE account_id=? AND date=?", (account_id, day)):
+            a, sym = _action(t), canon((t["symbol"] or "").strip())
+            if (sym == canon(frm) and a in investments._SALE_ACTIONS) or \
+                    (sym == canon(to) and a in investments._ACQUIRE_ACTIONS):
+                exchanged.add(t["id"])
+
+    def holding_key(sym):
+        key = canon(sym)
+        return successors.get(key, key)
+
+    before = _day_before(start) if start else None
+    moves = share_moves(conn)
+    flows: dict = {}
+    income: dict = {}
+    qty: dict = {}
+    zero_on: dict = {}                       # the date each position last reached zero
+    for t in investments._list_txns_in_range(conn, account_id, None, end):
+        sym = (t["symbol"] or "").strip()
+        if not sym or investments.is_void_investment(t):
+            continue
+        key = holding_key(sym)
+        a = _action(t)
+        if start is None and investments.is_quantity_action(t["action"]):
+            held = qty.get(key, Decimal(0))
+            now = (investments.apply_split(held, t) if a in investments._SPLIT_ACTIONS
+                   else held + investments.share_qty_delta(t))
+            qty[key] = now
+            if held != 0 and now == 0:
+                zero_on[key] = t["date"]
+            elif held == 0 and now != 0 and zero_on.get(key, "") < t["date"]:
+                # A holding (re)opens: measure from here. Only when it was empty
+                # at the end of an EARLIER day -- a same-day zero crossing (shares
+                # removed and re-added by a CUSIP change, or a same-day sale and
+                # purchase) is one continuous holding, since rows within a day
+                # are in no meaningful order.
+                flows[key], income[key] = [], 0
+        if start is not None and t["date"] < start:
+            continue
+        rows = flows.setdefault(key, [])
+        income.setdefault(key, 0)
+        if t["id"] in exchanged:
+            continue
+        q = _D(t["quantity"])
+        if a in _CASH_DIVIDENDS:
+            rows.append((t["date"], abs(int(t["amount"] or 0))))
+            income[key] += abs(int(t["amount"] or 0))
+        elif a in investments._DIVIDEND_ACTIONS:
+            income[key] += abs(int(t["amount"] or 0))   # reinvested: already in the value
+        if a in investments._SALE_ACTIONS or a in investments._SHORT_OPEN_ACTIONS:
+            rows.append((t["date"], investments._proceeds_of(t, q)))
+        elif a in investments._SHORT_COVER_ACTIONS:
+            rows.append((t["date"], -investments._cost_of(t, q)))
+        elif a in _SHARE_REMOVALS:
+            # Money taken out only when another account received the shares; an
+            # unpaired removal is a fee, already a loss in the ending value.
+            if t["id"] in moves:
+                rows.append((t["date"], moves[t["id"]]))
+        elif a in _SHARE_ADDITIONS and t["id"] in moves:
+            rows.append((t["date"], -max(moves[t["id"]], investments._cost_of(t, q))))
+        elif a in _EXTERNAL_OUT and a in investments._REMOVE_ACTIONS:
+            rows.append((t["date"], _value_of(t)))
+        elif a in investments._RTRNCAP_ACTIONS:
+            # Capital handed back is money taken out of the position, like a sale
+            # with no shares; left out, a fund paying it showed no return at all.
+            rows.append((t["date"], abs(int(t["amount"] or 0))))
+        elif a in investments._ADD_ACTIONS and a not in investments._DIVIDEND_ACTIONS:
+            rows.append((t["date"], -investments._cost_of(t, q)))
+
+    def values_at(date):
+        out = {}
+        for sym, pos in investments._replay_positions(conn, account_id, date).items():
+            if pos.qty == 0:
+                continue
+            price = investments._resolve_price(conn, sym, date, prices, account_id)
+            if price is not None:
+                key = holding_key(sym)
+                out[key] = out.get(key, 0) + investments._market_value(conn, sym, pos.qty, price)
+        return out
+
+    end_values = values_at(end)
+    start_values = values_at(before) if before else {}
+    out = {}
+    for key in set(flows) | set(start_values) | set(end_values):
+        rows = flows.get(key, [])
+        sv, ev = start_values.get(key, 0), end_values.get(key, 0)
+        dated = ([(before, -sv)] if before else []) + rows + [(end, ev)]
+        out[key] = Performance(
+            account_id, start or (min((d for d, _ in rows), default=end)), end, sv, ev,
+            money_in=-sum(c for _, c in rows if c < 0),
+            money_out=sum(c for _, c in rows if c > 0),
+            income=income.get(key, 0), irr=xirr(dated), symbol=key, flows=dated)
+    return out
+
 
 def external_flows(conn, account_id: int, start: str, end: str) -> list:
     """Money that crossed the account's boundary in ``[start, end]`` as
@@ -297,12 +565,21 @@ def external_flows(conn, account_id: int, start: str, end: str) -> list:
         "SELECT * FROM investment_transactions WHERE account_id=? AND date BETWEEN ? AND ? "
         "ORDER BY date, id", (account_id, start, end)).fetchall()
     represented: dict = {}
+    moves = share_moves(conn)
     for t in inv:
         if t["transfer_account_id"] is not None:
             key = (t["date"], int(t["transfer_account_id"]), abs(int(t["amount"] or 0)))
             represented[key] = represented.get(key, 0) + 1
         a = _action(t)
-        if a in _EXTERNAL_IN:
+        if a in _SHARE_REMOVALS or a in _SHARE_ADDITIONS:
+            # Shares crossed the boundary only when another account took them
+            # (share_moves); an unpaired removal is a fee, a loss inside.
+            if t["id"] in moves:
+                sign = 1 if a in _SHARE_ADDITIONS else -1
+                out.append((t["date"], sign * moves[t["id"]]))
+            elif a in _SHARE_ADDITIONS:
+                out.append((t["date"], _value_of(t)))
+        elif a in _EXTERNAL_IN:
             out.append((t["date"], _value_of(t)))
         elif a in _EXTERNAL_OUT:
             out.append((t["date"], -_value_of(t)))
@@ -346,40 +623,19 @@ def security_performance(conn, account_id: int, symbol: str, start: str, end: st
     """One security's money-weighted return in the account over
     ``[start, end]``: shares held the day before ``start`` at that day's price
     are money put in; buys and shares transferred in are money put in; sales,
-    cash dividends and distributions, and shares transferred out are money
-    back; shares held at ``end`` at that day's price are money back."""
+    cash dividends and distributions, returned capital and shares transferred
+    out are money back; shares held at ``end`` at that day's price are money
+    back. The single-security view of :func:`holding_performances`, so the
+    Performance dialog, the Investment Performance report and the Holdings
+    window cannot classify a flow three different ways."""
+    key = investments.resolve_symbol(conn, symbol)
+    key = investments.holding_successors(conn, account_id).get(key, key)
+    perf = holding_performances(conn, account_id, end, start=start, prices=prices).get(key)
+    if perf is not None:
+        return perf
     before = _day_before(start)
-
-    def value_at(date: str) -> int:
-        pos = investments._replay_positions(conn, account_id, date).get(symbol)
-        if pos is None or pos.qty <= 0:
-            return 0
-        price = investments._resolve_price(conn, symbol, date, prices, account_id)
-        return _cents(pos.qty * price * _HUNDRED) if price is not None else 0
-
-    start_value, end_value = value_at(before), value_at(end)
-    flows: list = []
-    income = 0
-    for t in conn.execute(
-            "SELECT * FROM investment_transactions WHERE account_id=? AND symbol=? "
-            "AND date BETWEEN ? AND ? ORDER BY date, id", (account_id, symbol, start, end)):
-        a = _action(t)
-        if a in _CASH_DIVIDENDS:
-            flows.append((t["date"], abs(int(t["amount"] or 0))))
-            income += abs(int(t["amount"] or 0))
-        elif a in investments._DIVIDEND_ACTIONS:
-            income += abs(int(t["amount"] or 0))        # reinvested: stays inside
-        if a in investments._SALE_ACTIONS:
-            flows.append((t["date"], investments._proceeds_of(t, _D(t["quantity"]))))
-        elif a in _EXTERNAL_OUT and a in investments._REMOVE_ACTIONS:
-            flows.append((t["date"], _value_of(t)))
-        elif a in investments._ADD_ACTIONS and a not in investments._DIVIDEND_ACTIONS:
-            flows.append((t["date"], -investments._cost_of(t, _D(t["quantity"]))))
-    money_in = -sum(c for _, c in flows if c < 0)
-    money_out = sum(c for _, c in flows if c > 0)
-    dated = [(before, -start_value)] + flows + [(end, end_value)]
-    return Performance(account_id, start, end, start_value, end_value, money_in,
-                       money_out, income, xirr(dated), symbol=symbol, flows=dated)
+    return Performance(account_id, start, end, 0, 0, 0, 0, 0, None, symbol=symbol,
+                       flows=[(before, 0), (end, 0)])
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +675,13 @@ def set_security(conn, symbol: str, *, name: Optional[str] = None,
     conn.commit()
 
 
+def _dollars(cents: int) -> str:
+    """Cents as a plain decimal dollar string, for a human-readable note only.
+    Decimal, never float: this is money being shown, and the rest of the module
+    keeps it in integer cents."""
+    return format(Decimal(int(cents)) / 100, ".2f")
+
+
 @dataclass
 class Slice:
     key: str
@@ -450,11 +713,37 @@ class Allocation:
     # exactly these, since an investment account's classes come from its
     # securities instead.
     account_classes: dict = field(default_factory=dict)
+    # Option contracts LEFT OUT of every number above (symbol, premium value in
+    # cents), largest first. See SRD 5.8e-9: a contract is not shares of its
+    # underlying, so it is neither allocated nor silently dropped -- it is named
+    # here, and :attr:`options_note` is the sentence that says so out loud.
+    excluded_options: list = field(default_factory=list)   # (symbol, cents)
+
+    @property
+    def options_note(self) -> str:
+        """The VISIBLE sentence naming the excluded contracts, "" when there
+        are none. Every presenter of an Allocation -- the MCP tool, a report,
+        a window -- shows this verbatim when it is non-empty, so the exclusion
+        can never be invisible to whoever reads the percentages."""
+        if not self.excluded_options:
+            return ""
+        parts = ", ".join("%s %s" % (sym, _dollars(v))
+                          for sym, v in self.excluded_options)
+        return ("Option contracts are excluded from this allocation (SRD "
+                "5.8e-9): %s. Total premium value %s. A contract is not shares "
+                "of its underlying, so it is named here rather than counted as "
+                "equity or dropped." % (parts, _dollars(self.option_value)))
+
+    @property
+    def option_value(self) -> int:
+        """Cents of premium value excluded (a short position counts negative)."""
+        return sum(v for _sym, v in self.excluded_options)
 
 
 def allocation(conn, account_ids: Optional[Iterable[int]] = None,
                as_of: Optional[str] = None, prices: Optional[dict] = None,
-               scope: str = "investments", include_hidden: bool = False) -> Allocation:
+               scope: str = "investments", include_hidden: bool = False,
+               money_market_as_cash: bool = False) -> Allocation:
     """Where the money is: the market value of every priced holding, grouped by
     the asset class recorded for its security -- ``unclassified`` until the user
     says -- and by security and account; each investment account's cash counts
@@ -468,9 +757,26 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     broken down by security. Liabilities are never included: an allocation is of
     what you own.
 
+    OPTION CONTRACTS are excluded outright -- from ``total``, ``by_class``,
+    ``by_security`` and each account's slice -- and named in
+    :attr:`Allocation.excluded_options` with their premium value, which
+    :attr:`Allocation.options_note` renders as a visible sentence (SRD 5.8e-9).
+    A contract is not shares of its underlying: counting one as 100 shares
+    invents exposure the premium never bought, and dropping it silently makes
+    the percentages a lie about a position the user holds. Only an EXPLICIT
+    ``kind='option'`` is removed (:func:`investments.is_option`); a NULL-kind
+    row is unclassified and allocates exactly as it always did.
+
     HIDDEN accounts are left out (see :func:`scope_account_ids`) unless
     ``include_hidden``; naming ``account_ids`` explicitly overrides both, since
     a caller that asked for an account means it.
+
+    ``money_market_as_cash`` files a money-market sweep's value under ``cash``
+    instead of its asset class (SRD 5.8e-2c). It is the user's preference
+    (``prefs.money_market_as_cash``, off by default so existing numbers do not
+    move), passed down rather than read here -- this layer reads no Qt settings.
+    ``total`` and ``by_security`` are identical either way: how much of the fund
+    you hold is not a matter of opinion, only which bucket it is shown in.
     """
     given = account_ids is not None
     ids = ([int(a) for a in account_ids] if given
@@ -488,6 +794,7 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     acct_classes: dict = {}
     unpriced: list = []
     cash_only: list = []
+    excluded_opts: dict = {}      # symbol -> premium value in cents, left out
     total = 0
     for aid in ids:
         acct = ledger.get_account(conn, aid)
@@ -510,16 +817,50 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
             by_class[cls] = by_class.get(cls, 0) + value
             total += value
             continue
-        v = investments.account_valuation(conn, aid, as_of, prices)
-        by_acct[aid] = (name, v.total)
-        total += v.total
+        if crypto.is_crypto_account(acct):
+            # A crypto account's money lives in crypto_transactions, and the
+            # brokerage valuation cannot see it: it read the bank transfer legs
+            # alone and reported a wallet whose own balance is zero as tens of
+            # thousands of NEGATIVE cash in the mix (and in the "no holdings
+            # recorded" note). One valuation per kind of account, the same one
+            # the accounts list and net worth show.
+            v = crypto.account_valuation(conn, aid, as_of, prices)
+        else:
+            v = investments.account_valuation(conn, aid, as_of, prices,
+                                              money_market_as_cash=money_market_as_cash)
+        # Option contracts come OUT before anything is totalled (SRD 5.8e-9).
+        # An allocation answers "how much of what do I own", and a contract has
+        # no honest answer: counting one as 100 shares of the underlying
+        # overstates equity by the notional the premium did not buy, and
+        # counting the premium as equity is a different thing again. Only an
+        # EXPLICIT kind='option' is removed -- a NULL-kind row is UNCLASSIFIED,
+        # not "not an option", and keeps the pre-existing behaviour exactly.
+        opts = [h for h in v.holdings if investments.is_option(conn, h.symbol)]
+        opt_symbols = {h.symbol for h in opts}
+        opt_value = sum(int(h.market_value) for h in opts)
+        for h in opts:
+            excluded_opts[h.symbol] = excluded_opts.get(h.symbol, 0) + int(h.market_value)
+        acct_total = v.total - opt_value
+        by_acct[aid] = (name, acct_total)
+        total += acct_total
         if v.cash:
             by_class["cash"] = by_class.get("cash", 0) + v.cash
             if not v.holdings:
                 cash_only.append((name, int(v.cash)))
         for h in v.holdings:
+            if h.symbol in opt_symbols:
+                # Excluded above; not reported unpriced either, since a price
+                # would not have brought it into the allocation.
+                continue
             if h.price is None:
                 unpriced.append(h.symbol)
+                continue
+            if money_market_as_cash and investments.is_money_market(conn, h.symbol):
+                # account_valuation ALREADY folded this position into v.cash,
+                # which was added to the cash class above; adding it to a class
+                # again here would count the same dollars twice. By security is
+                # still by security -- the position exists either way.
+                by_sec[h.symbol] = by_sec.get(h.symbol, 0) + h.market_value
                 continue
             mix = mixtures.get(h.symbol)
             if mix:
@@ -538,7 +879,9 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     out = Allocation(as_of=as_of, total=total, unpriced=sorted(set(unpriced)),
                      scope=("custom" if given else scope),
                      account_classes=acct_classes,
-                     cash_only_accounts=sorted(cash_only, key=lambda p: -p[1]))
+                     cash_only_accounts=sorted(cash_only, key=lambda p: -p[1]),
+                     excluded_options=sorted(excluded_opts.items(),
+                                             key=lambda kv: (-kv[1], kv[0])))
     out.by_class = [Slice(k, ASSET_CLASS_LABELS.get(k, k), v, pct(v))
                     for k, v in sorted(by_class.items(), key=lambda kv: -kv[1])]
     out.by_security = [Slice(k, k, v, pct(v))

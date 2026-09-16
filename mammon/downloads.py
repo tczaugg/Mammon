@@ -889,6 +889,8 @@ def _merge_import_results(results: list) -> Optional[ImportResult]:
         merged.payment_changes.extend(r.payment_changes or [])
         merged.unmapped_actions.extend(r.unmapped_actions or [])
         merged.position_discrepancies.extend(r.position_discrepancies or [])
+        merged.investment_account_ids = sorted(
+            set(merged.investment_account_ids) | set(r.investment_account_ids or []))
     return merged
 
 

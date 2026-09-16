@@ -256,3 +256,70 @@ def test_plotted_series_has_no_spike(qapp, conn):
     assert max(plotted) / min(plotted) < 1.5
     assert min(plotted) == pytest.approx(50.0)
     assert max(plotted) == pytest.approx(63.0)
+
+
+# --------------------------------------------------------------------------
+# (8) a holding valued at a past date: price and shares on ONE scale
+# --------------------------------------------------------------------------
+# The series above is read in today's units. A VALUATION at a past date is not:
+# its share count comes from the replay as of that date, so the price has to be
+# on that date's scale too. The reported case: a performance report measured
+# from before an 8:1 split valued the pre-split shares at the provider's
+# back-adjusted close -- an eighth of their worth -- and showed a gain near
+# 1,000% where the real one was under 30%.
+def _holding(conn):
+    acct = _account(conn)
+    _buy(conn, acct, "2021-04-30", "ANONTEC", "26", "378.50")
+    _split(conn, acct, "2026-04-21", "ANONTEC", 8, 1)
+    investments.record_prices(conn, [
+        ("ANONTEC", "2026-01-02", "93.50", "yfinance"),     # back-adjusted, pre-split date
+        ("ANONTEC", "2026-05-01", "121.00", "yfinance"),
+    ])
+    return acct
+
+
+def test_a_providers_pre_split_close_values_pre_split_shares_as_traded(conn):
+    acct = _holding(conn)
+    assert investments.latest_price(conn, "ANONTEC", "2026-01-15") == Decimal("748")
+    assert investments.holding_values_at(conn, acct, "2026-01-15")["ANONTEC"] == 26 * 748_00
+    # After the split both sides are in today's units; nothing is rescaled.
+    assert investments.latest_price(conn, "ANONTEC", "2026-05-15") == Decimal("121")
+    assert investments.holding_values_at(conn, acct, "2026-05-15")["ANONTEC"] == 208 * 121_00
+
+
+def test_an_as_traded_close_before_a_split_values_post_split_shares(conn):
+    """The newest price predates the split but the valuation date does not: 208
+    shares at 400 would be eight times the holding."""
+    acct = _account(conn)
+    _buy(conn, acct, "2026-03-02", "ANONTEC", "26", "400.00")
+    investments.learn_prices_from_transactions(conn, acct)
+    _split(conn, acct, "2026-04-21", "ANONTEC", 8, 1)
+    assert investments.latest_price(conn, "ANONTEC", "2026-04-30") == Decimal("50")
+    assert investments.holding_values_at(conn, acct, "2026-04-30")["ANONTEC"] == 26 * 400_00
+    assert investments.latest_price(conn, "ANONTEC", "2026-04-01") == Decimal("400")
+
+
+def test_a_period_measured_across_the_split_reports_the_real_gain(conn):
+    import importlib
+    perf = importlib.import_module("mammon.reports.investment_performance")
+    acct = _holding(conn)
+    [h] = [h for h in perf.investment_performance(
+        conn, "2026-05-15", start="2026-01-15", account_ids=[acct]).holdings
+        if h.symbol == "ANONTEC"]
+    assert h.period_gain == 208 * 121_00 - 26 * 748_00
+    assert round(h.period_pct, 1) == Decimal("29.4")
+
+
+def test_the_split_lookup_uses_its_index(conn):
+    """Past-date valuations ask for splits on every price read; without the
+    migration 71 partial index that scanned every investment row. SQLite matches
+    a partial index's WHERE textually, so drifting the query text silently
+    loses it."""
+    import inspect
+    src = inspect.getsource(investments._split_events)
+    query = ("SELECT symbol, date, action, quantity, split_num, split_den, memo"
+             " FROM investment_transactions"
+             " WHERE lower(replace(action,' ',''))='stksplit' ORDER BY date, id")
+    assert "WHERE lower(replace(action,' ',''))='stksplit'" in src
+    plan = " ".join(str(r[3]) for r in conn.execute("EXPLAIN QUERY PLAN " + query))
+    assert "idx_invtxn_splits" in plan

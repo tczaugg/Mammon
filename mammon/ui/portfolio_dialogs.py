@@ -18,7 +18,7 @@ from typing import Optional
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
     QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -395,6 +395,22 @@ class AllocationDialog(QDialog):
         self.scope_row.setLayout(scope_row)
         self.scope_row.setVisible(self.account_ids is None)
 
+        # A sweep is a fund you own shares of AND the account's spendable
+        # balance; which one the picture should show is the user's call, so it
+        # is a toggle rather than a rule. Off by default -- see
+        # prefs.money_market_as_cash -- and it never changes the total.
+        self.mm_check = QCheckBox("Count money-market funds as cash")
+        self.mm_check.setToolTip(
+            "Show money-market (sweep) holdings under Cash instead of their own "
+            "asset class. The total is the same either way.")
+        self.mm_check.setChecked(prefs.money_market_as_cash())
+        self.mm_check.stateChanged.connect(lambda *_: self._set_money_market_as_cash())
+        mm_row = QHBoxLayout()
+        mm_row.addWidget(self.mm_check)
+        mm_row.addStretch(1)
+        self.mm_row = QWidget()
+        self.mm_row.setLayout(mm_row)
+
         note = QLabel(f"Valued as of {fmt_date(self.as_of)}. Set a security's asset class "
                       "on the By security tab and an account's own class -- what a house "
                       "or a savings balance counts as -- on the By account tab; nothing "
@@ -403,6 +419,7 @@ class AllocationDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(note)
         layout.addWidget(self.scope_row)
+        layout.addWidget(self.mm_row)
         layout.addWidget(self.tabs)
         layout.addLayout(self.chart_box)
         layout.addLayout(back_row)
@@ -418,6 +435,20 @@ class AllocationDialog(QDialog):
         prefs.set_allocation_scope(self.scope)
         self.reload()
 
+    def _set_money_market_as_cash(self) -> None:
+        """Sweep-as-cash: remembered, like the scope, so the window opens the
+        way the user last read it."""
+        prefs.set_money_market_as_cash(self.mm_check.isChecked())
+        self.reload()
+
+    def _allocate(self):
+        """The ONE place this window asks portfolio for its numbers, so every
+        refresh honors the same choices (scope, sweep-as-cash) -- three call
+        sites drifting apart is how one tab ends up disagreeing with another."""
+        return portfolio.allocation(self.conn, self.account_ids, self.as_of,
+                                    scope=self.scope,
+                                    money_market_as_cash=prefs.money_market_as_cash())
+
     # -- drawing -----------------------------------------------------------
     def _class_combo(self, current) -> QComboBox:
         combo = QComboBox()
@@ -429,7 +460,7 @@ class AllocationDialog(QDialog):
         return combo
 
     def reload(self) -> None:
-        a = portfolio.allocation(self.conn, self.account_ids, self.as_of, scope=self.scope)
+        a = self._allocate()
         self.allocation = a
         self._fill_classes()
         classes = {r["symbol"]: r["asset_class"] for r in portfolio.list_securities(self.conn)}
@@ -546,8 +577,7 @@ class AllocationDialog(QDialog):
         """A change in the By security tab's class column is saved at once and
         the other tabs re-summed."""
         portfolio.set_security(self.conn, symbol, asset_class=asset_class or "")
-        self.allocation = portfolio.allocation(self.conn, self.account_ids, self.as_of,
-                                               scope=self.scope)
+        self.allocation = self._allocate()
         self._fill_classes()
         self._draw_chart()
 
@@ -555,8 +585,7 @@ class AllocationDialog(QDialog):
         """The By account tab's class column for a whole-balance account (a
         house, a savings balance). Saved at once, like a security's."""
         portfolio.set_account_asset_class(self.conn, account_id, asset_class)
-        self.allocation = portfolio.allocation(self.conn, self.account_ids, self.as_of,
-                                               scope=self.scope)
+        self.allocation = self._allocate()
         self._fill_classes()
         self._draw_chart()
 

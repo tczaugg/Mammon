@@ -1,21 +1,23 @@
 """Deterministic same-date register ordering (verify-first regression).
 
-The concrete guarantee: two transactions that share a date keep a stable total
-order, tiebroken by their insertion ``id``, so the account register never
-reshuffles between opens or after an unrelated edit. This was a "verify first"
-item -- the ordering was already deterministic in code -- so these tests LOCK IN
-the invariant rather than change behaviour. If someone later drops the ``id``
-tiebreak (e.g. ``ORDER BY date`` alone) or makes an edit that re-assigns a row's
+The concrete guarantee: transactions that share a date keep a stable total
+order, so the account register never reshuffles between opens or after an
+unrelated edit. Since 2026-09-15 that order is by AMOUNT high to low (cash in
+before the payments it funds, SRD 5.1b), with the insertion ``id`` breaking ties
+between equal amounts. If someone later drops the ``id`` tiebreak (e.g.
+``ORDER BY date, amount DESC`` alone) or makes an edit that re-assigns a row's
 id, one of these fails.
 
 The mechanism being pinned:
 
-* ``ledger.register_rows`` queries ``ORDER BY date, id`` -- same-date rows fall
-  into insertion order, not SQLite's unspecified default row order;
+* ``ledger.register_rows`` queries ``ORDER BY date, amount DESC, id`` --
+  same-date, same-amount rows fall into insertion order, not SQLite's
+  unspecified default row order;
 * ``id`` is a monotonic ``INTEGER PRIMARY KEY`` written only by ``ledger``, so a
-  later insert always sorts after an earlier same-date one;
-* ``update_transaction`` edits in place, preserving ``id`` -- so an ordinary
-  field edit (or a date round-trip) never moves a row within its date;
+  later insert always sorts after an earlier equal one;
+* ``update_transaction`` edits in place, preserving ``id`` -- so a field edit
+  that leaves the amount alone (or a date round-trip) never moves a row within
+  its date, and an amount edit moves it only to where its new amount belongs;
 * ``RegisterModel`` preserves ``(date, id)`` as the tiebreak under EVERY column
   sort, and Date-descending is the exact reverse of Date-ascending.
 """
@@ -70,11 +72,11 @@ def _model_ids(m):
 # ledger.register_rows -- the query that anchors the whole guarantee
 # ---------------------------------------------------------------------------
 def test_same_date_rows_are_in_insertion_order(conn, account):
-    """Three transactions on one date come back in the order they were added,
-    which is ascending id -- not payee order, not reverse, not arbitrary."""
+    """Three equal transactions on one date come back in the order they were
+    added, which is ascending id -- not payee order, not reverse, not arbitrary."""
     a = ledger.add_transaction(conn, account, "2026-04-01", -10_00, payee="Zeta")
-    b = ledger.add_transaction(conn, account, "2026-04-01", -20_00, payee="Alpha")
-    c = ledger.add_transaction(conn, account, "2026-04-01", -30_00, payee="Mu")
+    b = ledger.add_transaction(conn, account, "2026-04-01", -10_00, payee="Alpha")
+    c = ledger.add_transaction(conn, account, "2026-04-01", -10_00, payee="Mu")
     assert a < b < c  # ids are monotonic: the load-bearing fact
     assert _ids(ledger.register_rows(conn, account)) == [a, b, c]
 
@@ -111,12 +113,12 @@ def test_order_is_stable_across_reopen(conn, account, db_path):
 
 
 def test_new_same_date_row_appends_others_unmoved(conn, account):
-    """Adding another same-date transaction later puts it AFTER the existing
-    ones (larger id) and does not disturb their relative order."""
+    """Adding another equal same-date transaction later puts it AFTER the
+    existing ones (larger id) and does not disturb their relative order."""
     a = ledger.add_transaction(conn, account, "2026-07-01", -5_00, payee="First")
-    b = ledger.add_transaction(conn, account, "2026-07-01", -6_00, payee="Second")
+    b = ledger.add_transaction(conn, account, "2026-07-01", -5_00, payee="Second")
     assert _ids(ledger.register_rows(conn, account)) == [a, b]
-    c = ledger.add_transaction(conn, account, "2026-07-01", -7_00, payee="Third")
+    c = ledger.add_transaction(conn, account, "2026-07-01", -5_00, payee="Third")
     assert _ids(ledger.register_rows(conn, account)) == [a, b, c]
 
 
@@ -127,11 +129,21 @@ def test_field_edit_preserves_id_and_position(conn, account):
     a = ledger.add_transaction(conn, account, "2026-08-01", -1_00, payee="A")
     b = ledger.add_transaction(conn, account, "2026-08-01", -2_00, payee="B")
     c = ledger.add_transaction(conn, account, "2026-08-01", -3_00, payee="C")
-    ledger.update_transaction(conn, b, payee="B-renamed", amount=-999_00, memo="edited")
+    ledger.update_transaction(conn, b, payee="B-renamed", memo="edited")
     rows = ledger.register_rows(conn, account)
     assert _ids(rows) == [a, b, c]            # position unchanged
     assert rows[1]["id"] == b                 # id unchanged -> in-place edit
     assert rows[1]["payee"] == "B-renamed"    # the edit did land
+
+
+def test_an_amount_edit_moves_the_row_only_to_where_its_amount_belongs(conn, account):
+    """Same-day order is by amount (SRD 5.1b), so a larger payment now shows last;
+    the other rows keep their order."""
+    a = ledger.add_transaction(conn, account, "2026-08-01", -1_00, payee="A")
+    b = ledger.add_transaction(conn, account, "2026-08-01", -2_00, payee="B")
+    c = ledger.add_transaction(conn, account, "2026-08-01", -3_00, payee="C")
+    ledger.update_transaction(conn, b, amount=-999_00)
+    assert _ids(ledger.register_rows(conn, account)) == [a, c, b]
 
 
 def test_date_roundtrip_returns_to_same_position(conn, account):
@@ -151,8 +163,8 @@ def test_date_roundtrip_returns_to_same_position(conn, account):
 # ---------------------------------------------------------------------------
 def test_model_default_is_insertion_order_for_same_date(qapp, conn, account):
     a = ledger.add_transaction(conn, account, "2026-05-05", -1_00, payee="A")
-    b = ledger.add_transaction(conn, account, "2026-05-05", -2_00, payee="B")
-    c = ledger.add_transaction(conn, account, "2026-05-05", -3_00, payee="C")
+    b = ledger.add_transaction(conn, account, "2026-05-05", -1_00, payee="B")
+    c = ledger.add_transaction(conn, account, "2026-05-05", -1_00, payee="C")
     m = RegisterModel(conn, account)
     assert m.sort_state() == (R.DATE, Qt.AscendingOrder)
     assert _model_ids(m) == [a, b, c]

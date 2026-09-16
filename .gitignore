@@ -40,9 +40,11 @@ docs/*_design.md
 # Matched by SHAPE for the same reason as the globs above.
 docs/*_taxonomy.md
 
-# Build output: PyInstaller's dist/build, and the icon preview blowups.
+# Build output: installer/build.py's build/ and dist/ (the Setup ZIP), its
+# download cache of the Python embeddable package, and the icon preview blowups.
 build/
 dist/
+installer/cache/
 *.spec.bak
 
 # Editor / vault state, personal to one machine.

@@ -203,6 +203,74 @@ def test_v20_unreconciles_auto_marked_transfer_legs(tmp_path):
     conn.close()
 
 
+def test_v68_drops_holdings_snapshots_written_under_the_old_replay(tmp_path):
+    """Year-end holdings snapshots store realized P/L and lots. Those written
+    before short covers realized, and before a sale's commission stopped being
+    charged twice, would keep serving the old figures for every earlier year, so
+    migration 68 drops them; the next rebuild writes them under the new rules."""
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(67):                        # MIGRATIONS[:67] -> user_version 67
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 67")
+    conn.execute("INSERT INTO accounts(id, name, type) VALUES (1,'Brokerage','investment')")
+    conn.execute("INSERT INTO holdings_checkpoints(account_id, year, symbol, quantity, "
+                 "cost_basis, dividends, realized, ever_held, lots) "
+                 "VALUES (1, 2025, 'ANON', '0', 0, 0, -12345, 1, '[]')")
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM holdings_checkpoints").fetchone()[0] == 0
+    conn.close()
+
+
+def test_v72_drops_holdings_snapshots_summed_without_a_brokers_dividend_words(tmp_path):
+    """"Dividend" and "Cash Dividend" count as dividends from migration 72 on, and
+    the snapshots store each position's dividend total summed without them."""
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(71):                        # MIGRATIONS[:71] -> user_version 71
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 71")
+    conn.execute("INSERT INTO accounts(id, name, type) VALUES (1,'Brokerage','investment')")
+    conn.execute("INSERT INTO holdings_checkpoints(account_id, year, symbol, quantity, "
+                 "cost_basis, dividends, realized, ever_held, lots) "
+                 "VALUES (1, 2026, 'ANON', '26', 984200, 0, 0, 1, '[]')")
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    assert conn.execute("SELECT COUNT(*) FROM holdings_checkpoints").fetchone()[0] == 0
+    assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_invtxn_splits'").fetchone()
+    conn.close()
+
+
+def test_v69_drops_only_balance_snapshots_from_before_an_opening_date(tmp_path):
+    """Snapshots for years ending before an account's opening date were written
+    with the opening balance in them; later ones are right under both readings
+    and are kept, as are those of an account with no opening date."""
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(68):                        # MIGRATIONS[:68] -> user_version 68
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 68")
+    conn.execute("INSERT INTO accounts(id, name, type, opening_balance, opening_date) "
+                 "VALUES (1,'Mortgage','liability',-15000000,'2002-08-14'),"
+                 "(2,'Checking','checking',10000,NULL)")
+    conn.executemany("INSERT INTO balance_checkpoints(account_id, year, balance) VALUES (?,?,?)",
+                     [(1, 2001, -15050000), (1, 2002, -15050000), (1, 2003, -14950000),
+                      (2, 1999, 10000)])
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    kept = conn.execute("SELECT account_id, year FROM balance_checkpoints ORDER BY 1, 2").fetchall()
+    assert [tuple(r) for r in kept] == [(1, 2002), (1, 2003), (2, 1999)]
+    conn.close()
+
+
 def test_foreign_keys_enforced(tmp_path):
     conn = db.init_db(tmp_path / "mammon.db")
     with pytest.raises(sqldriver.IntegrityError):
@@ -369,3 +437,10 @@ def test_claude_md_states_the_real_schema_version():
     assert int(m.group(1)) == db.SCHEMA_VERSION, (
         f"CLAUDE.md says schema version {m.group(1)}, "
         f"but db.SCHEMA_VERSION is {db.SCHEMA_VERSION}")
+
+
+def test_v73_adds_holding_links_scoped_to_an_account(tmp_path):
+    conn = db.init_db(tmp_path / "links.db")
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(holding_links)")]
+    assert cols == ["account_id", "from_symbol", "to_symbol", "date"]
+    conn.close()

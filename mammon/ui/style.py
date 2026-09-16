@@ -74,6 +74,7 @@ LIGHT = {
     "balance_text": "#222222",   # positive account-row balance text
     "cell_text": None,           # explicit table item-text color; None = keep the
                                  # widget palette default (light look unchanged)
+    "branch_indicator": "#5b636e",  # tree expand/collapse arrows; 6.1:1 on white
     "btn_bg": "#f2f4f7",
     "btn_border": "#c7cdd6",
     "btn_hover": "#e7ebf1",
@@ -112,6 +113,10 @@ DARK = {
     "cell_text": "#e3e5e8",      # dark: table item text must be explicitly light,
                                  # or delegates fall back to a near-black palette
                                  # default and the register text is illegible
+    "branch_indicator": "#c5cad2",  # tree expand/collapse arrows: the platform
+                                    # style draws these near-black, so on the
+                                    # dark surfaces they vanished (reported).
+                                    # 8.4:1 on the tree background (#2b2d31).
     "btn_bg": "#35383e",
     "btn_border": "#45484e",
     "btn_hover": "#3f4247",
@@ -248,6 +253,48 @@ def header_bg_color() -> str:
     return _active["palette"]["header_bg"]
 
 
+def branch_indicator_color(palette: dict | None = None) -> str:
+    """The tree expand/collapse arrow color for a palette (ACTIVE theme by
+    default). Every tree in the app -- the Itemize by Category drill-down, the
+    report category picker, the categories and tags dialogs -- gets its arrows
+    from this one value."""
+    p = palette or _active["palette"]
+    return p.get("branch_indicator") or p["text"]
+
+
+def _branch_qss(color: str) -> str:
+    """The QTreeView::branch block for one theme, or '' if the arrow images
+    cannot be generated (read-only install), in which case Qt keeps drawing its
+    own native arrows exactly as it did before.
+
+    The four selectors are the standard closed/open x has-siblings/not pairs;
+    leaf rows are deliberately left unstyled so Qt still draws the branch lines.
+    Note that a drawable ::branch rule REPLACES the native glyph rather than
+    recoloring it, which is why each rule carries an image (see
+    mammon.ui.branch_icons)."""
+    from . import branch_icons
+
+    closed = branch_icons.arrow_path("closed", color)
+    opened = branch_icons.arrow_path("open", color)
+    if closed is None or opened is None:
+        return ""
+    return """
+/* ---- tree expand/collapse indicators ----
+   Theme-driven ('branch_indicator' in the palette): the native glyphs are drawn
+   by the platform style in near-black and were invisible in dark mode. */
+QTreeView::branch:has-children:!has-siblings:closed,
+QTreeView::branch:closed:has-children:has-siblings {
+    border-image: none;
+    image: url("%s");
+}
+QTreeView::branch:open:has-children:!has-siblings,
+QTreeView::branch:open:has-children:has-siblings {
+    border-image: none;
+    image: url("%s");
+}
+""" % (closed.as_posix(), opened.as_posix())
+
+
 def build_qss(palette: dict | None = None, alt_row: str | None = None) -> str:
     """The classic-desktop QSS for a given theme PALETTE, with the alternate-row
     shading color injected (the one theme value the user can pick independently).
@@ -264,6 +311,7 @@ def build_qss(palette: dict | None = None, alt_row: str | None = None) -> str:
     grid = p["grid"]; hdr_border_r = p["hdr_border_r"]; hdr_border_b = p["hdr_border_b"]
     btn_bg = p["btn_bg"]; btn_border = p["btn_border"]
     btn_hover = p["btn_hover"]; btn_pressed = p["btn_pressed"]
+    branch = _branch_qss(branch_indicator_color(p))
     return f"""
 QMainWindow, QWidget {{ background: {window}; }}
 
@@ -364,6 +412,7 @@ QPushButton {{
 }}
 QPushButton:hover {{ background: {btn_hover}; }}
 QPushButton:pressed {{ background: {btn_pressed}; }}
+{branch}
 {p["extra"]}"""
 
 

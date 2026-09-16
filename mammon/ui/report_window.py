@@ -81,6 +81,7 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -279,8 +280,8 @@ def _fmt_qty(q) -> str:
 # the ticker their own columns and breaks the gain out into a dollar column and a
 # text percent column. Percent is not money, so it is formatted as text and each
 # ReportRow fills every column explicitly via ``cells`` (see :func:`_row_cells`).
-INVESTMENT_PERFORMANCE_COLUMNS = ["Account", "Ticker", "Amount",
-                                  "Gain/Loss $", "Gain/Loss %"]
+INVESTMENT_PERFORMANCE_COLUMNS = ["Account", "Ticker", "Amount", "Dividends",
+                                  "Gain/Loss $", "Gain/Loss %", "Annual Return %"]
 
 
 def _fmt_pct(pct) -> str:
@@ -301,8 +302,10 @@ def _fmt_pct(pct) -> str:
 _HOLDING_SORT_KEYS = {
     "account": lambda h: ((h.account_name or "").lower(), (h.symbol or "").lower()),
     "ticker":  lambda h: (h.symbol or "").lower(),
+    "income":  lambda h: h.income,
     "gain":    lambda h: h.display_gain if h.display_gain is not None else 0,
     "pct":     lambda h: h.display_pct if h.display_pct is not None else 0,
+    "annual":  lambda h: h.annual_return if h.annual_return is not None else 0,
 }
 
 
@@ -339,10 +342,11 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *
 
     ``sort_key``/``sort_desc`` reorder the per-holding line items (the same seam
     the Itemize tree uses): a clickable header re-projects with the active sort.
-    The Gain/Loss columns render the report's period-bounded gain when it was built
-    for a window (``display_gain``/``display_pct``), and the inception-to-date
-    unrealized gain otherwise -- a report opened without a start behaves exactly as
-    before.
+    Dividends is every distribution over the report's span; the Gain/Loss columns
+    are the TOTAL return over that span with each dividend counted once (cash
+    dividends added, reinvested ones already in the value -- see
+    :mod:`mammon.reports.investment_performance`), and Annual Return % is the
+    money-weighted rate per year, blank for a span under a year.
     """
     rows: list[ReportRow] = []
     holdings = [h for h in report.holdings if h.is_open]
@@ -354,7 +358,8 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *
         rows.append(ReportRow(
             h.account_name, h.symbol, h.market_value,
             cells=[h.account_name, ticker, fmt_cents(h.market_value),
-                   gl, _fmt_pct(h.display_pct)]))
+                   fmt_cents(h.income), gl, _fmt_pct(h.display_pct),
+                   _fmt_pct(h.annual_return)]))
 
     # Portfolio totals. The market-value line doubles as the portfolio Gain/Loss
     # summary (its unrealized dollars and percent); the remaining totals each name a
@@ -362,35 +367,55 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *
     rows.append(ReportRow(
         "Portfolio", "Cost Basis", report.total_cost_basis,
         cells=["Portfolio", "Cost Basis", fmt_cents(report.total_cost_basis),
-               "", ""]))
-    # The Market Value line is the headline gain: the sum of the per-holding gains
-    # shown above, so it reconciles with them -- period-bounded when the report was
-    # built for a window, lifetime otherwise. The separate lifetime breakdown lines
-    # (Unrealized / Realized / Dividend / Return of Capital) below stay as-is.
+               "", "", "", ""]))
+    # The Market Value line is the headline gain: the per-holding gains shown above
+    # summed, dividends included, over the same span (the period, or each current
+    # holding), with one money-weighted annual rate for the whole portfolio. The
+    # breakdown lines below are SINCE PURCHASE and say so, because they do not
+    # follow the period and read as contradicting the line above when unlabeled.
     rows.append(ReportRow(
         "Portfolio", "Market Value", report.total_market_value,
         cells=["Portfolio", "Market Value", fmt_cents(report.total_market_value),
+               fmt_cents(report.total_income),
                fmt_cents(report.display_total_gain),
-               _fmt_pct(report.display_total_pct)]))
+               _fmt_pct(report.display_total_pct),
+               _fmt_pct(report.total_annual_return)]))
     rows.append(ReportRow(
         "Portfolio", "Unrealized Gain/Loss", report.total_unrealized_pl,
-        cells=["Portfolio", "Unrealized Gain/Loss", "",
+        cells=["Portfolio", "Unrealized Gain/Loss (since purchase)", "", "",
                fmt_cents(report.total_unrealized_pl),
-               _fmt_pct(report.pct_return)]))
+               _fmt_pct(report.pct_return), ""]))
     rows.append(ReportRow(
         "Portfolio", "Realized Gain/Loss", report.total_realized_pl,
-        cells=["Portfolio", "Realized Gain/Loss", "",
-               fmt_cents(report.total_realized_pl), ""]))
+        cells=["Portfolio", "Realized Gain/Loss (since purchase)", "", "",
+               fmt_cents(report.total_realized_pl), "", ""]))
     rows.append(ReportRow(
         "Portfolio", "Dividend/Interest Income", report.total_dividends,
-        cells=["Portfolio", "Dividend/Interest Income",
-               fmt_cents(report.total_dividends), "", ""]))
+        cells=["Portfolio", "Dividend/Interest Income (since purchase)",
+               fmt_cents(report.total_dividends), "", "", "", ""]))
     if report.total_return_of_capital:
         rows.append(ReportRow(
             "Portfolio", "Return of Capital", report.total_return_of_capital,
             cells=["Portfolio", "Return of Capital",
-                   fmt_cents(report.total_return_of_capital), "", ""]))
+                   fmt_cents(report.total_return_of_capital), "", "", "", ""]))
     return rows
+
+
+def _row_symbol(row: ReportRow) -> str:
+    """The bare ticker a report line names, or ``''`` when the line names none.
+
+    :func:`investment_performance_rows` puts the BARE symbol on ``label`` and
+    renders the Ticker cell as the composite ``"SYM (n sh)"``; the Portfolio total
+    lines put prose ("Cost Basis", "Market Value") in that same column. Matching
+    the Ticker cell against the label tells a holding line from a total line
+    without ever parsing the composite display text -- so a total row is offered
+    no price-history chart, and a symbol never arrives with " (12 sh)" glued on.
+    """
+    label = (row.label or "").strip()
+    cells = row.cells or []
+    if not label or len(cells) < 2:
+        return ""
+    return label if str(cells[1]).startswith(label + " (") else ""
 
 
 def itemize_rows(report: "reports.ItemizedReport") -> list[ReportRow]:
@@ -751,12 +776,22 @@ class ReportSpec:
     # ``sort_key``/``sort_desc`` (as ``investment_performance_rows`` does); this
     # reuses the same instance-level sort seam the Itemize tree uses.
     sortable: dict = None
+    # This report's line items name a SECURITY (its bare ticker on ``ReportRow.label``,
+    # rendered as "SYM (n sh)"), so the window offers the shared price-history chart
+    # on a right-click -- the same entry the investment register offers. False for
+    # every other report: their rows name a payee or a category, and a menu that can
+    # produce no action is worse than no menu (same reasoning as ``category_kind``).
+    price_history: bool = False
     # Income vs Expense is read by the user as "where do I stand as of ___",
     # so it alone shows the selected range's END date in the header, centered
     # between the Period selector and the gear button. False for every other
     # report -- a label naming nothing meaningful is worse than no label (same
     # reasoning as ``category_kind`` above).
     show_end_date: bool = False
+    # Right-align every column from this index on, for a report whose trailing
+    # columns are ALL figures (Investment Performance: Amount, Dividends, the gain
+    # dollars and both percents). None aligns only the last column, as before.
+    right_align_from: int = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -901,15 +936,18 @@ BY_TAG_SPEC = ReportSpec("By Tag", _run_by_tag, payee_rows)
 TRANSACTIONS_SPEC = ReportSpec("Transactions", _run_transactions, listing_rows,
                                category_kind=CATEGORY_KIND_BOTH,
                                columns=TRANSACTIONS_COLUMNS)
-# Sortable by the four orders the user asked for: Account (col 0) -> account then
-# ticker, Ticker (col 1) -> ticker alphabetical, Gain/Loss $ (col 3) -> period
-# gain, Gain/Loss % (col 4) -> period percent. Amount (col 2) is left inert.
+# Sortable: Account (col 0) -> account then ticker, Ticker (col 1) -> ticker
+# alphabetical, Dividends (col 3), Gain/Loss $ (col 4), Gain/Loss % (col 5) and
+# Annual Return % (col 6) by their values. Amount (col 2) is left inert.
 INVESTMENT_PERFORMANCE_SPEC = ReportSpec("Investment Performance",
                                          _run_investment_performance,
                                          investment_performance_rows,
                                          columns=INVESTMENT_PERFORMANCE_COLUMNS,
                                          sortable={0: "account", 1: "ticker",
-                                                   3: "gain", 4: "pct"})
+                                                   3: "income", 4: "gain",
+                                                   5: "pct", 6: "annual"},
+                                         right_align_from=2,
+                                         price_history=True)
 ITEMIZE_SPEC = ReportSpec("Itemize by Category", _run_itemize, itemize_tree_rows,
                           show_hidden_toggle=False,
                           category_kind=CATEGORY_KIND_BOTH,
@@ -1067,6 +1105,12 @@ class ReportWindow(QDialog):
                 header.setSectionsClickable(True)
                 header.setSortIndicatorShown(True)
                 header.sectionClicked.connect(self._on_table_sort)
+            # Right-click a row -> see _on_table_context_menu. Connected for every
+            # flat report because it is generically harmless: the handler pops up
+            # nothing at all unless the row under the cursor names a security.
+            self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.table.customContextMenuRequested.connect(
+                self._on_table_context_menu)
             self._body_widget = self.table
 
         self.export_button = QPushButton("Export CSV…")
@@ -1149,15 +1193,79 @@ class ReportWindow(QDialog):
         tag_colors = (ledger.tag_colors(self.conn)
                       if getattr(self._report, "key", None) == "tag" else None)
         for i, r in enumerate(rows):
+            # A report whose lines name a security carries the BARE ticker on every
+            # item of the row (Qt.UserRole), so the right-click menu reads the
+            # symbol off the item the user clicked instead of re-deriving it from a
+            # row index -- a click-to-sort reshuffles the rows under the same
+            # indexes, and an index-to-data lookup would then chart the wrong
+            # holding. Total rows carry nothing, which is how they offer nothing.
+            symbol = _row_symbol(r) if self.spec.price_history else ""
             for col, cell in enumerate(_row_cells(r, self.columns)):
                 item = QTableWidgetItem(cell)
-                if col == last:
+                if symbol:
+                    item.setData(Qt.UserRole, symbol)
+                align_from = self.spec.right_align_from
+                if col == last or (align_from is not None and col >= align_from):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if tag_colors is not None and col == last - 1 and r.label != "Total":
                     color = tag_colors.get((r.label or "").casefold())
                     if color:
                         item.setIcon(color_square_icon(color))
                 self.table.setItem(i, col, item)
+
+    # -- right-click: price history (Investment Performance) -----------------
+    def _symbol_at(self, index) -> str:
+        """The bare ticker named by the row under ``index``, or ``''`` for a total
+        row, a click over empty space, or a report whose rows name no security."""
+        if self.table is None or index is None or not index.isValid():
+            return ""
+        item = self.table.item(index.row(), index.column())
+        if item is None:
+            return ""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _chart_account_id(self, row: int, symbol: str):
+        """The account the displayed holding line lives in, so its chart is drawn
+        in THAT account's currency (SRD 5.8). Unlike the register and the Holdings
+        window, this report is not scoped to one account, so the account is read
+        back off the already-computed report (no SQL here) and disambiguated by the
+        row's Account cell -- one security can be held in several accounts."""
+        item = self.table.item(row, 0) if self.table is not None else None
+        account = item.text() if item is not None else ""
+        for h in getattr(self._report, "holdings", None) or ():
+            if h.symbol == symbol and h.account_name == account:
+                return h.account_id
+        return None
+
+    def _open_price_history(self, symbol, account_id=None):
+        """Seam: open the SHARED price-history chart -- literally the helper the
+        investment register and the Holdings window open, so all three entry
+        points behave identically (currency labeling, bounds, the "nothing
+        recorded" note). Imported lazily so this module does not drag the register
+        widgets (and matplotlib behind them) into every report import, and kept
+        this small so a test can patch one method instead of a modal."""
+        from mammon.ui.widgets import _chart_price_history
+        _chart_price_history(self, self.conn, symbol, account_id)
+
+    def _on_table_context_menu(self, pos):
+        """Right-click on a flat report row.
+
+        Today it offers exactly one entry, "Price history: SYM…", carrying the same
+        label as the investment register's context menu so the two read identically
+        (SRD 5.8). A row naming no security -- a Portfolio total, any other report --
+        and a click over empty space return before a menu is built, so the user
+        never gets an empty popup.
+        """
+        index = self.table.indexAt(pos)
+        symbol = self._symbol_at(index)
+        if not symbol:
+            return
+        menu = QMenu(self)
+        act_price = menu.addAction(f"Price history: {symbol}…")
+        chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if chosen is not None and chosen is act_price:
+            self._open_price_history(
+                symbol, self._chart_account_id(index.row(), symbol))
 
     def _populate_tree(self, rows, expanded_paths=None):
         """Rebuild the drill-down tree from the flat depth-tagged projection.

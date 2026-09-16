@@ -45,6 +45,78 @@ def test_register_running_balance(conn, accounts):
     assert [r["balance"] for r in rows] == [80_00, 130_00]
 
 
+# ---- same-day order: cash balance high to low (SRD 5.1b) ---------------------
+def test_same_day_rows_show_money_arriving_before_it_is_spent(conn, accounts):
+    """Entered in the worst order: two payments, then the transfer that funds
+    them. The register shows the deposit first and the larger payment last, so
+    the running balance never dips below what the day ends at."""
+    checking, savings = accounts
+    ledger.add_transaction(conn, checking, "2026-02-02", -80_00, payee="small")
+    ledger.add_transaction(conn, checking, "2026-02-02", -300_00, payee="large")
+    ledger.create_transfer(conn, savings, checking, "2026-02-02", 500_00)
+    ledger.add_transaction(conn, checking, "2026-02-01", -10_00, payee="day before")
+    rows = ledger.register_rows(conn, checking)
+    assert [r["amount"] for r in rows] == [-10_00, 500_00, -80_00, -300_00]
+    assert [r["balance"] for r in rows] == [90_00, 590_00, 510_00, 210_00]
+
+
+def test_equal_same_day_amounts_keep_entry_order(conn, accounts):
+    checking, _ = accounts
+    first = ledger.add_transaction(conn, checking, "2026-02-02", -4_99, payee="first")
+    second = ledger.add_transaction(conn, checking, "2026-02-02", -4_99, payee="second")
+    assert [r["id"] for r in ledger.register_rows(conn, checking)] == [first, second]
+
+
+# ---- opening balance counts from its date -----------------------------------
+# Quicken's balances before an account's opening date do not include its opening
+# balance. Adding it for every date made a mortgage opened in 2002 appear, whole,
+# in a 2000 balance -- and in every net-worth figure before it existed.
+@pytest.fixture
+def loan(conn):
+    return ledger.create_account(conn, "Mortgage", "liability",
+                                 opening_balance=-150_000_00, opening_date="2002-08-14")
+
+
+def test_an_opening_balance_is_not_there_before_its_date(conn, loan):
+    assert ledger.account_balance(conn, loan, as_of="2000-12-31") == 0
+    assert ledger.account_balance(conn, loan, as_of="2002-08-13") == 0
+    assert ledger.account_balance(conn, loan, as_of="2002-08-14") == -150_000_00
+    assert ledger.account_balance(conn, loan) == -150_000_00
+
+
+def test_an_account_with_no_opening_date_keeps_it_from_the_start(conn, accounts):
+    checking, _ = accounts
+    assert ledger.account_balance(conn, checking, as_of="1990-01-01") == 100_00
+
+
+def test_year_end_snapshots_agree_with_the_full_sum_around_an_opening_date(conn, loan):
+    """Transactions before the opening date, the opening date in a year with no
+    transactions of its own, then later years: every snapshot-backed balance must
+    equal the from-inception sum."""
+    ledger.add_transaction(conn, loan, "2001-03-01", -500_00)
+    ledger.add_transaction(conn, loan, "2003-01-08", 1_000_00)
+    ledger.add_transaction(conn, loan, "2004-05-01", 2_000_00)
+    ledger.rebuild_checkpoints(conn, loan)
+    for as_of in ("2001-12-31", "2002-08-13", "2002-08-14", "2002-12-31", "2003-06-30",
+                  "2004-12-31", "2030-01-01"):
+        assert ledger.account_balance(conn, loan, as_of) == \
+            ledger._account_balance_full(conn, loan, as_of), as_of
+    assert ledger.account_balance(conn, loan, "2002-12-31") == -150_000_00 - 500_00
+
+    ledger.add_transaction(conn, loan, "2001-06-01", -100_00)      # a back-dated edit
+    ledger.recompute_checkpoints_from_year(conn, loan, 2001)
+    for as_of in ("2001-12-31", "2002-12-31", "2004-12-31"):
+        assert ledger.account_balance(conn, loan, as_of) == \
+            ledger._account_balance_full(conn, loan, as_of), as_of
+
+
+def test_the_register_running_balance_picks_up_the_opening_balance_on_its_date(conn, loan):
+    ledger.add_transaction(conn, loan, "2001-03-01", -500_00)
+    ledger.add_transaction(conn, loan, "2003-01-08", 1_000_00)
+    rows = ledger.register_rows(conn, loan)
+    assert [r["balance"] for r in rows] == [-500_00, -500_00 - 150_000_00 + 1_000_00]
+
+
 def test_update_and_delete(conn, accounts):
     checking, _ = accounts
     t = ledger.add_transaction(conn, checking, "2026-01-05", -25_00)

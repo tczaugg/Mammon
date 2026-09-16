@@ -863,6 +863,28 @@ def account_balance(conn: sqlite3.Connection, account_id: int, as_of: Optional[s
     return balance_via_checkpoint(conn, account_id, as_of if as_of is not None else "9999-12-31")
 
 
+def opening_balance_on(acct, as_of: Optional[str]) -> int:
+    """The part of ``acct``'s opening balance that exists at the end of
+    ``as_of``: all of it on and after the opening date, none of it before.
+
+    Quicken writes an opening balance as a transaction ON its date, and its
+    balances before that date do not include it. Adding it for every date made
+    a mortgage opened in 2002 carry its whole balance in 2000, and
+    every net-worth figure before an account existed was wrong by its opening
+    balance. An account with no opening date keeps the old reading: the opening
+    balance is there from the beginning. ``as_of=None`` means "now"."""
+    opening = int(acct["opening_balance"] or 0)
+    date = acct["opening_date"]
+    if not opening or not date or as_of is None or as_of >= date:
+        return opening
+    return 0
+
+
+def _opening_counted_by(acct, as_of: str) -> bool:
+    """True when the end of ``as_of`` includes ``acct``'s opening balance."""
+    return not acct["opening_date"] or as_of >= acct["opening_date"]
+
+
 def _account_balance_full(conn: sqlite3.Connection, account_id: int, as_of: Optional[str] = None) -> int:
     """From-inception balance: opening_balance + SUM(amount) [through ``as_of``].
     The oracle the checkpoint path must match; kept as the source of truth for
@@ -881,7 +903,7 @@ def _account_balance_full(conn: sqlite3.Connection, account_id: int, as_of: Opti
             "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE account_id=? AND date<=?",
             (account_id, as_of),
         ).fetchone()
-    return acct["opening_balance"] + row[0]
+    return opening_balance_on(acct, as_of) + row[0]
 
 
 def net_worth(conn: sqlite3.Connection, as_of: Optional[str] = None, *,
@@ -958,7 +980,8 @@ def update_account(conn: sqlite3.Connection, account_id: int, **fields: Any) -> 
     allowed = {"name", "type", "currency", "institution", "note", "closed_flag",
                "sort_order", "url", "account_number", "hidden", "download_script",
                "lot_method", "download_config", "cutover_date", "asset_class",
-               "property_address", "secured_by_account_id", "crypto_kind"}
+               "property_address", "secured_by_account_id", "crypto_kind",
+               "tax_treatment"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     bad = set(fields) - allowed
     if bad:
@@ -1020,18 +1043,31 @@ def account_max_dates_for_import(conn: sqlite3.Connection,
 
 
 def register_rows(conn: sqlite3.Connection, account_id: int) -> list[dict]:
-    """Return the account's transactions in ledger order (date, then insertion
-    order) with a running `balance` on each, starting from opening_balance."""
+    """Return the account's transactions in register order with a running
+    `balance` on each, starting from opening_balance.
+
+    Register order is date, then AMOUNT high to low, then insertion order (user
+    preference, 2026-09-15, SRD 5.1b). Within one day the rows carry no time, so
+    insertion order was an accident of how they were entered or imported: a
+    purchase could show ahead of the transfer that funded it and the balance
+    dipped below zero for a row. Largest deposit first and largest payment last
+    keeps the running balance as high as it can be at every row -- money arrives
+    before it is spent. The day's closing balance is the same in any order."""
     acct = get_account(conn, account_id)
     if acct is None:
         raise KeyError(f"no account {account_id}")
     rows = conn.execute(
-        "SELECT * FROM transactions WHERE account_id=? ORDER BY date, id",
+        "SELECT * FROM transactions WHERE account_id=? ORDER BY date, amount DESC, id",
         (account_id,),
     ).fetchall()
-    running = acct["opening_balance"]
+    opening = int(acct["opening_balance"] or 0)
+    running = 0
+    opened = False
     out = []
     for r in rows:
+        if not opened and _opening_counted_by(acct, r["date"]):
+            running += opening
+            opened = True
         running += r["amount"]
         d = dict(r)
         d["balance"] = running
@@ -2304,9 +2340,13 @@ def rebuild_checkpoints(conn: sqlite3.Connection, account_id: int) -> None:
         "FROM transactions WHERE account_id=? GROUP BY yr ORDER BY yr",
         (account_id,),
     ).fetchall()
-    running = acct["opening_balance"]
+    opening = int(acct["opening_balance"] or 0)
+    running, opened = 0, False
     for r in rows:
         running += r["total"]
+        if not opened and _opening_counted_by(acct, f"{r['yr']}-12-31"):
+            running += opening
+            opened = True
         conn.execute(
             "INSERT INTO balance_checkpoints(account_id, year, balance) VALUES (?,?,?)",
             (account_id, int(r["yr"]), running),
@@ -2324,12 +2364,17 @@ def balance_via_checkpoint(conn: sqlite3.Connection, account_id: int, as_of: str
         "WHERE account_id=? AND year<? ORDER BY year DESC LIMIT 1",
         (account_id, year),
     ).fetchone()
+    acct = get_account(conn, account_id)
     if cp is None:
-        base = get_account(conn, account_id)["opening_balance"]
+        base = opening_balance_on(acct, as_of)
         lower_bound = None
     else:
         base = cp["balance"]
         lower_bound = f"{cp['year']}-12-31"
+        # The snapshot carries the opening balance only if it was dated by that
+        # year end; one dated later but by ``as_of`` is added here.
+        if not _opening_counted_by(acct, lower_bound) and _opening_counted_by(acct, as_of):
+            base += int(acct["opening_balance"] or 0)
     if lower_bound is None:
         row = conn.execute(
             "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE account_id=? AND date<=?",
@@ -2363,11 +2408,16 @@ def recompute_checkpoints_from_year(conn: sqlite3.Connection, account_id: int, f
         (account_id, from_year),
     )
     prev = conn.execute(
-        "SELECT balance FROM balance_checkpoints "
+        "SELECT year, balance FROM balance_checkpoints "
         "WHERE account_id=? AND year<? ORDER BY year DESC LIMIT 1",
         (account_id, from_year),
     ).fetchone()
-    running = prev["balance"] if prev else acct["opening_balance"]
+    if prev:
+        running = prev["balance"]
+        opened = _opening_counted_by(acct, f"{prev['year']}-12-31")
+    else:
+        running, opened = 0, False
+    opening = int(acct["opening_balance"] or 0)
     rows = conn.execute(
         "SELECT substr(date,1,4) AS yr, SUM(amount) AS total FROM transactions "
         "WHERE account_id=? AND substr(date,1,4)>=? GROUP BY yr ORDER BY yr",
@@ -2375,6 +2425,9 @@ def recompute_checkpoints_from_year(conn: sqlite3.Connection, account_id: int, f
     ).fetchall()
     for r in rows:
         running += r["total"]
+        if not opened and _opening_counted_by(acct, f"{r['yr']}-12-31"):
+            running += opening
+            opened = True
         conn.execute(
             "INSERT INTO balance_checkpoints(account_id, year, balance) VALUES (?,?,?)",
             (account_id, int(r["yr"]), running),

@@ -26,6 +26,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Optional
 
+from mammon import instruments
 from mammon.importers import tabular
 from mammon.importers.record import (
     NormalizedTxn,
@@ -225,6 +226,33 @@ TOTAL_COLS = ("Amount", "Total", "Total Price", "Net Amount", "Amount ($)")
 SYMBOL_COLS = ("Symbol", "Ticker")
 SECURITY_COLS = ("Investment", "Fund", "Security", "Security Description")
 
+# An OPTION SYMBOL is its own column semantic, not a spelling of Symbol. Brokers
+# write one contract at least four ways -- "XYZ 01/17/2026 150.00 C",
+# "-XYZ260117C150", "XYZ 260117C00150000", "CALL XYZ 01/17/26 150" -- so a file
+# that names this column is stating "the text here identifies a CONTRACT", and
+# that statement is what lets the four spellings collapse onto one canonical OSI
+# symbol instead of onto four securities (or, worse, onto the underlying's
+# ticker: an option is not a spelling of its stock).
+OPTION_SYMBOL_COLS = ("Option Symbol", "Option Contract", "Contract Symbol",
+                      "OSI Symbol", "Option Description")
+
+
+def option_contract(row: dict):
+    """The contract an option-symbol column states, or None when it says nothing.
+
+    Returns ``(canonical_symbol, terms)`` where ``terms`` is an
+    :class:`instruments.OptionTerms` when the spelling was readable, or None when
+    it was not -- in which case the canonical symbol is the source's OWN text.
+    Keeping unreadable text verbatim is the same rule the OFX option path
+    follows: an invented contract is worse than an unparsed one."""
+    text = _col(row, *OPTION_SYMBOL_COLS)
+    if not text:
+        return None
+    terms = instruments.parse_option(text)
+    if terms is None:
+        return normalize_security_name(text), None
+    return terms.osi(), terms
+
 
 def parse_csv(text: str, default_account: Optional[str] = None,
               roles: "tabular.CashRoles | None" = None,
@@ -286,7 +314,8 @@ def _parse_csv_rows(text: str, default_account: Optional[str] = None,
     known_cash = tabular._pick(header, DATE_COLS) is not None
     has_investment = bool(
         tabular._pick(header, SYMBOL_COLS) or tabular._pick(header, SECURITY_COLS)
-        or tabular._pick(header, SHARES_COLS))
+        or tabular._pick(header, SHARES_COLS)
+        or tabular._pick(header, OPTION_SYMBOL_COLS))
 
     # An AUTHORITATIVE role map -- one the user confirmed through the mapping
     # wizard, or a saved profile built from one -- ALWAYS wins for a cash source.
@@ -314,6 +343,16 @@ def _parse_csv_rows(text: str, default_account: Optional[str] = None,
         symbol = normalize_security_name(
             _col(row, *SYMBOL_COLS) or _col(row, *SECURITY_COLS))
         shares = _col(row, *SHARES_COLS)
+        # An option-symbol column OVERRIDES the plain symbol column, because the
+        # plain one on the same row is usually the underlying's ticker and using
+        # it would file the contract's activity against the stock.
+        contract = option_contract(row)
+        multiplier = None
+        if contract is not None:
+            symbol, terms = contract
+            # Unreadable spelling -> the multiplier is UNSTATED, not 100, so no
+            # amount is derived from or checked against quantity x price.
+            multiplier = instruments.UNKNOWN if terms is None else terms.multiplier
         account = _col(row, "Account", "Account Name") or (default_account or "")
 
         # The file decides, not the row. A brokerage statement's interest and fee
@@ -328,7 +367,8 @@ def _parse_csv_rows(text: str, default_account: Optional[str] = None,
         # checked for consistency.
         if has_investment or symbol or shares:
             quantity, price, amount_cents, _ok = derive_investment_amounts(
-                shares, _col(row, *PRICE_COLS), _col(row, *TOTAL_COLS))
+                shares, _col(row, *PRICE_COLS), _col(row, *TOTAL_COLS),
+                multiplier=multiplier)
             out.append(
                 NormalizedTxn(
                     external_account=account,

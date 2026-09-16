@@ -55,6 +55,13 @@ class QifExtras:
     # but has not used yet still exists, and its description is the only place
     # its meaning is written down.
     tags: list = field(default_factory=list)
+    # (account name, account type) for every account whose REGISTER the file
+    # carries -- a transaction section opened under its !Account header -- even
+    # when that register holds no transactions in the file. It is what tells the
+    # importer that a transfer's other account supplies its own side, so that side
+    # is never invented (core._counterparty_absent); a register with nothing in
+    # it cannot be seen from the transactions alone.
+    registers: list = field(default_factory=list)
 
 
 def parse_qif(
@@ -108,6 +115,9 @@ def parse_qif(
                 if _is_txn_section(kind):
                     mode = "invst" if _is_invst(kind) else "cash"
                     account_type = _acct_type(kind)
+                    if collector is not None and account and \
+                            (account, account_type) not in collector.registers:
+                        collector.registers.append((account, account_type))
                 elif kind.startswith("cat"):
                     mode, cat_fields = "cat", {}
                 elif kind.startswith("security"):
@@ -208,7 +218,13 @@ def _flush_category(collector: Optional[QifExtras], f: dict) -> None:
 def _flush_security(collector: Optional[QifExtras], f: dict) -> None:
     if collector is None:
         return
-    name = f.get("N", "").strip()
+    # The name is the security's IDENTITY: transaction rows (``Y``) and the price
+    # section both reach the security through it, so it is normalized exactly as
+    # ``Y`` is. Left raw, an option named "ACME  260417C00045000" (the standard
+    # symbol's padded root) was one security in the master and another on its
+    # own trades, and nearly every contract in a real export went unrecognized
+    # as an option.
+    name = normalize_security_name(f.get("N", ""))
     symbol = f.get("S", "").strip()
     typ = f.get("T", "").strip()
     if name or symbol:

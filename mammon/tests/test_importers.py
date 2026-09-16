@@ -565,6 +565,66 @@ def test_transfer_counter_default_does_not_downgrade_specific_type(conn, tmp_pat
     assert _acct_type(conn, "HomeLoan") == "liability"
 
 
+# A transfer's other side is created ONLY for an account the file does not carry.
+# Keyed on (account, date), a register the file did carry but with nothing on that
+# day counted as absent and the other side was invented -- a second copy of the
+# money. Quicken's exports make that common, and each one left an account wrong by
+# the whole transfer against Quicken's own balance.
+def _bal(conn, name):
+    return ledger.account_balance(conn, _acct_id(conn, name))
+
+
+def test_two_sides_of_one_transfer_dated_differently_are_not_doubled(conn, tmp_path):
+    """A card payment Quicken dated 4/13 on the card and 4/16 in checking."""
+    text = ("!Account\nNCard\nTCCard\n^\n!Type:CCard\n"
+            "D4/13'18\nT1,418.26\nPPayment\nL[Checking]\n^\n"
+            "!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+            "D4/16'18\nT-1,418.26\nPPayment\nL[Card]\n^\n")
+    importers.import_file(conn, _write(tmp_path, "pay.qif", text))
+    assert _bal(conn, "Card") == 1_418_26
+    assert _bal(conn, "Checking") == -1_418_26
+
+
+def test_a_transfer_the_other_register_does_not_contain_is_not_invented(conn, tmp_path):
+    """The other account's register is in the file but lacks this transfer, so
+    Quicken's balance for it excludes the transfer; so must ours."""
+    text = ("!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+            "D12/31'18\nT-3,162.00\nPTransfer\nL[College Fund]\n^\n"
+            "!Account\nNCollege Fund\nTBank\n^\n!Type:Bank\n"
+            "D6/01'18\nT100.00\nPDeposit\n^\n")
+    importers.import_file(conn, _write(tmp_path, "one.qif", text))
+    assert _bal(conn, "Checking") == -3_162_00
+    assert _bal(conn, "College Fund") == 100_00
+
+
+def test_an_empty_register_in_the_file_still_counts_as_carried(conn, tmp_path):
+    text = ("!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+            "D12/31'18\nT-50.00\nPTransfer\nL[Savings]\n^\n"
+            "!Account\nNSavings\nTBank\n^\n!Type:Bank\n")
+    importers.import_file(conn, _write(tmp_path, "empty.qif", text))
+    assert _bal(conn, "Savings") == 0
+
+
+def test_an_account_the_file_does_not_carry_still_gets_its_side(conn, tmp_path):
+    """A single-account export: nothing else will supply the other side."""
+    text = ("!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+            "D12/31'18\nT-50.00\nPTransfer\nL[Savings]\n^\n")
+    importers.import_file(conn, _write(tmp_path, "single.qif", text))
+    assert _bal(conn, "Checking") == -50_00
+    assert _bal(conn, "Savings") == 50_00
+
+
+def test_a_split_transfer_line_is_not_mirrored_into_a_carried_register(conn, tmp_path):
+    text = ("!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+            "D3/01'19\nT-1,000.00\nPMortgage Co\nL[Loan]\n"
+            "S[Loan]\n$-800.00\nSInterest\n$-200.00\n^\n"
+            "!Account\nNLoan\nTOth L\n^\n!Type:Oth L\n"
+            "D3/02'19\nT800.00\nPMortgage Co\nL[Checking]\n^\n")
+    importers.import_file(conn, _write(tmp_path, "split.qif", text))
+    assert _bal(conn, "Loan") == 800_00
+    assert _bal(conn, "Checking") == -1_000_00
+
+
 # A real record from Mammon_1997.QIF: a "Refinance of Home" entry whose top-level
 # L is a transfer account ([ANYTOWN House Loan2]) but whose amount is ZERO (the
 # money is broken out across split lines). create_transfer rejects a non-positive
@@ -1276,7 +1336,9 @@ def test_ofx_closureopt_removes_option_units(conn, tmp_path):
     close = conn.execute(
         "SELECT action, symbol, quantity, amount FROM investment_transactions WHERE fitid='O2'"
     ).fetchone()
-    assert close["action"] == "RemoveShares"
+    # An EXPIRE is a disposal at a price of ZERO, not a RemoveShares: the whole
+    # premium is realized. See _CLOSURE_ACTIONS in importers/ofx.py.
+    assert close["action"] == "Sell"
     assert close["symbol"] == "OPT123"
     assert close["quantity"] == "10" and close["amount"] == 0
     assert investments.list_holdings(conn, aid) == []          # position fully closed

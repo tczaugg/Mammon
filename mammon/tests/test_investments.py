@@ -488,6 +488,25 @@ def _one_sided_transfer_split(conn, checking, target, date, leg_cents, payee):
     return t
 
 
+def test_register_shows_a_rebalances_sales_before_its_buys(conn, acct):
+    """Same day, entered buys first: the register shows the cash coming in (the
+    transfer, then the sale) before the purchases it pays for, and the running
+    cash never goes negative. Share-only rows sit between the two."""
+    investments.record_investment(conn, acct, "2026-03-02", "Buy", symbol="BOND",
+                                  quantity="10", price="10", amount=-100_00)
+    investments.record_investment(conn, acct, "2026-03-02", "Buy", symbol="STOCK",
+                                  quantity="20", price="20", amount=-400_00)
+    investments.record_investment(conn, acct, "2026-03-02", "ShrsIn", symbol="GIFT",
+                                  quantity="1")
+    investments.record_investment(conn, acct, "2026-03-02", "Sell", symbol="FUND",
+                                  quantity="30", price="10", amount=300_00)
+    investments.record_investment(conn, acct, "2026-03-02", "XIn", amount=200_00)
+    rows = investments.register_rows(conn, acct)
+    assert [(r["action"], r["cash_amt"]) for r in rows] == [
+        ("Sell", 300_00), ("XIn", 200_00), ("ShrsIn", 0), ("Buy", -100_00), ("Buy", -400_00)]
+    assert [r["cash_bal"] for r in rows] == [300_00, 500_00, 500_00, 400_00, 0]
+
+
 def test_register_rows_lists_backfilled_transfer_leg(conn, acct):
     """A split leg transferring INTO an investment account, repaired by
     ledger.backfill_split_transfer_mirrors, is fabricated into the cash

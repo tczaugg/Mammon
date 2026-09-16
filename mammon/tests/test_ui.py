@@ -1123,6 +1123,30 @@ def test_main_window_opens_register(qapp, tmp_path):
     conn.close()
 
 
+def test_the_import_report_lists_what_the_import_could_not_settle(qapp, tmp_path, monkeypatch):
+    """SRD 6.2a: a removal of shares the account never held is shown with the
+    import, not left for the person to discover in a wrong balance."""
+    from mammon.importers.record import ImportResult
+    from mammon.ui import widgets
+    from mammon.ui.widgets import MainWindow
+
+    conn = db.init_db(tmp_path / "report.db")
+    acct = ledger.create_account(conn, "Brokerage", "investment", opening_balance=0)
+    investments.record_investment(conn, acct, "2025-01-07", "ShrsOut",
+                                  symbol="BOND INDEX(ANON)", quantity="0.5")
+    win = MainWindow(conn)
+    shown = []
+    monkeypatch.setattr(widgets.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: shown.append(a[2])))
+    win._report_import("Import complete", ImportResult(added=1, investment_account_ids=[acct]))
+    win._report_import("Import complete", ImportResult(added=1))
+    assert "Shares removed that were not held (1):" in shown[0]
+    assert "BOND INDEX(ANON)" in shown[0]
+    assert "Worth checking" not in shown[1]
+    win.close()
+    conn.close()
+
+
 def test_account_details_shows_address_for_assets_and_a_lien_for_loans(qapp, conn):
     """Type-conditional rows: Address on an asset (seeded from the Institution
     field people typed addresses into before it existed), Secured by on a loan."""
@@ -3239,7 +3263,7 @@ def test_holdings_dialog_shows_positions_gain_and_unpriced(qapp, conn):
     headers = [dlg.table.horizontalHeaderItem(c).text()
                for c in range(dlg.table.columnCount())]
     assert headers == ["Symbol", "Description", "Shares", "Cost Basis", "Price",
-                       "Market Value", "Dividends", "Gain/Loss"]
+                       "Market Value", "Dividends", "Gain/Loss", "Gain %", "Annual %"]
 
     def cell(r, c):
         return dlg.table.item(r, c).text()
@@ -3253,6 +3277,8 @@ def test_holdings_dialog_shows_positions_gain_and_unpriced(qapp, conn):
     assert cell(a, H.PRICE) == "140"
     assert cell(a, H.MARKET) == "1,400.00"
     assert cell(a, H.GAIN) == "400.00"
+    assert cell(a, H.GAIN_PCT) == "+40.0%"
+    assert cell(a, H.ANNUAL) == ""              # two days held: not annualized
     # a positive gain is not painted red
     assert dlg.table.item(a, H.GAIN).foreground().color().name() != style.negative_color()
 
@@ -3268,6 +3294,7 @@ def test_holdings_dialog_shows_positions_gain_and_unpriced(qapp, conn):
     assert cell(o, H.PRICE) == ""
     assert cell(o, H.MARKET) == ""
     assert cell(o, H.GAIN) == ""
+    assert cell(o, H.GAIN_PCT) == "" and cell(o, H.ANNUAL) == ""
 
     # Cash is the last row: market value only, no lot columns, and no symbol
     # behind it (so the price-history double-click passes over it).

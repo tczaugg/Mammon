@@ -179,11 +179,35 @@ def set_mixture(conn, symbol: str, weights: dict, source: Optional[str] = None,
     conn.commit()
 
 
+def _settle_stock_slice(weights: dict, stock_class) -> dict:
+    """The stored mixture as it should READ today: an ``unclassified`` slice is
+    the EQUITY the provider could not place (it publishes no domestic/overseas
+    split), so it belongs to whatever stock class the security carries NOW.
+
+    Read-time, deliberately, and for the reason split adjustment is read-time
+    (5.8e-4): the slice was stored against the class the security had when the
+    composition was fetched, so a fund marked "bond" by mistake froze nearly all
+    of itself into ``unclassified`` and setting its class afterwards changed
+    nothing until someone re-fetched. Now the correction takes effect at once,
+    and un-setting the class puts it back to unclassified.
+    """
+    if "unclassified" not in weights or stock_class not in STOCK_CLASSES:
+        return weights
+    out = {k: v for k, v in weights.items() if k != "unclassified"}
+    out[stock_class] = out.get(stock_class, Decimal("0")) + weights["unclassified"]
+    return out
+
+
 def get_mixture(conn, symbol: str) -> dict:
-    """``{asset_class: Decimal pct}`` for the security, ``{}`` when it has none."""
-    return {r["asset_class"]: _D(r["pct"]) for r in conn.execute(
+    """``{asset_class: Decimal pct}`` for the security, ``{}`` when it has none.
+    The equity slice follows the security's CURRENT class (:func:`_settle_stock_slice`)."""
+    sym = (symbol or "").strip()
+    weights = {r["asset_class"]: _D(r["pct"]) for r in conn.execute(
         "SELECT asset_class, pct FROM security_mixtures WHERE symbol=? "
-        "ORDER BY asset_class", ((symbol or "").strip(),)).fetchall()}
+        "ORDER BY asset_class", (sym,)).fetchall()}
+    row = conn.execute("SELECT asset_class FROM securities WHERE symbol=?",
+                       (sym,)).fetchone()
+    return _settle_stock_slice(weights, row["asset_class"] if row is not None else None)
 
 
 def mixture_meta(conn, symbol: str) -> Optional[dict]:
@@ -203,13 +227,17 @@ def clear_mixture(conn, symbol: str) -> bool:
 
 def all_mixtures(conn) -> dict:
     """``{symbol: {asset_class: Decimal pct}}`` for every security that has one.
-    One query, because the allocation asks for all of them at once."""
+    One query, because the allocation asks for all of them at once. Each equity
+    slice follows the security's CURRENT class (:func:`_settle_stock_slice`)."""
     out: dict = {}
     for r in conn.execute(
             "SELECT symbol, asset_class, pct FROM security_mixtures "
             "ORDER BY symbol, asset_class").fetchall():
         out.setdefault(r["symbol"], {})[r["asset_class"]] = _D(r["pct"])
-    return out
+    assigned = {r["symbol"]: r["asset_class"] for r in conn.execute(
+        "SELECT symbol, asset_class FROM securities WHERE asset_class IS NOT NULL")}
+    return {sym: _settle_stock_slice(w, assigned.get(sym))
+            for sym, w in out.items()}
 
 
 def split_value(cents: int, mixture: dict) -> dict:

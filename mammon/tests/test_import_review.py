@@ -486,6 +486,28 @@ def test_persist_and_load_pending_roundtrip_and_dedupe(conn, account):
     assert import_review.count_pending(conn, account) == 2
 
 
+def test_a_repeated_reference_number_in_one_download_is_one_review_row(conn, account):
+    """The contract a webSlinger script relies on: give each row a well-named
+    ``referenceNumber`` and a scrape that returns the same rows twice lands each
+    transaction once. Two genuine orders with the same date, amount and
+    description (a two-pizza limit ordered twice) carry DIFFERENT references,
+    so both stay. (2026-09-14: a download run returned its rows twice after a
+    manual rescue mid-run; its reference was still inside the description.)"""
+    pizza = "ANON PIZZA #0000 ANYTOWN UT"
+
+    def row(ref):
+        return {"transactionDate": "09/04/26", "transactionDescription": pizza,
+                "transactionAmount": "-$ 10.82", "referenceNumber": ref}
+
+    scraped = [row("REF-TA"), row("REF-P1"), row("REF-TA"), row("REF-P1")]
+    inserted = import_review.persist_entries(
+        conn, account, build_review(conn, account, scraped))
+    assert inserted == 2
+    loaded = import_review.load_pending(conn, account)
+    assert sorted(e.mapped.transaction_id for e in loaded) == ["REF-P1", "REF-TA"]
+    assert [e.mapped.amount_cents for e in loaded] == [-1082, -1082]
+
+
 def test_persist_blank_transaction_id_always_inserts(conn, account):
     """Rows with no transaction_id are outside the dedupe index -> each inserts."""
     row = {"postedDate": "2026-08-10", "amount": "5.00", "isDebit": True,
@@ -970,10 +992,10 @@ def test_a_row_that_cannot_be_a_transaction_never_reaches_the_review_list(conn, 
     transaction and must survive.
     """
     entries = build_review(conn, account, [
-        {"id": 6239395, "shortName": "Household Checking"},          # lookup entry
-        {"id": 5896620, "shortName": "Checking"},                # lookup entry
+        {"id": 1234567, "shortName": "Household Checking"},          # lookup entry
+        {"id": 7654321, "shortName": "Checking"},                # lookup entry
         {"transactionId": "R-1", "postedDate": "2026-08-15", "amount": "42.10",
-         "isDebit": True, "statementDescription": "COSTCO WHSE #1118"},
+         "isDebit": True, "statementDescription": "ANON WAREHOUSE #0000"},
         {"transactionId": "R-2", "postedDate": "2026-08-16", "amount": "0.00",
          "statementDescription": "ZERO DOLLAR ADJUSTMENT"},      # real, keep it
     ])

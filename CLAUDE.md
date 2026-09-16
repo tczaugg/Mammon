@@ -23,7 +23,9 @@ Packaging: `requirements.txt` and `pyproject.toml` list the SAME required set
 are NO optional-dependency extras - an absent Python package is a broken install,
 not a configuration. Everything runs from the repo root against the ambient
 interpreter with no install step; the heavy imports stay lazy, so an offline
-session never reaches the network.
+session never reaches the network. End users get `installer/` instead (SRD 9.2):
+an embeddable Python plus those same requirements, installed per-user, with data
+in `Documents\Mammon` because the install carries a `mammon-install.json` marker.
 
 The ONE optional component is **webSlinger** (an external MCP tool, not a Python
 package). Running without it is supported and tested: manual file import, manual
@@ -71,7 +73,14 @@ python -m pytest mammon/tests -q -n auto              # pre-push only (~16 worke
 
 # Create/inspect a database (prints schema version + table list)
 python -m mammon.db data\scratch.db
+
+# Windows installer ZIP from a commit (installs, runs, uninstalls itself first)
+python installer\build.py [--ref TAG | --worktree]
 ```
+
+A plain launch opens the database last opened in the window
+(`mammon/last_db.py`, SRD 5.8y); `--db` is a one-off and never becomes the
+default.
 
 Qt tests set `QT_QPA_PLATFORM=offscreen` themselves at import - no display
 needed. **12 acceptance tests are opt-in** and skip unless
@@ -117,7 +126,7 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
   text.
 - **Never edit an existing migration.** `db.py` holds an ordered `MIGRATIONS`
   list; index *i* upgrades the DB from version *i* to *i+1*, tracked in
-  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 66).
+  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 74).
   Append a new `_Vn` and add it to the list - real databases have already
   applied the existing ones. `init_db()` is idempotent and safe on new and
   existing files. (That number is pinned by

@@ -99,7 +99,10 @@ def test_a_sale_across_lots_books_one_gain_per_lot(conn, acct):
     investments.set_lot_method(conn, acct, "fifo")
     _rec(conn, acct, "2024-01-05", "Buy", "VTI", "10", "100.00", -1000_00)
     _rec(conn, acct, "2024-06-05", "Buy", "VTI", "10", "120.00", -1200_00)
-    _rec(conn, acct, "2025-03-05", "Sell", "VTI", "15", "130.00", 1950_00, commission=10_00)
+    # The amount is the NET cash the sale brought in (15 x 130 less the $10
+    # commission), as Quicken's total and an OFX <TOTAL> state it; the replay no
+    # longer takes the commission off a second time (investments._proceeds_of).
+    _rec(conn, acct, "2025-03-05", "Sell", "VTI", "15", "130.00", 1940_00, commission=10_00)
     pos = _pos(conn, acct, "VTI")
     assert (str(pos.qty), pos.cost) == ("5", 600_00)
     assert [(str(g.quantity), g.proceeds, g.basis, g.term) for g in pos.gains] == \

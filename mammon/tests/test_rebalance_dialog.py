@@ -55,9 +55,15 @@ def _named(dlg, name):
     return dlg
 
 
+def _row_for(dlg, label):
+    """The class row named ``label`` (a QTreeWidgetItem; holdings hang under it)."""
+    return next(dlg.tree.topLevelItem(i) for i in range(dlg.tree.topLevelItemCount())
+                if dlg.tree.topLevelItem(i).text(dlg.CLASS) == label)
+
+
 def test_window_with_no_target_explains_itself(qapp, conn, world):
     dlg = RebalanceDialog(conn, as_of=AS_OF)
-    assert dlg.report is None and dlg.table.rowCount() == 0
+    assert dlg.report is None and dlg.tree.topLevelItemCount() == 0
     assert "No target yet" in dlg.status.text()
     assert not dlg.delete_btn.isEnabled()
     dlg.deleteLater()
@@ -93,16 +99,13 @@ def test_editing_a_target_percent_redraws_the_drift(qapp, conn, world):
     by_class = {r.asset_class: r for r in dlg.report.rows}
     assert by_class["domestic_stock"].drift_pct == Decimal("20")
     assert by_class["domestic_stock"].move_cents == -20_000_00
-    row = next(i for i in range(dlg.table.rowCount())
-               if dlg.table.item(i, dlg.CLASS).text() == "Domestic stock")
-    assert dlg.table.item(row, dlg.DRIFT).text() == "+20.0"
-    assert dlg.table.item(row, dlg.MOVE).text() == "Sell $20,000.00"
-    bond_row = next(i for i in range(dlg.table.rowCount())
-                    if dlg.table.item(i, dlg.CLASS).text() == "Bonds")
-    assert dlg.table.item(bond_row, dlg.MOVE).text() == "Buy $20,000.00"
+    row = _row_for(dlg, "Domestic stock")
+    assert row.text(dlg.DRIFT) == "+20.0"
+    assert row.text(dlg.MOVE) == "Sell $20,000.00"
+    assert _row_for(dlg, "Bonds").text(dlg.MOVE) == "Buy $20,000.00"
     assert "out of band" in dlg.status.text()
     # The spin box in the Target column carries the stored weight.
-    assert dlg.table.cellWidget(row, dlg.TARGET).value() == pytest.approx(50.0)
+    assert dlg.tree.itemWidget(row, dlg.TARGET).value() == pytest.approx(50.0)
     dlg.deleteLater()
 
 
@@ -150,8 +153,10 @@ def test_bands_and_sleeve_are_saved_on_the_target(qapp, conn, world):
     qapp.processEvents()
     assert dlg.report.needs_rebalance
 
-    dlg.sleeve_combo.setCurrentIndex(dlg.sleeve_combo.findData("with_cash"))
-    assert rebalance.get_target(conn, tid)["sleeve"] == "with_cash"
+    # The accounts are the user's to pick (no sleeve enum): ticking the chequing
+    # account brings its balance into the mix.
+    dlg.choose_accounts([world["inv"], world["chk"]])
+    assert rebalance.target_accounts(conn, tid) == sorted([world["inv"], world["chk"]])
     assert dlg.report.sleeve_total == 120_000_00     # the chequing account joins
     dlg.deleteLater()
 

@@ -7,7 +7,7 @@ matplotlib>=3.7
 # app whose Get Quotes and Refresh Rates buttons failed on first click. The
 # import stays lazy, so an offline session still never reaches the network.
 yfinance>=0.2
-mcp>=1.2          # python -m mammon.mcp_server (ask an LLM about the ledger)
+mcp>=1.2,<2       # python -m mammon.mcp_server; 2.0 removed mcp.server.fastmcp
 sqlcipher3>=0.6   # at-rest encryption; prebuilt wheels on Windows/Linux/macOS
 pytest>=8         # the test suite is part of the product, not an extra
 pytest-xdist>=3   # python -m pytest mammon/tests -q -n auto (the pre-push run)

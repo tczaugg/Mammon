@@ -56,6 +56,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional
 
+from mammon.importers.record import stamp_time
+
 # The actions this parser may emit. All are already in ``crypto.ACTIONS``
 # (BUY/SELL/RECEIVE/SEND/TRANSFER_IN/TRANSFER_OUT/REWARD/INTEREST) or in the
 # cash-sleeve pair (DEPOSIT/WITHDRAW). Kept as plain strings so the parser stays
@@ -78,6 +80,7 @@ class ExchangeRecord:
 
     txn_id: str = ""          # Coinbase's own row id -- the exact-dedup key
     date: str = ""            # ISO YYYY-MM-DD
+    time: str = ""            # HH:MM:SS on the date's clock; "" when unstated
     action: str = ""          # BUY|SELL|RECEIVE|SEND|TRANSFER_IN|TRANSFER_OUT|
                               # REWARD|INTEREST|DEPOSIT|WITHDRAW
     symbol: str = ""          # asset ticker; "" on a pure fiat row
@@ -323,6 +326,7 @@ def parse_coinbase(text: str, default_account: Optional[str] = None
         out.append(ExchangeRecord(
             txn_id=cell(row, i_id),
             date=_iso_date(cell(row, i_when)),
+            time=stamp_time(cell(row, i_when)) or "",
             action=action,
             symbol="" if is_cash else asset,
             quantity=_qty_text(qty),
