@@ -1547,30 +1547,117 @@ def _center_y(page, widget):
     return widget.mapTo(page, QPoint(0, 0)).y() + widget.height() // 2
 
 
-def test_the_band_stacks_arrows_then_mode_then_what_if_then_thermometer(page, qapp):
+def test_the_band_stacks_arrows_then_what_if_then_thermometer(page, qapp):
     """The band has no layout -- it is placed by hand against the plots -- so the
-    order is a fact about where the blocks land, not about layout indices."""
+    order is a fact about where the blocks land, not about layout indices.
+
+    The mode switch is no longer one of them: it moved inside the ring
+    (reported), which is what leaves What If alone in the gap.
+    """
     from PyQt5.QtCore import QPoint
     _shown(page, qapp)
     assert page.left_band.layout() is None
-    tops = [page.arrow_box, page.mode_row, page.what_if_bar, page.thermometer]
-    ys = [w.mapTo(page, QPoint(0, 0)).y() for w in tops]
+    blocks = [page.arrow_box, page.what_if_bar, page.thermometer]
+    ys = [w.mapTo(page, QPoint(0, 0)).y() for w in blocks]
     assert ys == sorted(ys)
+    assert not page.left_band.isAncestorOf(page.mode_row)
     page.hide()
 
 
-def test_the_mode_buttons_live_in_the_band_above_what_if(page, qapp):
-    """Moved out of the ring holder so the ring can reach the top of the page.
-    Same group, same exclusivity, same wiring -- only the parent changed."""
+def test_what_if_draws_labelled_connectors_to_what_it_turns_on(page, qapp):
+    """Reported: "when the What-If button is pressed draw line(arrows) from the
+    button to the arrow and the thermometer and label them 'change
+    contributions' and 'change asset mix' respectively."
+
+    What If is a MODE -- while it is on, the arrows and the thermometer stop
+    reporting what was measured and start accepting what the user wants to try.
+    Nothing said so before; these connectors are that sentence, drawn.
+    """
+    _shown(page, qapp)
+    overlay = page.connectors
+    assert not overlay.isVisible(), "no connectors until the mode is on"
+    assert overlay._legs == []
+
+    page.what_if_bar.button.setChecked(True)
+    for _ in range(3):
+        qapp.processEvents()
+    assert overlay.isVisible()
+    labels = [leg[2] for leg in overlay._legs]
+    assert labels == [dash.CONNECTOR_TO_ARROWS, dash.CONNECTOR_TO_THERMOMETER]
+    assert dash.CONNECTOR_TO_ARROWS == "change contributions"
+    assert dash.CONNECTOR_TO_THERMOMETER == "change asset mix"
+
+    # One leg points UP at the arrows, the other DOWN at the thermometer, and
+    # each ends against the block it names.
+    up, down = overlay._legs
+    assert up[1] < up[0], "the contributions leg points up at the arrows"
+    assert down[1] > down[0], "the asset-mix leg points down at the thermometer"
+    assert up[1] >= page.arrow_box.geometry().bottom()
+    assert down[1] <= page.thermometer.geometry().top()
+
+    page.what_if_bar.button.setChecked(False)
+    for _ in range(3):
+        qapp.processEvents()
+    assert not overlay.isVisible()
+    assert overlay._legs == []
+    page.hide()
+
+
+def test_the_connectors_do_not_steal_clicks_from_what_they_cross(page, qapp):
+    """The overlay covers the whole band, including the arrows and the
+    thermometer it points at. Mouse-transparency is safe HERE and is not
+    elsewhere on this page -- Qt skips a mouse-transparent widget's whole
+    SUBTREE when picking a receiver, which is what made the band's own controls
+    dead when it was tried there -- because this overlay has no children."""
+    from PyQt5.QtCore import Qt
+    _shown(page, qapp)
+    page.what_if_bar.button.setChecked(True)
+    for _ in range(3):
+        qapp.processEvents()
+    overlay = page.connectors
+    assert overlay.testAttribute(Qt.WA_TransparentForMouseEvents)
+    assert overlay.children() == []
+    # The band still answers for a point the overlay covers.
+    band = page.left_band
+    point = page.what_if_bar.geometry().center()
+    assert overlay.geometry().contains(point)
+    assert band.childAt(point) is not overlay
+    page.hide()
+
+
+def test_what_if_sits_halfway_between_the_arrows_and_the_thermometer(page, qapp):
+    """Reported: "put the What-If row half-way between the arrows and the
+    thermometer". It used to be stacked hard against the mode switch at the top
+    of the gap; with the switch gone it is centered in what is left."""
+    _shown(page, qapp)
+    bar = page.what_if_bar.geometry()
+    above = bar.top() - page.arrow_box.geometry().bottom()
+    below = page.thermometer.geometry().top() - bar.bottom()
+    assert above > 0 and below > 0, "it must not overlap either neighbour"
+    assert abs(above - below) <= 2, f"clearances {above} vs {below}"
+    page.hide()
+
+
+def test_the_mode_buttons_live_inside_the_ring_near_the_top(page, qapp):
+    """Reported: "let's move the Accounts/Securities button inside the ring near
+    the top". The switch says what the RING's wedges are, so it belongs with
+    them. Same group, same exclusivity, same wiring -- only the parent changed.
+    """
     from PyQt5.QtCore import QPoint
     _shown(page, qapp)
+    area = page.ring_area
     for btn in page.mode_buttons.values():
-        assert page.left_band.isAncestorOf(btn)
+        assert area.isAncestorOf(btn)
         assert page.mode_group.id(btn) is not None
     assert page.mode_group.exclusive() is True
-    mode_y = page.mode_row.mapTo(page, QPoint(0, 0)).y()
-    what_if_y = page.what_if_bar.mapTo(page, QPoint(0, 0)).y()
-    assert mode_y + page.mode_row.height() <= what_if_y
+
+    # Inside the ring: horizontally over the hole, and above the top caption.
+    row = page.mode_row.geometry()
+    hx, hy, hw, hh = area.hole_rect()
+    assert hx <= row.center().x() <= hx + hw
+    assert row.bottom() <= area.selector_rects()["top"][1]
+    # ...and in the upper half of the ring area, not floated off the page top.
+    assert row.top() < area.height() // 2
     # And they still switch the ring.
     page.mode_buttons[dash.MODE_SECURITIES].click()
     assert page.mode() == dash.MODE_SECURITIES

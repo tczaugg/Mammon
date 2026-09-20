@@ -262,6 +262,21 @@ TITLE_GAP = 12
 #: ring, maybe 50 pixels"). The band stays RIGHT-ALIGNED to the tangent, just
 #: offset by this -- the alignment rule is unchanged, the gap is new.
 BAND_RING_GAP = 50
+
+#: The two things What If makes editable, and what each one changes. Reported:
+#: "when the What-If button is pressed draw line(arrows) from the button to the
+#: arrow and the thermometer and label them 'change contributions' and 'change
+#: asset mix' respectively." The words are the user's; they are the whole point
+#: of the connectors, which exist to say what the mode just turned on.
+CONNECTOR_TO_ARROWS = "change contributions"
+CONNECTOR_TO_THERMOMETER = "change asset mix"
+#: The connector line's own column in the band, and the arrowhead's size.
+CONNECTOR_LINE_X = 13
+CONNECTOR_HEAD = 7
+CONNECTOR_WIDTH = 2
+#: Labels sit beside the line, a size down: they annotate, and the controls they
+#: point at are what should be read first.
+CONNECTOR_FONT_SCALE = 0.85
 #: Smallest corner overlay worth reserving, in px.
 #: Reported: "shrink the size of the 4 corner tiles so that they look more like
 #: buttons than something that is actually trying to convey information."
@@ -891,6 +906,7 @@ class RingArea(QWidget):
         self.selectors: dict = {}
         self.center = None
         self.gear = None
+        self.mode_row = None
         # Set while a zero-geometry mask retry is queued; see _defer_mask.
         self._mask_pending = False
         ring.setParent(self)
@@ -998,6 +1014,34 @@ class RingArea(QWidget):
         if widget is None:
             return 0
         return int(round(CENTER_RAISE_LINES * widget.line_height()))
+
+    def mode_row_rect(self):
+        """``(x, y, w, h)`` for the Accounts/Securities switch, INSIDE the ring
+        near the top (reported: "let's move the Accounts/Securities button
+        inside the ring near the top").
+
+        Centered on the hole like the captions are, and stacked above the top
+        caption in the crescent between the hole's top edge and the inner
+        circle. It sits there rather than in the left band because the switch
+        says what the RING's wedges are, and a control that renames the wedges
+        belongs with them."""
+        widget = self.mode_row
+        if widget is None:
+            return None
+        hint = widget.sizeHint()
+        mw = max(1, min(hint.width(), max(1, self.width())))
+        mh = max(1, hint.height())
+        hx, hy, hw, hh = self.hole_rect()
+        top = self.selector_rects().get("top")
+        above = top[1] if top else hy
+        return (hx + (hw - mw) // 2, max(0, above - BAND_SPACING - mh), mw, mh)
+
+    def set_mode_row(self, widget) -> None:
+        """Adopt the mode switch as a raised overlay, like the gear."""
+        widget.setParent(self)
+        widget.setMinimumSize(0, 0)
+        self.mode_row = widget
+        self._place_children()
 
     def gear_rect(self):
         """``(x, y, w, h)`` for the account gear: top of the page, immediately
@@ -1265,6 +1309,11 @@ class RingArea(QWidget):
             self.selectors[slot].raise_()
         if self.center is not None:
             self.center.setGeometry(*self.center_rect())
+        if self.mode_row is not None:
+            rect = self.mode_row_rect()
+            if rect is not None:
+                self.mode_row.setGeometry(*rect)
+                self.mode_row.raise_()
         if self.gear is not None:
             self.gear.setGeometry(*self.gear_rect())
             self.gear.raise_()
@@ -2661,6 +2710,71 @@ def restyle_toggle(button) -> None:
     set_toggle_active(button, button.isChecked())
 
 
+class WhatIfConnectors(QWidget):
+    """Two labelled arrows from the What If button to the controls it turns on.
+
+    What If is a MODE: while it is on, the inflow arrows and the thermometer
+    stop reporting what was measured and start accepting what the user wants to
+    try. Nothing on screen said so -- the button lit up, and the two controls it
+    had just changed the meaning of were elsewhere in the band. These connectors
+    are that sentence, drawn: one arrow up to the arrows labelled "change
+    contributions", one down to the thermometer labelled "change asset mix".
+
+    Pure decoration, so it is mouse-transparent. That attribute is safe HERE and
+    is not elsewhere on this page: Qt skips a mouse-transparent widget's whole
+    SUBTREE when picking a mouse receiver, which is what made the band's own
+    controls dead when it was tried there -- but this overlay has no children,
+    and everything under it (the arrows, the thermometer, What If itself) has to
+    keep its clicks.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("whatIfConnectors")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._legs = []                      # [(from_y, to_y, label)]
+        self.hide()
+
+    def set_legs(self, legs) -> None:
+        """``[(start_y, end_y, label)]`` in THIS widget's coordinates."""
+        self._legs = list(legs)
+        self.update()
+
+    def paintEvent(self, event):             # noqa: N802 (Qt's name)
+        if not self._legs:
+            return
+        pal = charts._active_palette()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(pal["highlight"]), CONNECTOR_WIDTH)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        font = _scaled_font(self.font(), CONNECTOR_FONT_SCALE)
+        p.setFont(font)
+        metrics = QFontMetrics(font)
+        for start_y, end_y, label in self._legs:
+            x = CONNECTOR_LINE_X
+            p.setPen(pen)
+            p.drawLine(x, int(start_y), x, int(end_y))
+            # Arrowhead at the FAR end, pointing the way the meaning travels.
+            step = CONNECTOR_HEAD if end_y > start_y else -CONNECTOR_HEAD
+            head = QPolygonF([QPointF(x, end_y),
+                              QPointF(x - CONNECTOR_HEAD * 0.7, end_y - step),
+                              QPointF(x + CONNECTOR_HEAD * 0.7, end_y - step)])
+            p.setBrush(QBrush(QColor(pal["highlight"])))
+            p.setPen(Qt.NoPen)
+            p.drawPolygon(head)
+            p.setPen(QPen(QColor(pal["text"])))
+            text_x = x + CONNECTOR_HEAD + 4
+            box = QRect(text_x, int(min(start_y, end_y)),
+                        max(1, self.width() - text_x - 2),
+                        max(1, int(abs(end_y - start_y))))
+            p.drawText(box, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
+                       metrics.elidedText(label, Qt.ElideRight,
+                                          max(1, box.width() * 2)))
+        p.end()
+
+
 class WhatIfBar(QWidget):
     """The What If toggle, its Reset and the name of the scope it is acting on,
     on the center line between the arrows and the thermometer -- the two things
@@ -3247,10 +3361,10 @@ class InvestmentDashboardPage(QWidget):
         self.arrow_layout.setContentsMargins(0, 0, 0, 0)
         self.arrow_layout.setSpacing(6)
 
-        # Middle: the mode toggle, directly above What If. Above, because the
-        # ring has to reach the top of the page and these two buttons were the
-        # only thing left standing between it and the top edge.
-        self.mode_row = QWidget(band)
+        # The mode toggle is NOT a band block any more -- it is handed to the
+        # ring area and placed inside the ring near the top (reported). Built
+        # parented to the page so it has an owner until set_mode_row adopts it.
+        self.mode_row = QWidget(self)
         self.mode_row.setObjectName("modeRow")
         mode_lay = QHBoxLayout(self.mode_row)
         mode_lay.setContentsMargins(0, 0, 0, 0)
@@ -3271,6 +3385,14 @@ class InvestmentDashboardPage(QWidget):
             install_toggle_highlight(btn)
 
         self.what_if_bar = WhatIfBar(band)
+        # Drawn OVER the band's blocks, so it is a sibling placed after them
+        # rather than a child of any one of them; mouse-transparent, so the
+        # arrows and the thermometer it crosses keep their clicks.
+        self.connectors = WhatIfConnectors(band)
+        # The connectors say what the MODE turned on, so they follow the toggle
+        # rather than any redraw: a refresh does not change whether What If is
+        # on, and a toggle does not go through one.
+        self.what_if_bar.toggled.connect(lambda _on: self._layout_connectors())
         self.what_if_bar.toggled.connect(self._on_what_if_toggled)
         self.what_if_bar.resetRequested.connect(self.reset_what_if)
 
@@ -3389,6 +3511,7 @@ class InvestmentDashboardPage(QWidget):
         self.gear.setObjectName("accountGear")
         self.gear.setToolTip("Choose which accounts this dashboard covers")
         self.ring_area.set_gear(self.gear)
+        self.ring_area.set_mode_row(self.mode_row)
 
     def _on_accounts_customized(self) -> None:
         """Adopt the gear's account selection, remember it, and redraw on it."""
@@ -3531,7 +3654,6 @@ class InvestmentDashboardPage(QWidget):
         band_top = band.mapTo(self, band.rect().topLeft()).y()
 
         arrow_h = max(self.arrow_box.sizeHint().height(), 0)
-        mode_h = self.mode_row.sizeHint().height()
         what_h = self.what_if_bar.sizeHint().height()
         therm_h = self.thermometer_slot_height()
 
@@ -3546,11 +3668,14 @@ class InvestmentDashboardPage(QWidget):
         arrow_y = top_center - band_top - arrow_h // 2
         therm_y = bot_center - band_top - therm_h // 2
 
-        # The furniture goes in the gap, hard against What If's own block. If
-        # the gap is too small, push the arrows up rather than overlap them --
-        # an overlapping arrow eats the mode buttons' clicks.
-        block_h = mode_h + what_h + BAND_SPACING
-        block_y = therm_y - BAND_SPACING - block_h
+        # What If sits HALFWAY between the arrows and the thermometer
+        # (reported), which is what its two connectors point at. With the mode
+        # switch moved into the ring it is the only thing in that gap, so it can
+        # be centered in it rather than stacked against one end.
+        block_h = what_h
+        gap_top = arrow_y + arrow_h
+        gap_bottom = therm_y
+        block_y = gap_top + (gap_bottom - gap_top - block_h) // 2
         if block_y < arrow_y + arrow_h + BAND_SPACING:
             arrow_y = block_y - BAND_SPACING - arrow_h
         # The floor is not 0: it is below whatever the ring area has raised over
@@ -3569,9 +3694,43 @@ class InvestmentDashboardPage(QWidget):
             therm_h = max(0, min(therm_h, band.height() - therm_y))
 
         self.arrow_box.setGeometry(0, arrow_y, width, arrow_h)
-        self.mode_row.setGeometry(0, block_y, width, mode_h)
-        self.what_if_bar.setGeometry(0, block_y + mode_h + BAND_SPACING, width, what_h)
+        self.what_if_bar.setGeometry(0, block_y, width, what_h)
         self.thermometer.setGeometry(0, therm_y, width, therm_h)
+        self._layout_connectors()
+
+    def _layout_connectors(self) -> None:
+        """Place and aim the two What If connectors.
+
+        Called at the END of :meth:`_layout_left_band`, once the blocks it
+        points at have their geometry -- the legs are measured FROM those
+        widgets, so computing them any earlier would aim at the previous frame.
+        """
+        overlay = getattr(self, "connectors", None)
+        if overlay is None:
+            return
+        band = self.left_band
+        overlay.setGeometry(0, 0, band.width(), band.height())
+        on = self.what_if_bar.button.isChecked()
+        overlay.setVisible(on)
+        if not on:
+            overlay.set_legs([])
+            return
+        button = self.what_if_bar.button
+        top = button.mapTo(band, button.rect().topLeft()).y()
+        bottom = top + button.height()
+        legs = []
+        arrows = self.arrow_box
+        if arrows.height() > 0:
+            legs.append((top - BAND_SPACING,
+                         arrows.geometry().bottom() + BAND_SPACING,
+                         CONNECTOR_TO_ARROWS))
+        thermo = self.thermometer
+        if thermo.height() > 0:
+            legs.append((bottom + BAND_SPACING,
+                         thermo.geometry().top() - BAND_SPACING,
+                         CONNECTOR_TO_THERMOMETER))
+        overlay.set_legs(legs)
+        overlay.raise_()
 
     def _schedule_band_layout(self) -> None:
         """Re-place the band once Qt has settled the ring's geometry. Deferred
