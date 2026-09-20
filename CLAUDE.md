@@ -162,6 +162,15 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
 - Module docstrings carry the *rationale* - why a design was chosen and what
   bug the current shape prevents. They are load-bearing; when you change
   behavior, update the reasoning rather than deleting it.
+- **American English, in identifiers and in prose.** center, color, behavior,
+  gray, license, normalize - never the British spelling. This is not a style
+  preference to weigh against matching nearby code: an LLM writing this codebase
+  drifts to British spellings wherever no external API pins the token (it once
+  wrote `color=colour` on ONE line - American where matplotlib forced it, British
+  where the name was its own), and every later session then matched the drift
+  because that is what reading like the surrounding code means. 358 occurrences
+  across 86 identifiers accumulated that way before anyone said so. If you find
+  one, it is a defect: fix it rather than matching it.
 - **Tests open a database with `fresh_db`, not `db.init_db`.** `from
   mammon.tests import fresh_db` - it copies a per-process, already-migrated
   template instead of replaying all 75 migrations per test, which took the
