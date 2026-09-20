@@ -4,7 +4,7 @@ A tag's color (a ``#RRGGBB`` string, read from :func:`mammon.ledger.tag_colors`)
 is surfaced as a small filled square: an icon in the Tag Manager list and the By
 Tag report table, and a hand-painted rect in the register / split delegates.
 Centralised here so every surface draws the same chip, and so ``ui/`` keeps the
-one colour-to-pixel step in one place with no SQL and no money logic near it.
+one color-to-pixel step in one place with no SQL and no money logic near it.
 """
 from __future__ import annotations
 

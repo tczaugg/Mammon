@@ -262,7 +262,7 @@ def parse_csv(text: str, default_account: Optional[str] = None,
 
     A thin wrapper over :func:`_parse_csv_rows` that exists for ONE reason: the
     body has four exits (profile, authoritative roles, cash, generic), and the
-    sign normalisation has to happen on all of them. Hooking it before the last
+    sign normalization has to happen on all of them. Hooking it before the last
     ``return`` covered the generic path only, so a plan export -- which leaves by
     the profile exit -- kept its negative fee quantities and would have posted a
     ShrsOut that ADDS shares. See record.normalize_investment_signs.

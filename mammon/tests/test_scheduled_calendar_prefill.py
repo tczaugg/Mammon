@@ -3,7 +3,7 @@ the category -- or the full split -- a payee will inherit from its most recent
 real transaction, so the learned split (task 6107f483) is no longer invisible
 behind a lone default category.
 
-The domain behaviour (a definition reproduces its stored split on every
+The domain behavior (a definition reproduces its stored split on every
 pre-entry, through ledger.set_splits) is already covered by test_scheduled_split;
 this file covers the UI GAP: on the calendar's Schedule-<payee> editor the
 inherited category/split must be surfaced when the payee is entered, and what the

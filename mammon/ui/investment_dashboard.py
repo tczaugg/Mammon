@@ -19,7 +19,7 @@ The geometry, from the design:
   launchers there costs the ring no vertical space at all. They were rows once,
   and the two rows ate ~80px off the ring's diameter for regions that were
   empty by construction.
-* The ring is slid RIGHT of page centre, because the left band is reserved for
+* The ring is slid RIGHT of page center, because the left band is reserved for
   the inflow arrows, the mode buttons + What If, and the contribution
   thermometer. The band is a narrow fixed-width column (:data:`LEFT_BAND_WIDTH`)
   whose RIGHT EDGE sits on the vertical line tangent to the ring's left outer
@@ -27,12 +27,12 @@ The geometry, from the design:
   edge of the ring"), less :data:`BAND_RING_GAP` of clear air ("the arrow and
   thermometer need a spacer beteween them and the ring, maybe 50 pixels") -- so
   the arrows still read as *entering* it without appearing to touch it. That
-  tangent is ``ring centre x - R_outer``, which is why the outer radius has to
+  tangent is ``ring center x - R_outer``, which is why the outer radius has to
   be a pure function of the ring widget's rect -- see :func:`ring_outer_radius`.
 * The ring is a **donut** -- inner radius :data:`RING_INNER_RADIUS` = 0.9435,
   i.e. a band 0.0565R wide: HALF the 0.113R it shipped at, which was itself one
   third of the 0.34R first drawn. The design pinned 0.62-0.68 to guarantee the
-  hole could hold two charts and the centre line; a *thinner* band only makes
+  hole could hold two charts and the center line; a *thinner* band only makes
   the hole bigger, so that requirement is satisfied with room to spare. The hole
   is a layout container, not empty space: :class:`RingArea` positions a child
   widget over it on every resize (:meth:`RingArea.hole_rect`), and that child
@@ -41,8 +41,8 @@ The geometry, from the design:
   radius automatically. That rect is NOT the inscribed square: it is widened by
   :data:`HOLE_WIDTH_SCALE` to the widest rectangle whose corners are still on or
   inside the inner circle (reported: "both plots have room to expand to the
-  left"), trading height for the scarce axis of a time series. The centre line
-  is no longer a row of it -- see :data:`CENTRE_FONT_SCALE`.
+  left"), trading height for the scarce axis of a time series. The center line
+  is no longer a row of it -- see :data:`CENTER_FONT_SCALE`.
 * **The ring canvas is stacked IN FRONT of the hole, not behind it.** The hole's
   two canvases are rectangles, so their corners stick out past the inner circle
   and used to be drawn over the band ("the corners of the plots overlap the
@@ -65,9 +65,9 @@ The geometry, from the design:
   of the ring can cover them and no part of them eats a plot's height.
 * The left band is positioned BY HAND (:meth:`InvestmentDashboardPage._layout_left_band`)
   rather than by a stretch layout, because each of its blocks aligns with
-  something inside a *different* widget: the arrows centre on the value-history
-  canvas and the thermometer centres on the projection canvas, both of which
-  live inside the hole. A stretch layout can only centre them in the band, which
+  something inside a *different* widget: the arrows center on the value-history
+  canvas and the thermometer centers on the projection canvas, both of which
+  live inside the hole. A stretch layout can only center them in the band, which
   is not the same line. The mode buttons and What If sit between the two, mode
   buttons on top.
 * The thermometer is drawn at :data:`THERMOMETER_HEIGHT_SCALE` of the height an
@@ -77,7 +77,7 @@ The geometry, from the design:
   Performance Report corner (:meth:`InvestmentDashboardPage._build_gear`). It is
   the application's existing ``CustomizeDialog``, not a picker invented here, so
   "which accounts" means the same thing on this page as in every report window;
-  its selection bounds the ring in both modes, both charts, the centre line, the
+  its selection bounds the ring in both modes, both charts, the center line, the
   arrows and the fan, and ``None`` means every investment account.
 
 **The hole's two charts take their chrome from the ACTIVE palette at draw
@@ -85,9 +85,9 @@ time.** The figure and axes stay transparent so the page's own themed
 background shows through, but ticks, tick labels, axis labels, title, spines
 and grid are resolved inside ``render()`` from ``charts._chart_palette()`` --
 never captured at construction, because the page is re-rendered on a theme
-change (``ui/widgets.py`` calls ``mark_stale``) and colours frozen at build
+change (``ui/widgets.py`` calls ``mark_stale``) and colors frozen at build
 time leave matplotlib's near-black defaults unreadable on the dark palette
-(reported). Those colours are imported from :mod:`mammon.ui.charts` rather than
+(reported). Those colors are imported from :mod:`mammon.ui.charts` rather than
 copied, so the two chart families cannot drift apart.
 
 **No small-slice grouping.** :class:`charts.SlicesPieCanvas` folds the smallest
@@ -100,10 +100,10 @@ than tweaking the base's thresholds -- the base draws its wedges inline in
 anyway. Everything structural is still inherited: the click wiring, the hover
 tooltip machinery and the wedge bookkeeping.
 
-**Colours are keyed by identity, not by position.** ``ring_colors`` assigns the
-palette in sorted-key order, so an account keeps its colour as values move
-around beneath it, and the same key keeps its colour across the
-accounts|securities toggle. Sorting (rather than hashing) keeps every colour in
+**Colors are keyed by identity, not by position.** ``ring_colors`` assigns the
+palette in sorted-key order, so an account keeps its color as values move
+around beneath it, and the same key keeps its color across the
+accounts|securities toggle. Sorting (rather than hashing) keeps every color in
 a set distinct, which a hash would not.
 
 **The arrows count, they do not fit a cadence.** An investment account with at
@@ -112,7 +112,7 @@ least :data:`ARROW_MIN_INFLOWS` positive external flows in the trailing
 of those flows -- not an annualized extrapolation of an inferred rate. No
 cadence is detected, stored or named.
 
-**What If is SCOPED, not portfolio-only.** The toggle used to grey itself out
+**What If is SCOPED, not portfolio-only.** The toggle used to gray itself out
 whenever a ring wedge was selected, and turning it on cleared the filter. That
 made the only question it is good for unanswerable (reported: "I want to be
 able to do what if on an individual account. Otherwise being able to change the
@@ -126,7 +126,7 @@ charges an account only its own measured stream (and a security nothing at
 all); :meth:`InvestmentDashboardPage._refresh_measured` re-measures the mix on
 every refresh, so the baseline can never be the portfolio's while the What If
 fan is one account's; and :class:`WhatIfBar` states the scope in words, because
-a scoped fan misread as the portfolio's is a worse failure than the grey button
+a scoped fan misread as the portfolio's is a worse failure than the gray button
 ever was. The filter itself is derived from the ring after every refresh
 (:meth:`InvestmentDashboardPage._sync_filter_to_ring`) so the page cannot go on
 projecting a subject no wedge is showing as selected.
@@ -154,7 +154,7 @@ pushed a tall arrow stack up underneath the mode buttons.
 :meth:`InvestmentDashboardPage._band_top_limit` supplies the real floor and the
 furniture below the arrows gives way instead of the arrows moving into it.
 Because nothing about this is visible in a screenshot, the tests assert it with
-``page.childAt()`` at each editor's centre rather than by checking geometry.
+``page.childAt()`` at each editor's center rather than by checking geometry.
 
 All money arithmetic is composed from the domain layer
 (:mod:`mammon.investments`, :mod:`mammon.portfolio`); this module adds none of
@@ -222,7 +222,7 @@ from mammon.ui.models import fmt_date
 #: therefore ``1 - 0.9435 = 0.0565R`` wide: HALF the 0.113R the ring shipped at
 #: (reported: "reduce the ring width to half its current width"), which was
 #: itself ONE SIXTH of the 0.34R first drawn (0.34/6 = 0.05667). Design 2.2
-#: pinned 0.62-0.68 to keep the hole big enough for two charts and the centre
+#: pinned 0.62-0.68 to keep the hole big enough for two charts and the center
 #: line; a thinner band only enlarges the hole, so that constraint is met from
 #: the other side.
 RING_INNER_RADIUS = 0.9435
@@ -275,9 +275,9 @@ CORNER_TITLE_SCALES = (1.30, 1.20, 1.10, 1.00, 0.90, 0.80)
 #: worse outcome than no picture.
 CORNER_ART_MIN = 22
 #: How many category hues a corner graphic may use. Taken from the ring's own
-#: wedge palette so the pies in the Rebalancing glyph are the ring's colours.
+#: wedge palette so the pies in the Rebalancing glyph are the ring's colors.
 CORNER_WEDGE_COUNT = 4
-#: The two asset mixes the Rebalancing glyph contrasts: the SAME colours in
+#: The two asset mixes the Rebalancing glyph contrasts: the SAME colors in
 #: DIFFERENT proportions (the user's words), so the pair reads as one portfolio
 #: before and after the arrow rather than as two unrelated charts.
 CORNER_PIE_DRIFTED = (0.46, 0.27, 0.17, 0.10)
@@ -302,7 +302,7 @@ RING_MODES = (MODE_ACCOUNTS, MODE_SECURITIES)
 ARROW_MIN_INFLOWS = 4
 INFLOW_WINDOW_DAYS = 365
 
-#: The horizons the centre line annualizes over, longest history first.
+#: The horizons the center line annualizes over, longest history first.
 ANNUALIZED_YEARS = (1, 3, 5, 10)
 
 #: The upper chart's period selector (design 2.3). ``None`` is "Max", which is
@@ -326,14 +326,14 @@ DEFAULT_PROJECTION_YEARS = 20
 RISK_SLIDER_STEPS = 10
 
 #: Fallback literals for the two hole charts. They are the LIGHT theme's values;
-#: nothing should read them directly -- :func:`chart_colours` resolves the pair
+#: nothing should read them directly -- :func:`chart_colors` resolves the pair
 #: from the palette that is active at DRAW time, so the same series is legible on
 #: a white page and on a dark one. They survive as names because the arrows and
 #: the old callers spell them.
-HISTORY_LINE_COLOUR = "#1f5fa8"
-BASELINE_FAN_COLOUR = "#1f5fa8"
-WHAT_IF_FAN_COLOUR = "#c0392b"
-OUTLINE_COLOUR = "#8a94a0"
+HISTORY_LINE_COLOR = "#1f5fa8"
+BASELINE_FAN_COLOR = "#1f5fa8"
+WHAT_IF_FAN_COLOR = "#c0392b"
+OUTLINE_COLOR = "#8a94a0"
 #: Cold at the bottom (all cash), hot at the top (all stocks) -- design 2.5.
 THERMO_COLD = "#2b6cb0"
 THERMO_HOT = "#c0392b"
@@ -358,11 +358,11 @@ EMPTY_FONT_SIZE = 10
 #: to be read at the same distance.
 LEGEND_FONT_SIZE = 10
 
-#: How much bigger the centre line's type is than the page's (reported: "the
+#: How much bigger the center line's type is than the page's (reported: "the
 #: centerline text needs a larger font too"). It is the one number on the page
 #: that is read rather than scanned, and it no longer shares a rectangle with
 #: the plots, so it can afford the size.
-CENTRE_FONT_SCALE = 1.25
+CENTER_FONT_SCALE = 1.25
 
 #: The hole is WIDER than the inscribed square (reported: "both plots have room
 #: to expand to the left"). Widening it is bounded by the inner circle, not by
@@ -377,10 +377,10 @@ HOLE_WIDTH_SCALE = 1.10
 
 #: A SECOND widening, asked for as "stretch both plots by 10% of their width to
 #: the left": the left edge moves out by this fraction of the hole's width and
-#: the right edge stays where it was, so the hole is no longer centred in the
+#: the right edge stays where it was, so the hole is no longer centerd in the
 #: circle.
 #:
-#: This one cannot obey ``a^2 + b^2 <= r_inner^2`` and stay useful. A centred
+#: This one cannot obey ``a^2 + b^2 <= r_inner^2`` and stay useful. A centerd
 #: rect is the TALLEST rect of a given width that fits a circle, so buying the
 #: extra width entirely on the left is the expensive way to buy it: at the
 #: current scale, holding the inner circle would cost 43% of the plots' height.
@@ -411,7 +411,7 @@ WHAT_IF_TOOLTIP = ("Try different contributions and a different mix. Nothing "
                    "here is ever written to the database.")
 #: What the What If bar says it is acting on when no wedge is selected. It is
 #: the same words :meth:`InvestmentDashboardPage.filter_subject` uses for the
-#: centre line, so the two readouts can never disagree about the scope.
+#: center line, so the two readouts can never disagree about the scope.
 WHAT_IF_ALL_SUBJECT = "All investments"
 #: Prefix on the What If bar's scope label. What If is scoped now, so the bar
 #: has to NAME its scope: a fan drawn for one small account and read as the
@@ -564,11 +564,11 @@ def _today() -> str:
 
 
 def ring_colors(keys) -> dict:
-    """``{key: colour}``, deterministic and stable.
+    """``{key: color}``, deterministic and stable.
 
     The palette is handed out in SORTED key order, so (a) every key in a set
-    gets a distinct colour up to the palette's length, and (b) a key keeps its
-    colour when values move, when the ring is refreshed, and across the
+    gets a distinct color up to the palette's length, and (b) a key keeps its
+    color when values move, when the ring is refreshed, and across the
     accounts|securities toggle wherever the identity is unchanged. A hash-to-
     palette mapping would give (b) but not (a)."""
     ordered = sorted({str(k) for k in keys})
@@ -592,7 +592,7 @@ def ring_outer_radius(width: int, height: int) -> float:
     what the user saw: "every time I switch from Accounts to Securities, the
     radius of the ring shrinks."
 
-    The axes box is square (``adjustable="box"``) and centred, so the radius is
+    The axes box is square (``adjustable="box"``) and centerd, so the radius is
     half the SHORT side, scaled down by :data:`RING_VIEW_LIMIT` because the data
     range reserves room for an exploded wedge."""
     return min(width, height) / 2.0 / RING_VIEW_LIMIT
@@ -604,10 +604,10 @@ def ring_outer_radius(width: int, height: int) -> float:
 class RingCanvas(charts.SlicesPieCanvas):
     """The donut. One wedge per account (or per security), no grouping, no
     inline labels -- identification is the hover tooltip inherited from the
-    base, and the colour correspondence with the charts in the hole.
+    base, and the color correspondence with the charts in the hole.
 
     Slices arrive as ``[(key, label, cents)]``: the *key* is the stable
-    identity (an account id as a string, or a ticker) that colouring and the
+    identity (an account id as a string, or a ticker) that coloring and the
     click filter work in, the *label* is what a human reads in the tooltip.
 
     ``render`` is overridden whole rather than parameterised, because the base
@@ -624,7 +624,7 @@ class RingCanvas(charts.SlicesPieCanvas):
     # subclass's __init__ body has run, so render() must find these.
     _keys: dict = {}
     _labels: dict = {}
-    _colour_by_key: dict = {}
+    _color_by_key: dict = {}
     _selected = None
 
     def __init__(self, slices=(), parent=None, *, empty_text=RING_EMPTY_TEXT):
@@ -640,7 +640,7 @@ class RingCanvas(charts.SlicesPieCanvas):
         rows = [(str(k), str(lab), int(c)) for k, lab, c in slices if int(c) > 0]
         self._keys = {lab: k for k, lab, _ in rows}
         self._labels = {k: lab for k, lab, _ in rows}
-        self._colour_by_key = ring_colors([k for k, _, _ in rows])
+        self._color_by_key = ring_colors([k for k, _, _ in rows])
         if self._selected is not None and self._selected not in self._labels:
             self._selected = None
         self._base = [(lab, c) for _, lab, c in rows]
@@ -654,12 +654,12 @@ class RingCanvas(charts.SlicesPieCanvas):
     def wedge_count(self) -> int:
         return len(self._wedges)
 
-    def colour_for(self, key) -> str:
-        return self._colour_by_key.get(str(key), "#999999")
+    def color_for(self, key) -> str:
+        return self._color_by_key.get(str(key), "#999999")
 
-    def wedge_colours(self) -> dict:
-        """``{key: colour}`` for what is currently drawn."""
-        return {k: self.colour_for(k) for k in self.keys()}
+    def wedge_colors(self) -> dict:
+        """``{key: color}`` for what is currently drawn."""
+        return {k: self.color_for(k) for k in self.keys()}
 
     def selected(self):
         return self._selected
@@ -710,7 +710,7 @@ class RingCanvas(charts.SlicesPieCanvas):
           ``set_aspect("equal", adjustable="datalim")``: it keeps the circle
           round by WIDENING the data range, which shrinks the drawn radius on a
           non-square canvas and compounds with every redraw. ``adjustable="box"``
-          keeps the data range fixed and shrinks the AXES to a centred square
+          keeps the data range fixed and shrinks the AXES to a centerd square
           instead, so the radius is exactly :func:`ring_outer_radius` of the
           widget's rect in both modes and after any number of renders."""
         fig = self.figure
@@ -743,7 +743,7 @@ class RingCanvas(charts.SlicesPieCanvas):
             return
         labels = [lab for lab, _ in slices]
         sizes = [c for _, c in slices]
-        colors = [self.colour_for(self._keys.get(lab)) for lab in labels]
+        colors = [self.color_for(self._keys.get(lab)) for lab in labels]
         explode = [SELECTED_EXPLODE if self._keys.get(lab) == self._selected
                    else 0.0 for lab in labels]
         self._tooltips = {
@@ -799,7 +799,7 @@ class RingArea(QWidget):
     ring no longer clears the filter; one just outside the drawn band still
     does, and so does clicking the selected wedge again.)
 
-    The selectors, the centre line and the account gear are re-raised above the
+    The selectors, the center line and the account gear are re-raised above the
     ring afterwards: they are controls, and a control under a mask hole is
     still a control nobody can hit.
 
@@ -819,7 +819,7 @@ class RingArea(QWidget):
         self.hole = hole
         self.corners: dict = {}
         self.selectors: dict = {}
-        self.centre = None
+        self.center = None
         self.gear = None
         # Set while a zero-geometry mask retry is queued; see _defer_mask.
         self._mask_pending = False
@@ -865,7 +865,7 @@ class RingArea(QWidget):
 
         Then the rect is stretched LEFT by :data:`HOLE_LEFT_STRETCH` of its own
         width -- left edge out, right edge and height unchanged, so the hole is
-        deliberately off-centre in the circle. That stretch is bounded by the
+        deliberately off-center in the circle. That stretch is bounded by the
         ring's OUTER radius rather than its inner one (see the constant): the
         left corners end up behind the annulus, which paints in front of them,
         and they still never reach the band."""
@@ -876,9 +876,9 @@ class RingArea(QWidget):
         half_w = min(half * HOLE_WIDTH_SCALE, r_inner)
         # b = sqrt(r^2 - a^2); max(0.0, ...) only guards float dust at a == r.
         half_h = math.sqrt(max(0.0, r_inner * r_inner - half_w * half_w))
-        # Round each side to whole pixels FIRST, then centre that integer rect:
+        # Round each side to whole pixels FIRST, then center that integer rect:
         # centring the float and truncating afterwards loses a pixel off one
-        # side and leaves the hole visibly off-centre inside the donut.
+        # side and leaves the hole visibly off-center inside the donut.
         rect_w = int(2.0 * half_w)
         rect_h = int(2.0 * half_h)
         x = (w - rect_w) // 2
@@ -898,19 +898,19 @@ class RingArea(QWidget):
             x = 0
         return (x, y, max(1, rect_w), rect_h)
 
-    def centre_rect(self):
-        """The centre line's OWN rectangle, laid over the plots' rectangle.
+    def center_rect(self):
+        """The center line's OWN rectangle, laid over the plots' rectangle.
 
-        Reported: the centre line "needs its own rectangle on top of the plot
+        Reported: the center line "needs its own rectangle on top of the plot
         rectangle so it can extend the full width of the circle". So it spans
         the inner circle's full width -- ``2 * r_inner``, wider than any hole
-        rect can be -- centred on the hole's vertical midline, and it is a child
+        rect can be -- centerd on the hole's vertical midline, and it is a child
         of THIS widget rather than a row in the hole's layout, which is what
         stops the hole's width from clipping it."""
         w, h = self.width(), self.height()
         r_inner = self.outer_radius() * RING_INNER_RADIUS
         rect_w = max(1, int(2.0 * r_inner))
-        widget = self.centre
+        widget = self.center
         hint = widget.sizeHint().height() if widget is not None else 0
         rect_h = max(1, hint)
         return ((w - rect_w) // 2, (h - rect_h) // 2, rect_w, rect_h)
@@ -983,17 +983,17 @@ class RingArea(QWidget):
             self.selectors[slot] = widget
         self._place_children()
 
-    def set_centre(self, widget) -> None:
-        """Adopt the centre line as a full-hole-width overlay (reported).
+    def set_center(self, widget) -> None:
+        """Adopt the center line as a full-hole-width overlay (reported).
 
         It used to be a row in the hole's layout, sharing the plots' rectangle,
         which clipped the longest lines at the hole's width. Here it is this
-        widget's child at :meth:`centre_rect`, so it can run the full width of
+        widget's child at :meth:`center_rect`, so it can run the full width of
         the circle."""
         widget.setParent(self)               # setParent hides it again
         widget.setMinimumSize(0, 0)
         widget.show()
-        self.centre = widget
+        self.center = widget
         self._place_children()
 
     def set_gear(self, widget) -> None:
@@ -1007,7 +1007,7 @@ class RingArea(QWidget):
     def selector_rects(self) -> dict:
         """``{slot: (x, y, w, h)}`` for the selectors, OUTSIDE the hole rect.
 
-        Horizontally centred on the hole; vertically in the gap the hole rect
+        Horizontally centerd on the hole; vertically in the gap the hole rect
         leaves inside the inner circle, clamped to this widget so a short page
         cannot push one off the top.
 
@@ -1075,7 +1075,7 @@ class RingArea(QWidget):
         mask.
 
         Two of them are not the annulus. With no wedges the canvas draws only
-        its "nothing here" text, dead centre, so the mask is the HOLE RECT --
+        its "nothing here" text, dead center, so the mask is the HOLE RECT --
         big enough for the text, and no bigger than an area the hole widget
         already occupies -- and the canvas goes mouse-transparent for as long as
         it has nothing to click, so the charts underneath keep their clicks.
@@ -1173,28 +1173,28 @@ class RingArea(QWidget):
         for slot, rect in self.selector_rects().items():
             self.selectors[slot].setGeometry(*rect)
             self.selectors[slot].raise_()
-        if self.centre is not None:
-            self.centre.setGeometry(*self.centre_rect())
+        if self.center is not None:
+            self.center.setGeometry(*self.center_rect())
         if self.gear is not None:
             self.gear.setGeometry(*self.gear_rect())
             self.gear.raise_()
-        # The centre line is raised LAST of all, after the gear: "the center
+        # The center line is raised LAST of all, after the gear: "the center
         # line is invisible again ... needs to be on top of everything". It is
         # the one overlay that crosses the whole circle, so anything raised
         # after it can land on it -- and the raise has to happen here, in the
         # method every geometry and refresh path funnels through, not once at
         # construction, which is how it lost the top twice already. (The gear
-        # is in the top-right corner and the centre strip is on the midline;
+        # is in the top-right corner and the center strip is on the midline;
         # they do not overlap, so neither loses a click to the other.)
-        self.raise_centre()
+        self.raise_center()
         # Last: the area's own mask depends on where everything above landed.
         self._mask_area()
 
-    def raise_centre(self) -> None:
-        """Put the centre line back on top of every sibling. Idempotent, and
+    def raise_center(self) -> None:
+        """Put the center line back on top of every sibling. Idempotent, and
         cheap enough to call from any path that adds or re-places a child."""
-        if self.centre is not None:
-            self.centre.raise_()
+        if self.center is not None:
+            self.center.raise_()
 
     def relayout(self) -> None:
         """Re-place the overlays. Public because the mask depends on what the
@@ -1264,10 +1264,10 @@ class InflowArrowWidget(QWidget):
 
     amountChanged = pyqtSignal(int)         # cents, What If only
 
-    def __init__(self, arrow: InflowArrow, colour: str = "#4c78a8", parent=None):
+    def __init__(self, arrow: InflowArrow, color: str = "#4c78a8", parent=None):
         super().__init__(parent)
         self.arrow = arrow
-        self.colour = colour
+        self.color = color
         self._amount = int(arrow.total)
         self._editable = False
         self.setMinimumHeight(self.MIN_HEIGHT)
@@ -1365,7 +1365,7 @@ class InflowArrowWidget(QWidget):
             QPointF(0.0, top + body_h * 0.78),
         ])
         p.setPen(QPen(QColor("#ffffff"), 1))
-        p.setBrush(QColor(self.colour))
+        p.setBrush(QColor(self.color))
         p.drawPolygon(poly)
         if not self._editable:              # the editor is drawing it instead
             p.setPen(QPen(QColor("#ffffff")))
@@ -1378,10 +1378,10 @@ class InflowArrowWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# the centre line (design 2.3)
+# the center line (design 2.3)
 # ---------------------------------------------------------------------------
 @dataclass
-class CentreLine:
+class CenterLine:
     """The one row of numbers inside the hole, for the current filter subject.
 
     Every field is composed from the domain layer; ``annualized`` holds only
@@ -1416,7 +1416,7 @@ def _value_at(conn, ids, symbol: Optional[str], iso: str) -> int:
     """Market value of the filter subject on one date, in cents.
 
     The single place that knows a scope is either "these accounts, whole" or
-    "this security across them": the centre line, the value chart and the
+    "this security across them": the center line, the value chart and the
     projection's starting point all agree because they all call this."""
     if symbol is None:
         # portfolio.account_valuation, NOT investments' -- the scope is
@@ -1442,15 +1442,15 @@ def _performance(conn, account_ids, symbol, start, end):
     return portfolio.combine_performances(perfs, end)
 
 
-def centre_line(conn, as_of: Optional[str] = None, *, account_ids=None,
+def center_line(conn, as_of: Optional[str] = None, *, account_ids=None,
                 symbol: Optional[str] = None, subject: str = "All investments",
-                horizons=ANNUALIZED_YEARS) -> CentreLine:
-    """The centre readout for a scope: market value now, the trailing year's
+                horizons=ANNUALIZED_YEARS) -> CenterLine:
+    """The center readout for a scope: market value now, the trailing year's
     gain and dividends, and the annualized return over each horizon that has
     enough history for :attr:`portfolio.Performance.annual_return` to exist."""
     end = as_of or _today()
     ids = list(_account_ids(conn) if account_ids is None else account_ids)
-    line = CentreLine(total=_value_at(conn, ids, symbol, end), subject=subject)
+    line = CenterLine(total=_value_at(conn, ids, symbol, end), subject=subject)
     for years in horizons:
         perf = _performance(conn, ids, symbol, years_before(end, years), end)
         if perf is None:
@@ -1480,17 +1480,17 @@ def _scaled_font(font: QFont, scale: float) -> QFont:
     return out
 
 
-class CentreLineWidget(QWidget):
-    """The centre line as one row of labels on the hole's horizontal midline.
+class CenterLineWidget(QWidget):
+    """The center line as one row of labels on the hole's horizontal midline.
 
-    It gets its own font, :data:`CENTRE_FONT_SCALE` times the page's (reported:
+    It gets its own font, :data:`CENTER_FONT_SCALE` times the page's (reported:
     "the centerline text needs a larger font too"). Set on the WIDGET, not on
     each label, so :meth:`set_line` -- which throws its labels away and builds
     new ones on every refresh -- cannot lose it."""
 
-    def __init__(self, line: Optional[CentreLine] = None, parent=None):
+    def __init__(self, line: Optional[CenterLine] = None, parent=None):
         super().__init__(parent)
-        self._line = line or CentreLine(total=0)
+        self._line = line or CenterLine(total=0)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 2, 4, 2)
         lay.setSpacing(10)
@@ -1498,7 +1498,7 @@ class CentreLineWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # NOT Qt.WA_TransparentForMouseEvents. It was, on the theory that an
         # overlay must not steal the plots' clicks -- but what it sits on is
-        # ``centreGap``, a blank reserved strip, not a plot, so there was no
+        # ``centerGap``, a blank reserved strip, not a plot, so there was no
         # click to steal; and the attribute makes Qt skip the widget AND ITS
         # WHOLE SUBTREE in hit testing, which is also what ``childAt()``
         # answers. The line then reported as "invisible again": unreachable by
@@ -1510,10 +1510,10 @@ class CentreLineWidget(QWidget):
         self.set_line(self._line)
 
     def scaled_font(self) -> QFont:
-        """This widget's font, enlarged by :data:`CENTRE_FONT_SCALE`."""
-        return _scaled_font(self.font(), CENTRE_FONT_SCALE)
+        """This widget's font, enlarged by :data:`CENTER_FONT_SCALE`."""
+        return _scaled_font(self.font(), CENTER_FONT_SCALE)
 
-    def set_line(self, line: CentreLine) -> None:
+    def set_line(self, line: CenterLine) -> None:
         self._line = line
         lay = self.layout()
         while lay.count():
@@ -1534,8 +1534,8 @@ class CentreLineWidget(QWidget):
             # hide()n above. A child built for a parent that is ALREADY visible
             # stays hidden until the event loop gets round to showing it, and a
             # hidden widget contributes nothing to its layout's sizeHint. Every
-            # caller of set_line reads that hint SYNCHRONOUSLY -- _sync_centre_gap
-            # reserves the strip from it and RingArea.centre_rect sizes the
+            # caller of set_line reads that hint SYNCHRONOUSLY -- _sync_center_gap
+            # reserves the strip from it and RingArea.center_rect sizes the
             # overlay from it -- so without this the line measured 4px, its
             # layout margins alone, and was placed as a 4px sliver. It stayed
             # one: the hint is right again by the time the event loop runs, but
@@ -1545,7 +1545,7 @@ class CentreLineWidget(QWidget):
             self._labels.append(lab)
         lay.addStretch(1)
 
-    def line(self) -> CentreLine:
+    def line(self) -> CenterLine:
         return self._line
 
     def text(self) -> str:
@@ -1735,12 +1735,12 @@ def projection_fan(start_cents: int, annual_contribution_cents: int,
                         mu, sigma, int(years), inflation=inflation)
 
 
-def chart_colours(pal=None) -> dict:
-    """Every colour the two hole charts draw WITH, from the active palette.
+def chart_colors(pal=None) -> dict:
+    """Every color the two hole charts draw WITH, from the active palette.
 
     Reported: "the plots have poor contrast in both dark and light mode". The
-    series colours were fixed hex literals picked against a white page, so on
-    the dark page they were a dim blue on near-black; the faint grey baseline
+    series colors were fixed hex literals picked against a white page, so on
+    the dark page they were a dim blue on near-black; the faint gray baseline
     outline was close to invisible in either. Each one is now a SEMANTIC palette
     name (``blue`` for the value line and the measured fan, ``negative`` for the
     What If fan, ``muted`` for the outline behind it), resolved from
@@ -1771,7 +1771,7 @@ class _HoleCanvas(FigureCanvasQTAgg):
     they draw into a ~200px square with no titles, no frame and a transparent
     background: everything the shared canvases exist to provide is exactly
     what has to be stripped off here. What they DO take from ``charts.py`` is
-    every colour rule -- the palette, the chrome recolouring and the grid --
+    every color rule -- the palette, the chrome recoloring and the grid --
     so the hole charts cannot drift from the app's other charts (the fan adds
     a small frameless legend of its own, because an unlabelled band left the
     user guessing whether the shading meant percentiles or sigmas)."""
@@ -1807,20 +1807,20 @@ class _HoleCanvas(FigureCanvasQTAgg):
     def _grid(self, ax) -> None:
         """The gridlines the user asked for, on both axes, behind the data.
 
-        Drawn through :func:`charts._theme_grid` so their weight and colour are
+        Drawn through :func:`charts._theme_grid` so their weight and color are
         the SAME rule the Net Worth chart follows -- one grid look in the app,
-        and the colour comes from the active palette rather than a literal."""
+        and the color comes from the active palette rather than a literal."""
         charts._theme_grid(ax, charts._chart_palette(), axis="both")
 
     def _theme(self, ax) -> None:
-        """Colour the chrome from the palette that is active RIGHT NOW.
+        """Color the chrome from the palette that is active RIGHT NOW.
 
         Called at the END of every render, never at construction: the page is
         rebuilt on a theme change (``ui/widgets.py`` marks it stale), and a
-        colour captured when the widget was created would keep matplotlib's
+        color captured when the widget was created would keep matplotlib's
         near-black defaults on the dark palette -- ticks, tick labels and axis
         labels invisible against a dark page, which is exactly what was
-        reported. The palette and the recolouring rule are IMPORTED from
+        reported. The palette and the recoloring rule are IMPORTED from
         :mod:`mammon.ui.charts` so this family cannot drift from the shared
         charts."""
         pal = charts._chart_palette()
@@ -1855,42 +1855,42 @@ class _HoleCanvas(FigureCanvasQTAgg):
 
 class ValueHistoryCanvas(_HoleCanvas):
     """The upper chart: one line, the subject's value over the period, drawn in
-    the wedge colour when a filter is active."""
+    the wedge color when a filter is active."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._points: list = []
-        self._colour: Optional[str] = None      # None = "the theme's own blue"
+        self._color: Optional[str] = None      # None = "the theme's own blue"
         self.render()
 
-    def set_series(self, points, colour: Optional[str] = None) -> None:
-        """``colour=None`` means "no wedge is selected": the line goes back to
+    def set_series(self, points, color: Optional[str] = None) -> None:
+        """``color=None`` means "no wedge is selected": the line goes back to
         the theme's blue. It must ASSIGN rather than keep the old value, or
-        clearing the ring filter would leave the line painted in the colour of
+        clearing the ring filter would leave the line painted in the color of
         the wedge that is no longer selected."""
         self._points = list(points or [])
-        self._colour = colour or None
+        self._color = color or None
         self.render()
 
     def points(self) -> list:
         return list(self._points)
 
-    def colour(self) -> str:
-        """The line's colour: the selected wedge's, or -- with no filter -- the
+    def color(self) -> str:
+        """The line's color: the selected wedge's, or -- with no filter -- the
         active theme's accent blue, resolved now rather than at construction so
         a theme change cannot leave a light-mode blue on a dark page."""
-        return self._colour or chart_colours()["history"]
+        return self._color or chart_colors()["history"]
 
     def render(self) -> None:
         if not self._points:
             self._empty(HISTORY_EMPTY_TEXT)
             return
         ax = self._new_axes()
-        colour = self.colour()
+        color = self.color()
         xs = list(range(len(self._points)))
         ys = [c / 100.0 for _iso, c in self._points]
-        ax.plot(xs, ys, color=colour, linewidth=1.8, zorder=3)
-        ax.fill_between(xs, ys, min(0.0, min(ys)), color=colour,
+        ax.plot(xs, ys, color=color, linewidth=1.8, zorder=3)
+        ax.fill_between(xs, ys, min(0.0, min(ys)), color=color,
                         alpha=0.20, linewidth=0, zorder=2)
         ax.set_xticks([xs[0], xs[-1]])
         ax.set_xticklabels([fmt_date(self._points[0][0]),
@@ -1935,7 +1935,7 @@ class ProjectionFanCanvas(_HoleCanvas):
     def _band(points, attr) -> list:
         return [getattr(p, attr) / 100.0 for p in points]
 
-    def _draw_fan(self, ax, points, colour) -> None:
+    def _draw_fan(self, ax, points, color) -> None:
         """The three bands, each LABELLED with the percentiles it actually is.
 
         The labels feed the on-plot legend: the user could not tell whether the
@@ -1944,25 +1944,25 @@ class ProjectionFanCanvas(_HoleCanvas):
         sigma" would be wrong, not merely vague."""
         xs = [p.year for p in points]
         ax.fill_between(xs, self._band(points, "p05"), self._band(points, "p95"),
-                        color=colour, alpha=0.20, linewidth=0, zorder=2,
+                        color=color, alpha=0.20, linewidth=0, zorder=2,
                         label=FAN_OUTER_LABEL)
         ax.fill_between(xs, self._band(points, "p25"), self._band(points, "p75"),
-                        color=colour, alpha=0.38, linewidth=0, zorder=3,
+                        color=color, alpha=0.38, linewidth=0, zorder=3,
                         label=FAN_INNER_LABEL)
-        ax.plot(xs, self._band(points, "p50"), color=colour, linewidth=1.8,
+        ax.plot(xs, self._band(points, "p50"), color=color, linewidth=1.8,
                 zorder=4, label=FAN_MEDIAN_LABEL)
 
-    def _draw_outline(self, ax, points, colour) -> None:
+    def _draw_outline(self, ax, points, color) -> None:
         xs = [p.year for p in points]
         for i, attr in enumerate(("p05", "p50", "p95")):
-            ax.plot(xs, self._band(points, attr), color=colour, linewidth=1.0,
+            ax.plot(xs, self._band(points, attr), color=color, linewidth=1.0,
                     linestyle="--", alpha=0.85, zorder=5,
                     label=FAN_BASELINE_LABEL if i == 0 else None)
 
     def _legend(self, ax) -> None:
         """Name the bands ON the plot. No frame: the figure is transparent over
         a themed page, so a legend box would be a white rectangle in dark mode.
-        The text takes the dark palette's colour the way the tick labels do."""
+        The text takes the dark palette's color the way the tick labels do."""
         handles, labels = ax.get_legend_handles_labels()
         if not handles:
             return
@@ -1980,13 +1980,13 @@ class ProjectionFanCanvas(_HoleCanvas):
         if not self._baseline:
             self._empty(PROJECTION_EMPTY_TEXT)
             return
-        colours = chart_colours()
+        colors = chart_colors()
         ax = self._new_axes()
         if self._what_if:
-            self._draw_outline(ax, self._baseline, colours["outline"])
-            self._draw_fan(ax, self._what_if, colours["what_if"])
+            self._draw_outline(ax, self._baseline, colors["outline"])
+            self._draw_fan(ax, self._what_if, colors["what_if"])
         else:
-            self._draw_fan(ax, self._baseline, colours["baseline"])
+            self._draw_fan(ax, self._baseline, colors["baseline"])
         ax.set_xlabel("")
         ax.xaxis.set_major_formatter(
             FuncFormatter(lambda v, _pos: "" if v <= 0 else f"{v:,.0f}y"))
@@ -2082,8 +2082,8 @@ class ValueHistoryChart(_PeriodChart):
     def _emit(self):
         self.periodChanged.emit(self.years())
 
-    def set_series(self, points, colour: Optional[str] = None) -> None:
-        self.canvas.set_series(points, colour)
+    def set_series(self, points, color: Optional[str] = None) -> None:
+        self.canvas.set_series(points, color)
 
     def points(self) -> list:
         return self.canvas.points()
@@ -2120,7 +2120,7 @@ class ProjectionChart(_PeriodChart):
 class ThermometerBar(QAbstractSlider):
     """The risk column AND its handle in one widget: blue (all cash) at the
     bottom to red (all stocks) at the top, with an oval handle painted on the
-    colour itself at the level currently named.
+    color itself at the level currently named.
 
     It used to be a painted column with a native ``QSlider`` laid out BESIDE
     it, which read as a cross rather than a thermometer (reported: "The square
@@ -2138,7 +2138,7 @@ class ThermometerBar(QAbstractSlider):
     ours. ``QAbstractSlider`` is NOT a ``QSlider``, which is what keeps the old
     native widget from creeping back in unnoticed.
 
-    Handle colours come from the palette (Base filled, WindowText outlined) so
+    Handle colors come from the palette (Base filled, WindowText outlined) so
     the oval reads against both the blue end and the red end in light AND dark
     mode; hardcoding white here made it vanish on the cold end of a light
     theme."""
@@ -2147,7 +2147,7 @@ class ThermometerBar(QAbstractSlider):
     #: column was 14px when it only had to be looked at.
     BAR_WIDTH = 26
     #: Height of the oval. Also the dead zone at each end of the column: the
-    #: handle's CENTRE travels, so half of it overhangs no further than the top
+    #: handle's CENTER travels, so half of it overhangs no further than the top
     #: and bottom rungs.
     HANDLE_HEIGHT = 16
 
@@ -2163,7 +2163,7 @@ class ThermometerBar(QAbstractSlider):
 
     # -- geometry -----------------------------------------------------------
     def _travel(self) -> float:
-        """Pixels the handle's centre can move: the column minus the oval."""
+        """Pixels the handle's center can move: the column minus the oval."""
         return float(max(1, self.height() - self.HANDLE_HEIGHT))
 
     def _fraction(self) -> float:
@@ -2238,7 +2238,7 @@ class ThermometerBar(QAbstractSlider):
 
 class Thermometer(QWidget):
     """The risk selector: one gradient bar over the 11-rung ladder, its oval
-    handle painted on the colour, with the mix it currently names written
+    handle painted on the color, with the mix it currently names written
     underneath.
 
     The handle is a tenth-of-a-level grid because design 4.5 makes the ladder
@@ -2415,7 +2415,7 @@ def restyle_toggle(button) -> None:
 
 class WhatIfBar(QWidget):
     """The What If toggle, its Reset and the name of the scope it is acting on,
-    on the centre line between the arrows and the thermometer -- the two things
+    on the center line between the arrows and the thermometer -- the two things
     it makes editable.
 
     The bar is ALWAYS enabled. It used to disable itself whenever a ring wedge
@@ -2503,7 +2503,7 @@ class WhatIfBar(QWidget):
 
     def set_scope(self, subject: str) -> None:
         """Name what the What If fan is about. ``subject`` is whatever the
-        centre line is about -- an account name, a ticker, or
+        center line is about -- an account name, a ticker, or
         :data:`WHAT_IF_ALL_SUBJECT`."""
         self._subject = str(subject or WHAT_IF_ALL_SUBJECT)
         self._sync_scope_label()
@@ -2535,11 +2535,11 @@ def _frame(name: str, parent=None, *, minimum=(0, 0)) -> QFrame:
     return f
 
 
-def corner_colours(pal=None) -> dict:
-    """Every colour the corner launchers' graphics are drawn with.
+def corner_colors(pal=None) -> dict:
+    """Every color the corner launchers' graphics are drawn with.
 
-    The same rule as :func:`chart_colours`, and for the same reported reason
-    ("poor contrast in both dark and light mode"): every colour is a SEMANTIC
+    The same rule as :func:`chart_colors`, and for the same reported reason
+    ("poor contrast in both dark and light mode"): every color is a SEMANTIC
     palette name resolved at PAINT time, never a fixed hex literal. It matters
     more here than it does for the charts -- a hand-painted glyph has no
     matplotlib default to fall back on, so a hex picked against a white page is
@@ -2547,7 +2547,7 @@ def corner_colours(pal=None) -> dict:
 
     The category hues come from :func:`charts.wedge_colors`, the SAME list the
     ring hands its wedges. That is deliberate: the two pies in the Rebalancing
-    glyph are then recognisably the ring's own colours rather than a second
+    glyph are then recognisably the ring's own colors rather than a second
     palette a later theme would have to be taught about.
     """
     pal = charts._active_palette() if pal is None else pal
@@ -2572,13 +2572,13 @@ class CornerButton(QPushButton):
     platform's hover, focus and pressed appearance, and it is still an ordinary
     ``QPushButton`` for the mouse, for focus and for ``clicked``.
 
-    Reported: four identical grey boxes of small text gave no clue which was
+    Reported: four identical gray boxes of small text gave no clue which was
     which, so each now paints a picture of what it OPENS (``CORNER_GLYPHS``)
     under a title deliberately larger and bolder than the body font. The layout
     is shared -- ``CORNER_PAD`` margin, title on top, graphic in what is left --
     because the four are seen together and any per-corner tuning would show.
 
-    Everything is painted with ``QPainter`` from ``corner_colours()``: no image
+    Everything is painted with ``QPainter`` from ``corner_colors()``: no image
     files, so nothing can go stale against the theme, and a graphic drawn from
     palette names is legible in dark and light alike. The title never gives up
     room to the graphic -- it steps down through ``CORNER_TITLE_SCALES`` until
@@ -2597,7 +2597,7 @@ class CornerButton(QPushButton):
         Largest size first, stopping at the first that fits inside
         ``max_height``. The candidate list is finite, so this cannot loop; if
         even the smallest overflows the block is simply capped, which is the
-        old behaviour rather than a new failure."""
+        old behavior rather than a new failure."""
         font = QFont(self.font())
         font.setBold(True)
         base = font.pointSizeF()
@@ -2629,7 +2629,7 @@ class CornerButton(QPushButton):
                                      -CORNER_PAD, -CORNER_PAD)
         if inner.width() <= 0 or inner.height() <= 0:
             return
-        col = corner_colours()
+        col = corner_colors()
         cap = max(1, int(inner.height() * CORNER_TITLE_MAX_FRACTION))
         font, title_h = self._title_font(inner.width(), cap)
         p.setFont(font)
@@ -2651,7 +2651,7 @@ class CornerButton(QPushButton):
     # -- the shared drawing primitives --------------------------------------
     @staticmethod
     def _pie(p, box: QRectF, fractions, wedges) -> None:
-        """A filled pie of ``fractions`` (summing to 1) in ``wedges``' colours,
+        """A filled pie of ``fractions`` (summing to 1) in ``wedges``' colors,
         starting at twelve o'clock and going clockwise -- the direction the ring
         itself reads in."""
         p.setPen(Qt.NoPen)
@@ -2663,13 +2663,13 @@ class CornerButton(QPushButton):
             start += span
 
     @staticmethod
-    def _arrow(p, x0: float, x1: float, y: float, size: float, colour) -> None:
+    def _arrow(p, x0: float, x1: float, y: float, size: float, color) -> None:
         """A left-to-right arrow along ``y``, its head ``size`` px long."""
         head = min(size, (x1 - x0) * 0.6)
         if head <= 1.0:
             return
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(colour))
+        p.setBrush(QColor(color))
         shaft = max(1.0, head * 0.30)
         p.drawRect(QRectF(x0, y - shaft / 2.0, (x1 - x0) - head, shaft))
         p.drawPolygon(QPolygonF([
@@ -2680,7 +2680,7 @@ class CornerButton(QPushButton):
 
     # -- one glyph per corner -----------------------------------------------
     def _paint_rebalance(self, p, rect: QRectF, col) -> None:
-        """Two pies, the same colours in different proportions, an arrow between
+        """Two pies, the same colors in different proportions, an arrow between
         them: today's drifted mix on the left, the target on the right -- which
         is exactly the pair the Rebalancing dialog puts side by side."""
         gap = max(8.0, rect.width() * 0.16)
@@ -2699,7 +2699,7 @@ class CornerButton(QPushButton):
         """Two gains of the same size, one with a big bite taken out of it and
         one with a small one: the short-term lot and the long-term lot the
         Capital Gains report exists to tell apart."""
-        # Two bars, kept near each other and centred: pushed out to the box's
+        # Two bars, kept near each other and centerd: pushed out to the box's
         # edges they read as two unrelated figures instead of one comparison,
         # which is the entire point of the glyph.
         bar_w = rect.width() * 0.30
@@ -2735,9 +2735,9 @@ class CornerButton(QPushButton):
         p.setPen(QPen(QColor(col["line"]), 1))
         p.drawLine(QPointF(rect.left(), base + 1.0),
                    QPointF(rect.right(), base + 1.0))
-        # The trend arrow rides OVER the bars, so it is drawn in the text colour
+        # The trend arrow rides OVER the bars, so it is drawn in the text color
         # rather than the accent: that is the one hue guaranteed to contrast
-        # with the page AND with every wedge colour under it, in both themes.
+        # with the page AND with every wedge color under it, in both themes.
         p.save()
         p.translate(rect.center())
         p.rotate(-28.0)
@@ -2750,8 +2750,8 @@ class CornerButton(QPushButton):
         p.restore()
 
     def _paint_categories(self, p, rect: QRectF, col) -> None:
-        """A legend: a coloured swatch against a named class, three times over.
-        Setting asset categories is naming those colours, and the dialog this
+        """A legend: a colored swatch against a named class, three times over.
+        Setting asset categories is naming those colors, and the dialog this
         opens is a table of exactly these rows."""
         rows = 3
         gap = rect.height() / (rows * 3.0)
@@ -2958,7 +2958,7 @@ class InvestmentDashboardPage(QWidget):
         # here made the arrows, the mode buttons, What If and the thermometer
         # unclickable. Nothing sits under the band that needs its clicks.
 
-        # Top: the arrows, centred on the value-history chart.
+        # Top: the arrows, centerd on the value-history chart.
         self.arrow_box = QWidget(band)
         self.arrow_box.setObjectName("arrowBand")
         self.arrow_layout = QVBoxLayout(self.arrow_box)
@@ -2992,7 +2992,7 @@ class InvestmentDashboardPage(QWidget):
         self.what_if_bar.toggled.connect(self._on_what_if_toggled)
         self.what_if_bar.resetRequested.connect(self.reset_what_if)
 
-        # Bottom: the thermometer, centred on the projection fan.
+        # Bottom: the thermometer, centerd on the projection fan.
         self.thermometer = Thermometer(band)
         self.thermometer.riskChanged.connect(self._on_risk_changed)
 
@@ -3007,7 +3007,7 @@ class InvestmentDashboardPage(QWidget):
         hole.setObjectName("ringHole")
         hole_lay = QVBoxLayout(hole)
         hole_lay.setContentsMargins(0, 0, 0, 0)
-        # No spacing: the gap the centre line needs is the reserved strip below,
+        # No spacing: the gap the center line needs is the reserved strip below,
         # and a layout gap on either side of it only adds to that (reported:
         # "the space between the top plot and the centerline text can be
         # reduced").
@@ -3018,16 +3018,16 @@ class InvestmentDashboardPage(QWidget):
         self.projection_chart = ProjectionChart(hole)
         self.projection_chart.set_years(DEFAULT_PROJECTION_YEARS)
         self.projection_chart.horizonChanged.connect(self._on_projection_horizon)
-        # The centre line is NOT in this layout any more -- it is an overlay on
+        # The center line is NOT in this layout any more -- it is an overlay on
         # the ring area, so it can run the full width of the circle instead of
         # being clipped to the plots' rectangle (reported). What stays here is a
         # blank strip of its height, keeping the two plots (both stretch 1) off
         # the midline the overlay sits on.
-        self.centre_gap = QWidget(hole)
-        self.centre_gap.setObjectName("centreGap")
-        self.centre_gap.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.center_gap = QWidget(hole)
+        self.center_gap.setObjectName("centerGap")
+        self.center_gap.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         hole_lay.addWidget(self.history_chart, 1)
-        hole_lay.addWidget(self.centre_gap, 0)
+        hole_lay.addWidget(self.center_gap, 0)
         hole_lay.addWidget(self.projection_chart, 1)
         self.hole = hole
 
@@ -3045,21 +3045,21 @@ class InvestmentDashboardPage(QWidget):
                                             note=PROJECTION_DISCLAIMER)
         self.ring_area.set_selectors(top=self.history_header,
                                      bottom=self.projection_header)
-        self.centre = CentreLineWidget(parent=self.ring_area)
-        self.ring_area.set_centre(self.centre)
-        self._sync_centre_gap()
+        self.center = CenterLineWidget(parent=self.ring_area)
+        self.ring_area.set_center(self.center)
+        self._sync_center_gap()
         return self.ring_area
 
-    def _sync_centre_gap(self) -> None:
-        """Reserve exactly the overlaid centre line's height in the hole.
+    def _sync_center_gap(self) -> None:
+        """Reserve exactly the overlaid center line's height in the hole.
 
         Called after every ``set_line``: the line's height follows its font and
         its content, and a stale reservation either lets the top plot run under
         the text or leaves a band of dead air under it."""
-        gap = getattr(self, "centre_gap", None)
+        gap = getattr(self, "center_gap", None)
         if gap is None:
             return
-        gap.setFixedHeight(max(1, self.centre.sizeHint().height()))
+        gap.setFixedHeight(max(1, self.center.sizeHint().height()))
 
     def _build_gear(self) -> None:
         """The accounts gear, at the top just left of the Performance Report
@@ -3099,7 +3099,7 @@ class InvestmentDashboardPage(QWidget):
         return None if self._account_scope is None else list(self._account_scope)
 
     def set_account_scope(self, account_ids) -> None:
-        """Narrow the whole page -- ring, plots, centre line and inflows -- to
+        """Narrow the whole page -- ring, plots, center line and inflows -- to
         these accounts. ``None`` restores every investment account.
 
         Non-investment ids are dropped rather than trusted: the gear lists every
@@ -3136,8 +3136,8 @@ class InvestmentDashboardPage(QWidget):
         slot = max(0, band_h - furniture) // 2
         return max(THERMOMETER_MIN_HEIGHT, int(round(slot * THERMOMETER_HEIGHT_SCALE)))
 
-    def _canvas_centre_y(self, canvas) -> Optional[int]:
-        """Vertical centre of a hole canvas in the band's coordinates, or None
+    def _canvas_center_y(self, canvas) -> Optional[int]:
+        """Vertical center of a hole canvas in the band's coordinates, or None
         while the widget tree has no real geometry yet."""
         if canvas is None or not canvas.height():
             return None
@@ -3184,7 +3184,7 @@ class InvestmentDashboardPage(QWidget):
         """Place the band on the ring's tangent, and its blocks against the
         *plots* rather than against the band.
 
-        The arrows centre on the value-history canvas and the thermometer on
+        The arrows center on the value-history canvas and the thermometer on
         the projection fan; the mode row and What If fill the gap between them.
         A stretch layout cannot do this: it only knows the band's own height,
         and the canvases sit inside the hole inside the ring area.
@@ -3216,16 +3216,16 @@ class InvestmentDashboardPage(QWidget):
         what_h = self.what_if_bar.sizeHint().height()
         therm_h = self.thermometer_slot_height()
 
-        top_centre = self._canvas_centre_y(getattr(self.history_chart, "canvas", None))
-        bot_centre = self._canvas_centre_y(getattr(self.projection_chart, "canvas", None))
-        if top_centre is None or bot_centre is None:
+        top_center = self._canvas_center_y(getattr(self.history_chart, "canvas", None))
+        bot_center = self._canvas_center_y(getattr(self.projection_chart, "canvas", None))
+        if top_center is None or bot_center is None:
             # No hole geometry yet (first show): fall back to an even split so
             # the band is never left stacked on top of itself at 0,0.
-            top_centre = band_top + band.height() // 4
-            bot_centre = band_top + 3 * band.height() // 4
+            top_center = band_top + band.height() // 4
+            bot_center = band_top + 3 * band.height() // 4
 
-        arrow_y = top_centre - band_top - arrow_h // 2
-        therm_y = bot_centre - band_top - therm_h // 2
+        arrow_y = top_center - band_top - arrow_h // 2
+        therm_y = bot_center - band_top - therm_h // 2
 
         # The furniture goes in the gap, hard against What If's own block. If
         # the gap is too small, push the arrows up rather than overlap them --
@@ -3303,7 +3303,7 @@ class InvestmentDashboardPage(QWidget):
         return self._filter
 
     def filter_subject(self) -> str:
-        """What the centre line is currently about, as a human reads it."""
+        """What the center line is currently about, as a human reads it."""
         if self._filter is None:
             return WHAT_IF_ALL_SUBJECT
         kind, key = self._filter
@@ -3320,7 +3320,7 @@ class InvestmentDashboardPage(QWidget):
             self._filter = ("account", int(key))
         else:
             self._filter = ("security", str(key))
-        self._refresh_centre()
+        self._refresh_center()
         self._refresh_charts()
         self.filterChanged.emit(self._filter)
 
@@ -3329,7 +3329,7 @@ class InvestmentDashboardPage(QWidget):
         self.ring.pick(key)
 
     def clear_filter(self) -> None:
-        """Back to the whole portfolio. Everything scoped -- the centre line,
+        """Back to the whole portfolio. Everything scoped -- the center line,
         both charts and the What If fan -- widens with it."""
         if self._filter is None:
             return
@@ -3368,32 +3368,32 @@ class InvestmentDashboardPage(QWidget):
         # recomputed whenever the slices change -- not just on resize.
         self.ring_area.relayout()
         self._refresh_arrows()
-        self._refresh_centre()
+        self._refresh_center()
         self._refresh_charts()
         self._stale = False
         # The arrow block's height is however many arrows there are, so its
-        # centre line moves whenever they are rebuilt.
+        # center line moves whenever they are rebuilt.
         self._layout_left_band()
         self._schedule_band_layout()
         if filter_changed:
             self.filterChanged.emit(self._filter)
 
-    def _refresh_centre(self) -> None:
+    def _refresh_center(self) -> None:
         if self._filter is None:
-            line = centre_line(self.conn, self.as_of,
+            line = center_line(self.conn, self.as_of,
                                account_ids=self.account_scope())
         else:
             kind, key = self._filter
             if kind == "account":
-                line = centre_line(self.conn, self.as_of, account_ids=[int(key)],
+                line = center_line(self.conn, self.as_of, account_ids=[int(key)],
                                    subject=self.filter_subject())
             else:
-                line = centre_line(self.conn, self.as_of,
+                line = center_line(self.conn, self.as_of,
                                    account_ids=self.account_scope(),
                                    symbol=str(key),
                                    subject=self.filter_subject())
-        self.centre.set_line(line)
-        # The top plot's title says the same thing the centre line does, so it
+        self.center.set_line(line)
+        # The top plot's title says the same thing the center line does, so it
         # is refreshed from here rather than from the callers: every path that
         # changes the scope -- a wedge click, a gear scope, a mode switch, a
         # plain refresh -- already comes through this method, and a title left
@@ -3401,7 +3401,7 @@ class InvestmentDashboardPage(QWidget):
         self._refresh_titles()
         # The overlay is hand-placed, so a line that changed height has to be
         # re-reserved and re-placed; a layout would have done this itself.
-        self._sync_centre_gap()
+        self._sync_center_gap()
         self.ring_area.relayout()
 
     def _refresh_titles(self) -> None:
@@ -3418,7 +3418,7 @@ class InvestmentDashboardPage(QWidget):
         self._measured_inflows = {a.account_id: int(a.total) for a in self.arrows}
         self.arrow_widgets = []
         for arrow in self.arrows:
-            w = InflowArrowWidget(arrow, self.ring.colour_for(arrow.account_id),
+            w = InflowArrowWidget(arrow, self.ring.color_for(arrow.account_id),
                                   self.arrow_box)
             if arrow.account_id in self._what_if_inflows:
                 w.set_amount(self._what_if_inflows[arrow.account_id])
@@ -3447,12 +3447,12 @@ class InvestmentDashboardPage(QWidget):
             return str(self._filter[1])
         return None
 
-    def _wedge_colour(self) -> Optional[str]:
-        """The selected wedge's colour, so the value line reads as that wedge.
+    def _wedge_color(self) -> Optional[str]:
+        """The selected wedge's color, so the value line reads as that wedge.
         ``None`` with no filter: the chart then uses the theme's own blue."""
         if self._filter is None:
             return None
-        return self.ring.colour_for(str(self._filter[1]))
+        return self.ring.color_for(str(self._filter[1]))
 
     def _refresh_charts(self) -> None:
         self._sync_what_if_scope()
@@ -3469,7 +3469,7 @@ class InvestmentDashboardPage(QWidget):
         series = value_series(self.conn, self.history_chart.years(),
                               as_of=self.as_of, account_ids=self._scope_ids(),
                               symbol=self._scope_symbol())
-        self.history_chart.set_series(series, self._wedge_colour())
+        self.history_chart.set_series(series, self._wedge_color())
 
     def _refresh_measured(self) -> None:
         """Re-measure the mix for the CURRENT scope, and put the needle where
@@ -3616,7 +3616,7 @@ class InvestmentDashboardPage(QWidget):
         Either way the user sees the number they just typed do something.
 
         Safe to call from an arrow's ``editingFinished``: the selection path
-        (:meth:`_on_slice_clicked`) refreshes the centre and the charts but
+        (:meth:`_on_slice_clicked`) refreshes the center and the charts but
         deliberately does NOT rebuild the arrow widgets, so the widget still
         mid-signal is not deleted underneath Qt."""
         account_id = int(account_id)
@@ -3647,8 +3647,8 @@ class InvestmentDashboardPage(QWidget):
         self._refresh_projection()
 
     # -- test/host seams ------------------------------------------------------
-    def centre_text(self) -> str:
-        return self.centre.text()
+    def center_text(self) -> str:
+        return self.center.text()
 
     def arrow_accounts(self) -> list:
         return [a.account_id for a in self.arrows]

@@ -1,6 +1,6 @@
 """QuickFill (parity roadmap, item 1): the register completes a payee from its
 own history and pre-enters that payee's last category, memo, tag and amount
-into a NEW transaction -- Quicken's memorized-payee behaviour, derived from the
+into a NEW transaction -- Quicken's memorized-payee behavior, derived from the
 ledger itself rather than a separately maintained list.
 
 Three things are locked in here and were each wrong before:

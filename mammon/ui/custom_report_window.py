@@ -145,7 +145,7 @@ from mammon.ui.models import fmt_cents, warning_triangle_icon
 DRILL_COLUMNS = ("Line item / Tag / Category", "Date", "Payee / Memo", "Amount")
 
 # How a drill row is set off from its parent in the first column of a FLAT
-# export. Leading spaces, not a font or a colour: the tree and the CSV are two
+# export. Leading spaces, not a font or a color: the tree and the CSV are two
 # renderings of one row list, so the indent that shows depth on screen has to be
 # something a spreadsheet receives too.
 DEPTH_INDENT = "    "

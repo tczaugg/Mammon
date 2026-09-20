@@ -324,7 +324,7 @@ def set_display_prefs(values: dict, settings: QSettings | None = None) -> None:
 #
 # Accepting a review row used to make it vanish permanently, even though the row
 # was kept in the database forever -- retained and invisible at the same time,
-# which is the worst of both. The panel can now show actioned rows greyed out,
+# which is the worst of both. The panel can now show actioned rows grayed out,
 # and how much to show is a per-account habit: an account fed by one clean
 # monthly download wants them hidden, one that needs constant correction wants
 # the history. So the choice is persisted per account rather than globally, and

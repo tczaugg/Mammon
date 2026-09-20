@@ -2,7 +2,7 @@
 
 All three category pies -- Spending by Category, Income by Category and Asset
 Allocation -- share ``ui/charts.SlicesPieCanvas`` and its ``group_small_slices``
-helper. This pins the three behaviours the helper must guarantee for every one
+helper. This pins the three behaviors the helper must guarantee for every one
 of them:
 
 1. ``Other`` is the SET OF LOWEST-share categories that together reach 10% of

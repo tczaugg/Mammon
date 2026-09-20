@@ -80,7 +80,7 @@ def apply_rules(conn, desc: str, *, context=None) -> Optional[int]:
 
     ``context`` is optional transaction context (see
     :func:`mammon.keywords.match_rule`); when omitted, rule conditions are
-    ignored and behaviour is byte-identical to a plain keyword lookup.
+    ignored and behavior is byte-identical to a plain keyword lookup.
     """
     rule = match_rule(desc, load_rules(conn), context=context)
     return int(rule["transfer_account_id"]) if rule else None
@@ -130,7 +130,7 @@ def upsert_rule(conn, keyword: str, transfer_account_id: Optional[int], *,
                 memo_contains: Optional[str] = None) -> Optional[int]:
     """Create or overwrite the rule for ``keyword`` -> account id; return id.
 
-    ``keyword`` is normalised to a single UPPER-CASED token unless ``compound``
+    ``keyword`` is normalized to a single UPPER-CASED token unless ``compound``
     is set (then its full space-joined form is kept, so a refinement out-ranks
     the broad rule). Returns ``None`` when the keyword is blank or the account is
     ``None`` -- we never store an empty rule. Commits.

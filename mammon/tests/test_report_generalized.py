@@ -351,7 +351,7 @@ def test_report_export_html_is_white_under_dark_theme(qapp, monkeypatch):
 
     assert "background: #ffffff" in html
     assert "color: #000000" in html
-    # No dark-palette colour may leak into the print/export artifact.
+    # No dark-palette color may leak into the print/export artifact.
     assert style.DARK["window"] not in html
     assert style.DARK["text"] not in html
 

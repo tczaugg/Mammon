@@ -4336,7 +4336,7 @@ def test_loan_wizard_new_payment_edit_resplits_forward_via_save(qapp, conn,
     sched_before = {r.date: r for r in loans.amortization_schedule(conn, aid)}
 
     # Spy on the engine to prove the save path actually invokes it (keep the real
-    # behaviour by delegating through).
+    # behavior by delegating through).
     calls = []
     real = loans_schedule.apply_payment_change
 
@@ -5111,7 +5111,7 @@ def test_tools_menu_has_accounts_and_toolbar_lacks_it(qapp, conn, accounts):
 def test_view_menu_has_calendar_and_investment_dashboard(qapp, conn, accounts):
     """Financial Calendar moved off Tools onto View, alongside the Investment
     Dashboard. That second entry was a disabled "Investment Center…" placeholder
-    until the dashboard page existed; it is now a live action (its behaviour is
+    until the dashboard page existed; it is now a live action (its behavior is
     pinned by test_dashboard_menu.py)."""
     from mammon.ui.widgets import MainWindow
     win = MainWindow(conn, webslinger=_fake_client())
@@ -5322,7 +5322,7 @@ def test_the_app_runs_with_no_webslinger_at_all(qapp, conn, tmp_path, monkeypatc
         reg = win.open_register(chk)
         assert reg is not None and reg.model.rowCount() >= 1
         # 2. Download stays CLICKABLE (bug 6cfb82e4) so its handler can explain
-        #    what is missing -- a greyed button explains nothing.
+        #    what is missing -- a grayed button explains nothing.
         assert reg.toolbar.act_download.isEnabled() is True
         # 3. Clicking it reports the problem instead of raising. This is the
         #    "appropriate error message" the manual workflow relies on.
@@ -5341,7 +5341,7 @@ def test_the_app_runs_with_no_webslinger_at_all(qapp, conn, tmp_path, monkeypatc
 
 
 def test_download_button_always_enabled_even_when_unconfigured(qapp, conn):
-    # Bug 6cfb82e4: Download must NEVER be a dead/greyed-out button. It stays
+    # Bug 6cfb82e4: Download must NEVER be a dead/grayed-out button. It stays
     # clickable in every setup state (no client, no creds, no script...) so its
     # click handler can always run and explain what's missing.
     from mammon.ui.widgets import MainWindow
@@ -5814,7 +5814,7 @@ def test_review_accept_auto_advances_to_next(qapp, conn, accounts):
     """Accepting a review item retires it and auto-advances the review selection
     to the next transaction still needing action.
 
-    In the default visibility the accepted row STAYS on screen (greyed) rather
+    In the default visibility the accepted row STAYS on screen (grayed) rather
     than vanishing, so the advance moves DOWN the list instead of the next row
     sliding up into the vacated slot."""
     from mammon.ui.widgets import RegisterWidget
@@ -5907,7 +5907,7 @@ def test_review_new_item_editable_register_row_accept_button_and_enter(qapp, con
 
     # Nothing left to action: the register's pending row is gone and the Review…
     # toolbar action re-syncs to disabled. The panel itself STAYS up, now showing
-    # both rows greyed -- the user has just accepted them and can still see (and
+    # both rows grayed -- the user has just accepted them and can still see (and
     # undo) what they did. It is a reopened account, not a finished session, that
     # gets no panel: see reload_pending.
     assert panel.pending_count() == 0
@@ -6222,9 +6222,9 @@ def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
 
     A discarded row LEAVES the list, in every visibility mode. Discard deletes
     its ``review_items`` row (so re-downloading the range offers it again), and
-    greying a row the database no longer holds would put the screen at odds with
-    a re-query -- the same disagreement the greying was introduced to fix,
-    pointed the other way. Accepted rows are what stay visible and grey.
+    graying a row the database no longer holds would put the screen at odds with
+    a re-query -- the same disagreement the graying was introduced to fix,
+    pointed the other way. Accepted rows are what stay visible and gray.
     """
     from mammon import import_review
     from mammon.ui.import_review_widget import ImportReviewPanel
@@ -6246,7 +6246,7 @@ def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
 def test_review_panel_delete_key_removes_row_in_pending_only_mode(qapp, conn,
                                                                   accounts):
     """In "Pending only" there is nowhere for a discarded row to go, so it leaves
-    the list outright -- the pre-visibility-toggle behaviour, still correct for
+    the list outright -- the pre-visibility-toggle behavior, still correct for
     that one mode."""
     from mammon import import_review
     from mammon.ui import prefs
@@ -6486,7 +6486,7 @@ class _FakeProgress:
 
 
 def test_multi_file_import_reports_progress_per_file(qapp, conn, tmp_path, monkeypatch):
-    """The import runs on the GUI thread, so without this the window greys out
+    """The import runs on the GUI thread, so without this the window grays out
     with nothing to say for itself. Each file names itself and its position as it
     starts, and the dialog is closed when the run ends."""
     from PyQt5.QtWidgets import QFileDialog, QMessageBox
@@ -7817,7 +7817,7 @@ def test_editing_a_share_move_keeps_its_price_and_value(qapp, conn):
     txn = investments.get_investment_txn(conn, txn_id)
 
     dlg = D(conn, acct, txn=txn)
-    # storage normalises the Decimal text (28.50 -> 28.5), so compare as numbers
+    # storage normalizes the Decimal text (28.50 -> 28.5), so compare as numbers
     assert Decimal(dlg.price.text()) == Decimal("28.50")
     v = dlg.values()
     assert Decimal(str(v["quantity"])) == Decimal("0.045")
@@ -7846,8 +7846,8 @@ def test_dark_tabs_are_legible():
     import re
     from mammon.ui import style
 
-    def luminance(hex_colour):
-        r, g, b = (int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    def luminance(hex_color):
+        r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
         def chan(c):
             return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
         r, g, b = chan(r), chan(g), chan(b)

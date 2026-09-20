@@ -24,7 +24,7 @@ def _clean_env(monkeypatch):
 
 
 def test_a_source_checkout_uses_the_data_dir_beside_the_package():
-    """Unchanged behaviour: this is how it has always run, and how it must keep
+    """Unchanged behavior: this is how it has always run, and how it must keep
     running for everyone working from a clone."""
     assert paths.data_dir() == paths.install_root() / "data"
     assert paths.default_db_path().name == "mammon.db"

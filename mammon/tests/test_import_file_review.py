@@ -284,7 +284,7 @@ def test_investment_file_finalize_true_posts_via_review_pipeline(conn, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# Unit-level: derivation + alias behaviour
+# Unit-level: derivation + alias behavior
 # ---------------------------------------------------------------------------
 def test_derive_investment_amounts_any_two():
     # shares + price -> total

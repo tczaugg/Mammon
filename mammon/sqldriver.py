@@ -28,7 +28,7 @@ than from ``sqlite3``.
 One deliberate exception: type annotations elsewhere in the codebase still read
 ``sqlite3.Connection`` / ``sqlite3.Row``. Those are annotations only -- Python does not
 evaluate them at runtime -- and both drivers are structurally identical, so rewriting
-~130 of them would be churn without behaviour. The authorizer constants
+~130 of them would be churn without behavior. The authorizer constants
 (``SQLITE_OK``, ``SQLITE_DENY``, ...) are ABI-stable integers defined by SQLite itself
 and are identical in both modules.
 """
@@ -38,7 +38,7 @@ from __future__ import annotations
 try:                                    # the encryption-capable build, when present
     from sqlcipher3 import dbapi2 as _driver
     HAVE_SQLCIPHER = True
-except ImportError:                     # the stdlib build: no encryption, same behaviour
+except ImportError:                     # the stdlib build: no encryption, same behavior
     import sqlite3 as _driver
     HAVE_SQLCIPHER = False
 

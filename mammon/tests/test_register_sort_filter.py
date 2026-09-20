@@ -8,7 +8,7 @@ method reads. Three properties are locked in:
 * an edit made through a sorted or filtered row reaches the transaction the
   user is looking at, not the one that used to sit at that index;
 * the Balance column keeps each row's date-ordered running value whatever the
-  sort (sorting by payee never recomputes a balance -- Quicken's behaviour);
+  sort (sorting by payee never recomputes a balance -- Quicken's behavior);
 * the blank quick-entry row stays last and keeps working while sorted or
   filtered, and the filter reports what it hid.
 """

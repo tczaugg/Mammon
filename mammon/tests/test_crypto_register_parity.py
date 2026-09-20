@@ -1,8 +1,8 @@
-"""Behavioural parity between the CRYPTO register and the cash register.
+"""Behavioral parity between the CRYPTO register and the cash register.
 
 The crypto register must FEEL like the cash register -- a per-row context menu
 with Edit/Delete, a blank quick-entry row at the bottom that records a brand-new
-transaction, single-click editing with the same Tab/click focus behaviour, and a
+transaction, single-click editing with the same Tab/click focus behavior, and a
 review list that auto-renames the payee from learned corrections -- while keeping
 the CONTENT differences a coin register genuinely needs (coin quantities as
 Decimal text rather than USD cents; on a wallet, no price / amount / cash-balance

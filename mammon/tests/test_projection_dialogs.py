@@ -40,8 +40,8 @@ def conn(tmp_path):
     c.close()
 
 
-def _luminance(hex_colour: str) -> float:
-    r, g, b = (int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+def _luminance(hex_color: str) -> float:
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 

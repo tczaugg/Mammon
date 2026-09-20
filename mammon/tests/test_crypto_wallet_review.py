@@ -103,7 +103,7 @@ def _import(win, account_id, path=FIXTURE):
 # 0. the wallet's own address is asked for at creation
 # ---------------------------------------------------------------------------
 def test_new_account_dialog_captures_the_wallet_address(qapp, conn):
-    """A wallet's on-chain address is its identity, and two behaviours need it: a
+    """A wallet's on-chain address is its identity, and two behaviors need it: a
     move between two of the user's OWN accounts is recognised by matching the
     counterparty against a registered address, and gas is attributed to the user
     only on a row the user sent. Asking only in the after-the-fact properties

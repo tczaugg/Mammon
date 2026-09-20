@@ -93,7 +93,7 @@ def test_an_existing_price_is_NEVER_replaced(conn, account):
     import_review.accept_match(conn, _entry(conn, account, txn, price="144.285714"))
     row = conn.execute("SELECT price FROM investment_transactions WHERE id=?",
                        (txn,)).fetchone()
-    # record_investment normalises Decimal text, so compare by value
+    # record_investment normalizes Decimal text, so compare by value
     assert Decimal(row["price"]) == Decimal("150")
 
 
@@ -143,7 +143,7 @@ def test_reverting_leaves_an_untouched_price_alone(conn, account):
 
 
 def test_accept_still_stamps_the_source_id(conn, account):
-    """The behaviour that was already there must survive the addition."""
+    """The behavior that was already there must survive the addition."""
     txn = _existing(conn, account)
     import_review.accept_match(conn, _entry(conn, account, txn))
     row = conn.execute("SELECT fitid FROM investment_transactions WHERE id=?",

@@ -1193,12 +1193,12 @@ def _find_cycle(graph: dict) -> Optional[list]:
     ITERATIVE on purpose. The thing being defended against is unbounded
     recursion on a corrupt graph, and a recursive detector would hit the same
     wall it is meant to guard."""
-    WHITE, GREY, BLACK = 0, 1, 2
+    WHITE, GRAY, BLACK = 0, 1, 2
     color = {node: WHITE for node in graph}
     for start in graph:
         if color[start] != WHITE:
             continue
-        color[start] = GREY
+        color[start] = GRAY
         path = [start]
         stack = [(start, iter(graph.get(start, ())))]
         while stack:
@@ -1207,10 +1207,10 @@ def _find_cycle(graph: dict) -> Optional[list]:
             for nxt in edges:
                 if nxt not in color:
                     continue                      # edge to something not here
-                if color[nxt] == GREY:
+                if color[nxt] == GRAY:
                     return path[path.index(nxt):] + [nxt]
                 if color[nxt] == WHITE:
-                    color[nxt] = GREY
+                    color[nxt] = GRAY
                     path.append(nxt)
                     stack.append((nxt, iter(graph.get(nxt, ()))))
                     advanced = True

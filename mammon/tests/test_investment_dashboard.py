@@ -5,8 +5,8 @@ symbol, invented account names, round numbers. Nothing in this file touches a
 real ledger.
 
 The page is a picture, so most of what is worth asserting is structural: the
-ring draws one wedge per subject with a distinct colour each, a wedge click
-becomes a filter, the centre line states the four numbers the design asks for,
+ring draws one wedge per subject with a distinct color each, a wedge click
+becomes a filter, the center line states the four numbers the design asks for,
 and an account is given an arrow exactly when it received at least four
 deposits in the trailing year.
 """
@@ -100,7 +100,7 @@ def page(qapp, conn, seeded):
     p.deleteLater()
 
 
-# --- formatting and colour assignment ---------------------------------------
+# --- formatting and color assignment ---------------------------------------
 def test_money_formatting_is_cents_in_dollars_out():
     assert dash.fmt_money(2_000_00) == "$2,000.00"
     assert dash.fmt_money(-125) == "-$1.25"
@@ -122,7 +122,7 @@ def test_ring_colors_are_distinct_and_independent_of_input_order():
     first = dash.ring_colors(["7", "3", "ZZAA"])
     second = dash.ring_colors(["ZZAA", "3", "7"])
     assert first == second                       # stable across sessions
-    assert len(set(first.values())) == 3         # one colour per slice
+    assert len(set(first.values())) == 3         # one color per slice
 
 
 # --- the page builds --------------------------------------------------------
@@ -157,7 +157,7 @@ def test_the_hole_and_the_left_band_are_now_real_widgets(page):
     assert isinstance(page.what_if_bar, dash.WhatIfBar)
 
 
-def test_the_ring_sits_right_of_page_centre_with_the_band_on_the_left(page, qapp):
+def test_the_ring_sits_right_of_page_center_with_the_band_on_the_left(page, qapp):
     from PyQt5.QtCore import QPoint
     page.resize(1200, 800)
     # Nested layouts only lay out once the widget is polished: activating the
@@ -168,8 +168,8 @@ def test_the_ring_sits_right_of_page_centre_with_the_band_on_the_left(page, qapp
     ring_left = page.ring_area.mapTo(page, QPoint(0, 0)).x()
     assert band_left < ring_left
     assert page.left_band.width() == dash.LEFT_BAND_WIDTH
-    centre_of_ring = ring_left + page.ring_area.width() / 2
-    assert centre_of_ring > page.width() / 2
+    center_of_ring = ring_left + page.ring_area.width() / 2
+    assert center_of_ring > page.width() / 2
     page.hide()
 
 
@@ -228,16 +228,16 @@ def test_the_hole_is_stretched_left_as_far_as_the_annulus_will_hide(qapp):
 def test_accounts_mode_draws_one_wedge_per_investment_account(page, seeded):
     assert set(page.ring.keys()) == {str(seeded["brokerage"]), str(seeded["ira"])}
     assert page.ring.wedge_count() == 2
-    colours = page.ring.wedge_colours()
-    assert len(set(colours.values())) == 2
+    colors = page.ring.wedge_colors()
+    assert len(set(colors.values())) == 2
 
 
 def test_securities_mode_draws_one_wedge_per_security(page):
     page.set_mode(dash.MODE_SECURITIES)
     assert set(page.ring.keys()) == {"ZZAA", "ZZBB", "ZZCC"}
     assert page.ring.wedge_count() == 3
-    colours = page.ring.wedge_colours()
-    assert len(set(colours.values())) == 3
+    colors = page.ring.wedge_colors()
+    assert len(set(colors.values())) == 3
 
 
 def test_no_small_slice_is_folded_into_an_other_wedge(qapp):
@@ -375,9 +375,9 @@ def test_an_unknown_ring_mode_is_refused(page):
         page.set_mode("sectors")
 
 
-# --- the centre line --------------------------------------------------------
-def test_the_centre_line_states_total_gain_dividends_and_annualized(page, conn):
-    line = page.centre.line()
+# --- the center line --------------------------------------------------------
+def test_the_center_line_states_total_gain_dividends_and_annualized(page, conn):
+    line = page.center.line()
     everything = sum(investments.account_valuation(conn, a, AS_OF).total
                      for a in portfolio.scope_account_ids(conn, "investments"))
     assert line.total == everything
@@ -386,16 +386,16 @@ def test_the_centre_line_states_total_gain_dividends_and_annualized(page, conn):
     assert 1 in line.annualized
     assert set(line.annualized) <= set(dash.ANNUALIZED_YEARS)
 
-    text = page.centre_text()
+    text = page.center_text()
     assert f"Total {dash.fmt_money(everything)}" in text
     assert "1y gain " in text
     assert "Dividends $25.00" in text
     assert "1y " in text
-    assert page.centre.label_texts() == line.parts()
+    assert page.center.label_texts() == line.parts()
 
 
 def test_a_horizon_without_history_shows_nothing_not_a_dash_or_a_zero():
-    line = dash.CentreLine(total=1_000_00, year_gain=50_00, dividends=10_00,
+    line = dash.CenterLine(total=1_000_00, year_gain=50_00, dividends=10_00,
                            annualized={1: Decimal("8.2")})
     text = line.text()
     assert "1y 8.2%" in text
@@ -404,10 +404,10 @@ def test_a_horizon_without_history_shows_nothing_not_a_dash_or_a_zero():
     assert "--" not in text and "0.0%" not in text
 
 
-def test_filtering_to_an_account_recomputes_the_centre_line(page, conn, seeded):
-    whole = page.centre.line().total
+def test_filtering_to_an_account_recomputes_the_center_line(page, conn, seeded):
+    whole = page.center.line().total
     page.select_slice(seeded["ira"])
-    only_ira = page.centre.line()
+    only_ira = page.center.line()
     assert only_ira.total == investments.account_valuation(conn, seeded["ira"],
                                                            AS_OF).total
     assert only_ira.total < whole
@@ -416,10 +416,10 @@ def test_filtering_to_an_account_recomputes_the_centre_line(page, conn, seeded):
     assert only_ira.dividends == 0
 
 
-def test_filtering_to_a_security_recomputes_the_centre_line(page, conn):
+def test_filtering_to_a_security_recomputes_the_center_line(page, conn):
     page.set_mode(dash.MODE_SECURITIES)
     page.select_slice("ZZAA")
-    line = page.centre.line()
+    line = page.center.line()
     alloc = portfolio.allocation(conn, as_of=AS_OF)
     expected = next(s.value for s in alloc.by_security if s.key == "ZZAA")
     assert line.total == expected
@@ -427,7 +427,7 @@ def test_filtering_to_a_security_recomputes_the_centre_line(page, conn):
 
 
 def test_set_line_leaves_a_usable_size_hint_immediately(page, qapp):
-    """The root cause of the vanishing centre line.
+    """The root cause of the vanishing center line.
 
     A QLabel built for a parent that is ALREADY visible stays hidden until the
     event loop shows it, and a hidden widget adds nothing to its layout's
@@ -439,15 +439,15 @@ def test_set_line_leaves_a_usable_size_hint_immediately(page, qapp):
     page.resize(1200, 800)
     page.show()
     qapp.processEvents()
-    settled = page.centre.sizeHint().height()
-    page.centre.set_line(dash.centre_line(page.conn, page.as_of))
-    assert [lab.isHidden() for lab in page.centre._labels] == [False] * 4
-    assert page.centre.sizeHint().height() == settled
+    settled = page.center.sizeHint().height()
+    page.center.set_line(dash.center_line(page.conn, page.as_of))
+    assert [lab.isHidden() for lab in page.center._labels] == [False] * 4
+    assert page.center.sizeHint().height() == settled
     page.hide()
 
 
-def test_the_centre_line_survives_switching_scope_and_back(page, qapp, seeded):
-    """Reported: the centre line "disappears in the process of switching from
+def test_the_center_line_survives_switching_scope_and_back(page, qapp, seeded):
+    """Reported: the center line "disappears in the process of switching from
     the total to the value for one of the accounts or securities and does not
     recover when reverting to the total portfolio".
 
@@ -460,13 +460,13 @@ def test_the_centre_line_survives_switching_scope_and_back(page, qapp, seeded):
     page.resize(1200, 800)
     page.show()
     qapp.processEvents()
-    full = page.centre.height()
+    full = page.center.height()
     assert full > 4, "the line should not start out collapsed either"
 
     def scoped_height(select):
         select()
         qapp.processEvents()
-        return page.centre.height(), page.centre_gap.height()
+        return page.center.height(), page.center_gap.height()
 
     for select in (lambda: page.select_slice(seeded["ira"]),
                    page.clear_filter,
@@ -474,12 +474,12 @@ def test_the_centre_line_survives_switching_scope_and_back(page, qapp, seeded):
                             page.select_slice("ZZAA")),
                    page.clear_filter):
         height, gap = scoped_height(select)
-        assert height == full, f"centre line collapsed to {height}px"
+        assert height == full, f"center line collapsed to {height}px"
         # The strip reserved in the hole has to track it, or the top plot runs
         # under the text.
         assert gap == full
-    assert page.centre.isVisible()
-    assert page.centre.label_texts()[0].startswith("Total ")
+    assert page.center.isVisible()
+    assert page.center.label_texts()[0].startswith("Total ")
     page.hide()
 
 
@@ -554,7 +554,7 @@ def test_the_window_is_the_trailing_year_from_today_by_default(qapp, conn, seede
     p.deleteLater()
 
 
-# --- the value chart above the centre line (design 2.3) ---------------------
+# --- the value chart above the center line (design 2.3) ---------------------
 def _all_ids(conn):
     return dash._account_ids(conn)
 
@@ -605,16 +605,16 @@ def test_an_unknown_period_is_refused(page):
         page.history_chart.set_years(7)
 
 
-def test_the_value_chart_follows_the_ring_filter_and_its_colour(page, conn, seeded):
+def test_the_value_chart_follows_the_ring_filter_and_its_color(page, conn, seeded):
     page.select_slice(seeded["ira"])
     points = page.history_chart.points()
     assert points[-1][1] == investments.account_valuation(conn, seeded["ira"],
                                                           AS_OF).total
-    assert page.history_chart.canvas.colour() == page.ring.colour_for(
+    assert page.history_chart.canvas.color() == page.ring.color_for(
         str(seeded["ira"]))
 
 
-# --- the projection fan below the centre line (design 2.3, 5.3) -------------
+# --- the projection fan below the center line (design 2.3, 5.3) -------------
 def test_the_projection_offers_exactly_the_listed_horizons(page):
     assert page.projection_chart.period_values() == [5, 10, 20, 30, 40, 50]
     assert page.projection_chart.period.objectName() == "projectionHorizon"
@@ -755,7 +755,7 @@ def _mouse(bar, kind, y, *, buttons=None):
 
 
 def _y_for(bar, fraction):
-    """The y a handle centred at ``fraction`` of the ladder sits at."""
+    """The y a handle centerd at ``fraction`` of the ladder sits at."""
     return bar.HANDLE_HEIGHT / 2.0 + (1.0 - fraction) * (bar.height()
                                                          - bar.HANDLE_HEIGHT)
 
@@ -922,7 +922,7 @@ def test_what_if_stays_available_while_a_wedge_is_selected(page, seeded):
     """Reported: "I want to be able to do what if on an individual account.
     Otherwise being able to change the inflow is meaningless as a tiny inflow in
     a small account can't move the needle vs a large total." The control used to
-    grey itself out here, which made that question unaskable."""
+    gray itself out here, which made that question unaskable."""
     assert page.what_if_available() is True
     page.select_slice(seeded["ira"])
     assert page.filter() == ("account", seeded["ira"])
@@ -936,7 +936,7 @@ def test_what_if_stays_available_while_a_wedge_is_selected(page, seeded):
 
 
 def test_the_what_if_bar_names_the_scope_it_is_acting_on(page, seeded):
-    """A one-account fan misread as the portfolio's is worse than the old grey
+    """A one-account fan misread as the portfolio's is worse than the old gray
     button, so the bar states its subject in words."""
     assert page.what_if_bar.scope_subject() == dash.WHAT_IF_ALL_SUBJECT
     page.select_slice(seeded["ira"])
@@ -1056,7 +1056,7 @@ def test_an_arrow_editor_takes_the_mouse_and_a_typed_edit_moves_the_fan(
 
     The unit-level wiring was never the problem, so this drives the whole path
     the user's hand takes: the editor has to be the widget ``childAt`` finds at
-    its own centre (not the ring area, not a corner launcher), typing into it
+    its own center (not the ring area, not a corner launcher), typing into it
     has to reach ``_what_if_inflows``, and the fan on screen has to move."""
     page.set_what_if(True)
     _shown(page, qapp, 1400, 900)
@@ -1201,7 +1201,7 @@ def _shown(page, qapp, width=1200, height=800):
     return page
 
 
-def _centre_y(page, widget):
+def _center_y(page, widget):
     from PyQt5.QtCore import QPoint
     return widget.mapTo(page, QPoint(0, 0)).y() + widget.height() // 2
 
@@ -1270,23 +1270,23 @@ def test_all_four_launchers_are_still_in_their_corners_and_clickable(page, qapp)
 def test_the_arrows_line_up_with_the_top_plot_and_the_thermometer_with_the_fan(
         page, qapp, seeded):
     """The user's alignment requirement, stated against the plots themselves:
-    the arrow block centres on the value-history canvas and the thermometer on
+    the arrow block centers on the value-history canvas and the thermometer on
     the projection fan."""
     _shown(page, qapp)
     assert page.arrow_widgets                       # the brokerage has an arrow
-    assert _centre_y(page, page.arrow_box) == pytest.approx(
-        _centre_y(page, page.history_chart.canvas), abs=8)
-    assert _centre_y(page, page.thermometer) == pytest.approx(
-        _centre_y(page, page.projection_chart.canvas), abs=8)
+    assert _center_y(page, page.arrow_box) == pytest.approx(
+        _center_y(page, page.history_chart.canvas), abs=8)
+    assert _center_y(page, page.thermometer) == pytest.approx(
+        _center_y(page, page.projection_chart.canvas), abs=8)
 
     # And it survives a resize -- the alignment is computed, not a fixed inset.
     page.resize(1000, 700)
     qapp.processEvents()
     qapp.processEvents()
-    assert _centre_y(page, page.arrow_box) == pytest.approx(
-        _centre_y(page, page.history_chart.canvas), abs=8)
-    assert _centre_y(page, page.thermometer) == pytest.approx(
-        _centre_y(page, page.projection_chart.canvas), abs=8)
+    assert _center_y(page, page.arrow_box) == pytest.approx(
+        _center_y(page, page.history_chart.canvas), abs=8)
+    assert _center_y(page, page.thermometer) == pytest.approx(
+        _center_y(page, page.projection_chart.canvas), abs=8)
     page.hide()
 
 
@@ -1311,36 +1311,36 @@ def test_the_thermometer_is_two_thirds_of_an_even_share_of_the_band(page, qapp):
     page.hide()
 
 
-def test_the_hole_stacks_history_then_centre_line_then_projection(page):
-    """The centre line itself left the layout (see the test below), but the strip
+def test_the_hole_stacks_history_then_center_line_then_projection(page):
+    """The center line itself left the layout (see the test below), but the strip
     it occupies is still reserved between the two plots."""
     lay = page.hole.layout()
-    assert lay.indexOf(page.history_chart) < lay.indexOf(page.centre_gap)
-    assert lay.indexOf(page.centre_gap) < lay.indexOf(page.projection_chart)
-    assert lay.indexOf(page.centre) == -1       # not a row in the hole any more
+    assert lay.indexOf(page.history_chart) < lay.indexOf(page.center_gap)
+    assert lay.indexOf(page.center_gap) < lay.indexOf(page.projection_chart)
+    assert lay.indexOf(page.center) == -1       # not a row in the hole any more
 
 
-def test_the_centre_line_has_its_own_rectangle_wider_than_the_plots(page, qapp):
-    """Reported: the centre line "is being cut off by being in the same rectangle
+def test_the_center_line_has_its_own_rectangle_wider_than_the_plots(page, qapp):
+    """Reported: the center line "is being cut off by being in the same rectangle
     as the two plots. It needs its own rectangle on top of the plot rectangle so
     it can extend the full width of the circle." So it is a child of the ring
     area at the inner circle's full width, over -- not inside -- the hole."""
     _shown(page, qapp)
-    assert page.centre.parent() is page.ring_area
-    assert page.centre.parent() is not page.hole
+    assert page.center.parent() is page.ring_area
+    assert page.center.parent() is not page.hole
 
-    _cx, _cy, cw, _ch = page.ring_area.centre_rect()
+    _cx, _cy, cw, _ch = page.ring_area.center_rect()
     _hx, _hy, hw, _hh = page.ring_area.hole_rect()
     assert cw > hw
     r_inner = page.ring_area.outer_radius() * dash.RING_INNER_RADIUS
     assert cw == pytest.approx(2 * r_inner, abs=2)
-    assert page.centre.width() > page.hole.width()
+    assert page.center.width() > page.hole.width()
 
     # Larger font than the plots' rectangle gave it, and the gap above it is the
     # line's own height rather than a layout spacing on top of it.
-    assert dash.CENTRE_FONT_SCALE > 1.0
+    assert dash.CENTER_FONT_SCALE > 1.0
     assert page.hole.layout().spacing() == 0
-    assert page.centre_gap.height() == max(1, page.centre.sizeHint().height())
+    assert page.center_gap.height() == max(1, page.center.sizeHint().height())
     page.hide()
 
 
@@ -1498,7 +1498,7 @@ def test_the_fan_is_labelled_and_disclaimed(page, qapp):
     page.hide()
 
 
-def test_the_centre_line_is_on_top_of_everything_in_the_hole(page, qapp):
+def test_the_center_line_is_on_top_of_everything_in_the_hole(page, qapp):
     """Reported (again): "The center line is invisible... Needs to be on top of
     everything." childAt() is the only honest test of that -- it answers with
     the frontmost child that takes the mouse, and the transparent-for-mouse
@@ -1506,29 +1506,29 @@ def test_the_centre_line_is_on_top_of_everything_in_the_hole(page, qapp):
     _shown(page, qapp)
     area = page.ring_area
 
-    def hit_at_the_centre_line():
-        cx, cy, cw, ch = area.centre_rect()
+    def hit_at_the_center_line():
+        cx, cy, cw, ch = area.center_rect()
         found = area.childAt(cx + cw // 2, cy + ch // 2)
         return found
 
-    hit = hit_at_the_centre_line()
-    assert hit is page.centre or page.centre.isAncestorOf(hit)
+    hit = hit_at_the_center_line()
+    assert hit is page.center or page.center.isAncestorOf(hit)
 
     # Last in the child list is frontmost, and it has to be re-raised by every
     # path that moves things -- a refresh...
     page.refresh()
     qapp.processEvents()
-    hit = hit_at_the_centre_line()
-    assert hit is page.centre or page.centre.isAncestorOf(hit)
+    hit = hit_at_the_center_line()
+    assert hit is page.center or page.center.isAncestorOf(hit)
 
     # ...and a mode switch, which rebuilds the ring under it.
     page.set_mode(dash.MODE_SECURITIES)
     qapp.processEvents()
-    hit = hit_at_the_centre_line()
-    assert hit is page.centre or page.centre.isAncestorOf(hit)
+    hit = hit_at_the_center_line()
+    assert hit is page.center or page.center.isAncestorOf(hit)
 
     from PyQt5.QtCore import Qt
-    assert page.centre.testAttribute(Qt.WA_TransparentForMouseEvents) is False
+    assert page.center.testAttribute(Qt.WA_TransparentForMouseEvents) is False
     page.hide()
 
 
@@ -1556,15 +1556,15 @@ def test_the_ring_is_painted_in_front_of_the_plots_but_not_over_their_clicks(
 
     mask = area.ring.mask()
     assert not mask.isEmpty()
-    centre = QPoint(area.width() // 2, area.height() // 2)
-    assert mask.contains(centre) is False                       # the hole
+    center = QPoint(area.width() // 2, area.height() // 2)
+    assert mask.contains(center) is False                       # the hole
     on_band = QPoint(int(area.width() / 2 - area.outer_radius() * 0.97),
                      area.height() // 2)
     assert mask.contains(on_band) is True                       # the band
 
     # Probed a quarter of the way down, in the TOP PLOT'S BODY: the hole's own
-    # centre belongs to the centre line, which is deliberately laid over the
-    # plots (see the centre-line tests) and would answer there instead.
+    # center belongs to the center line, which is deliberately laid over the
+    # plots (see the center-line tests) and would answer there instead.
     hx, hy, hw, hh = area.hole_rect()
     hit = area.childAt(hx + hw // 2, hy + hh // 4)
     assert hit is not None and hit is not area.ring
@@ -1574,7 +1574,7 @@ def test_the_ring_is_painted_in_front_of_the_plots_but_not_over_their_clicks(
 
 def test_an_empty_ring_keeps_its_message_and_gets_out_of_the_way(qapp):
     """With no wedges the canvas draws only its "nothing here" text, dead
-    centre. It is masked to the HOLE RECT -- enough for the text -- and NEVER
+    center. It is masked to the HOLE RECT -- enough for the text -- and NEVER
     left unmasked: an unmasked canvas is painted across the whole area and would
     swallow every click meant for the corner launchers, the selectors, the gear
     and the left band. With nothing to click on it, it also goes
@@ -1601,8 +1601,8 @@ def test_the_band_is_right_aligned_to_the_rings_left_tangent(page, qapp):
     """Reported: "I want them against the vertical line tangent to the left edge
     of the ring (before it shrunk)", then "the arrow and thermometer need a
     spacer between them and the ring, maybe 50 pixels" -- so the band's right
-    edge is ``ring centre x - R_outer - BAND_RING_GAP``, with the blocks still
-    centred on their plots."""
+    edge is ``ring center x - R_outer - BAND_RING_GAP``, with the blocks still
+    centerd on their plots."""
     from PyQt5.QtCore import QPoint, Qt
     assert dash.BAND_RING_GAP == 50
     for width, height in ((1200, 800), (1000, 700)):
@@ -1623,20 +1623,20 @@ def test_the_band_is_right_aligned_to_the_rings_left_tangent(page, qapp):
         assert band_x < area_x + area.width()
         assert page.left_band.testAttribute(Qt.WA_TransparentForMouseEvents) is False
 
-        assert _centre_y(page, page.arrow_box) == pytest.approx(
-            _centre_y(page, page.history_chart.canvas), abs=8)
-        assert _centre_y(page, page.thermometer) == pytest.approx(
-            _centre_y(page, page.projection_chart.canvas), abs=8)
+        assert _center_y(page, page.arrow_box) == pytest.approx(
+            _center_y(page, page.history_chart.canvas), abs=8)
+        assert _center_y(page, page.thermometer) == pytest.approx(
+            _center_y(page, page.projection_chart.canvas), abs=8)
     page.hide()
 
 
 # --- dark mode (the labels the user could not read) -------------------------
-def _tick_label_colours(ax):
+def _tick_label_colors(ax):
     return {label.get_color() for label in ax.get_yticklabels()} | {
         label.get_color() for label in ax.get_xticklabels()}
 
 
-def test_the_hole_charts_take_their_label_colours_from_the_dark_palette(
+def test_the_hole_charts_take_their_label_colors_from_the_dark_palette(
         qapp, monkeypatch):
     """Reported: the plot labels are unreadable in dark mode. matplotlib's
     defaults are near-black, and the figure is transparent over a dark page."""
@@ -1646,13 +1646,13 @@ def test_the_hole_charts_take_their_label_colours_from_the_dark_palette(
 
     canvas = dash.ValueHistoryCanvas()
     canvas.set_series([("2025-01-01", 100_000_00), ("2025-06-01", 150_000_00)])
-    light = _tick_label_colours(canvas.figure.axes[0])
+    light = _tick_label_colors(canvas.figure.axes[0])
 
     monkeypatch.setattr(style, "theme", lambda: "dark")
     canvas.render()                     # resolved at DRAW time, not at build
     ax = canvas.figure.axes[0]
     dark_pal = style.palette_for("dark")
-    dark = _tick_label_colours(ax)
+    dark = _tick_label_colors(ax)
 
     assert dark != light
     assert dark == {dark_pal["text"]}
@@ -1684,7 +1684,7 @@ def test_light_mode_is_left_alone(qapp, monkeypatch):
     canvas = dash.ValueHistoryCanvas()
     canvas.set_series([("2025-01-01", 100_000_00), ("2025-06-01", 150_000_00)])
     dark_pal = style.palette_for("dark")
-    assert dark_pal["text"] not in _tick_label_colours(canvas.figure.axes[0])
+    assert dark_pal["text"] not in _tick_label_colors(canvas.figure.axes[0])
     canvas.deleteLater()
 
 
@@ -1764,37 +1764,37 @@ def test_the_what_if_overlay_names_the_measured_fan_it_covers(qapp):
     fan.deleteLater()
 
 
-def test_the_series_colours_follow_the_theme(qapp, monkeypatch):
+def test_the_series_colors_follow_the_theme(qapp, monkeypatch):
     """Reported: "The plots have poor contrast in both dark and light mode."
     The lines and bands used to be hardcoded hex tuned for a white page."""
     from mammon.ui import style
 
     monkeypatch.setattr(style, "theme", lambda: "light")
-    light = dash.chart_colours()
+    light = dash.chart_colors()
     assert light["history"] == style.palette_for("light")["blue"]
 
     monkeypatch.setattr(style, "theme", lambda: "dark")
-    dark = dash.chart_colours()
+    dark = dash.chart_colors()
     assert dark["history"] == style.palette_for("dark")["blue"]
     assert dark["what_if"] == style.palette_for("dark")["negative"]
     assert dark["history"] != light["history"]
 
     canvas = dash.ValueHistoryCanvas()
     canvas.set_series([("2025-01-01", 100_000_00), ("2025-06-01", 150_000_00)])
-    assert canvas.colour() == dark["history"]
+    assert canvas.color() == dark["history"]
     assert canvas.figure.axes[0].lines[0].get_color() == dark["history"]
     canvas.deleteLater()
 
 
-def test_clearing_the_ring_filter_puts_the_default_colour_back(page, seeded):
-    """A wedge colour must not outlive the wedge: ``set_series`` always writes
-    the colour it was handed, so an unfiltered chart is never left painted in
-    the colour of the slice that used to be selected."""
+def test_clearing_the_ring_filter_puts_the_default_color_back(page, seeded):
+    """A wedge color must not outlive the wedge: ``set_series`` always writes
+    the color it was handed, so an unfiltered chart is never left painted in
+    the color of the slice that used to be selected."""
     page.select_slice(seeded["ira"])
-    wedge = page.history_chart.canvas.colour()
+    wedge = page.history_chart.canvas.color()
     page.select_slice(seeded["ira"])            # clears the filter
-    assert page.history_chart.canvas.colour() == dash.chart_colours()["history"]
-    assert page.history_chart.canvas.colour() != wedge
+    assert page.history_chart.canvas.color() == dash.chart_colors()["history"]
+    assert page.history_chart.canvas.color() != wedge
 
 
 # --- the four corner launchers ----------------------------------------------
@@ -1909,11 +1909,11 @@ def test_a_clicked_wedge_moves_out_half_as_far_as_it_used_to(qapp):
     import math
     ring = dash.RingCanvas([("a", "A", 100), ("b", "B", 100)])
     ring.pick("a")
-    centres = {lab: w.center for lab, w in ring._wedges}
+    centers = {lab: w.center for lab, w in ring._wedges}
     # Measured off the wedges matplotlib drew, in the axes' data units, where
     # the ring's outer edge is 1.0.
-    assert math.hypot(*centres["A"]) == pytest.approx(dash.SELECTED_EXPLODE)
-    assert math.hypot(*centres["B"]) == pytest.approx(0.0, abs=1e-9)
+    assert math.hypot(*centers["A"]) == pytest.approx(dash.SELECTED_EXPLODE)
+    assert math.hypot(*centers["B"]) == pytest.approx(0.0, abs=1e-9)
     ring.deleteLater()
 
 
@@ -1999,7 +1999,7 @@ def test_every_control_on_the_page_takes_the_mouse(page, qapp):
     those two subtrees.
 
     So: for both ring modes, at two window sizes, every control has to be the
-    thing the mouse finds at its own centre -- and the ring's band has to keep
+    thing the mouse finds at its own center -- and the ring's band has to keep
     taking its own clicks, which is what stopped the containers from simply
     being made transparent again."""
     from PyQt5.QtCore import QPoint
@@ -2160,17 +2160,17 @@ def test_an_empty_crypto_account_draws_no_wedge(conn, wallet):
     assert keys == {str(wallet["wallet"])}
 
 
-def test_centre_line_and_value_chart_see_the_wallet(conn, wallet):
-    """_value_at feeds the centre line, the value chart and the projection's
+def test_center_line_and_value_chart_see_the_wallet(conn, wallet):
+    """_value_at feeds the center line, the value chart and the projection's
     starting point, so all three carried the same bypass."""
     ids = [wallet["brokerage"], wallet["ira"], wallet["wallet"]]
-    with_wallet = dash.centre_line(conn, AS_OF, account_ids=ids).total
-    without = dash.centre_line(conn, AS_OF,
+    with_wallet = dash.center_line(conn, AS_OF, account_ids=ids).total
+    without = dash.center_line(conn, AS_OF,
                                account_ids=[wallet["brokerage"], wallet["ira"]]).total
     assert with_wallet - without == crypto.account_valuation(
         conn, wallet["wallet"], AS_OF).total
 
-    # The chart's last sample is the same number the centre line states.
+    # The chart's last sample is the same number the center line states.
     points = dash.value_series(conn, 1, as_of=AS_OF, account_ids=ids)
     assert points[-1][1] == with_wallet
 
@@ -2276,21 +2276,21 @@ def test_every_corner_launcher_has_its_own_glyph_and_keeps_its_caption(page):
         assert callable(getattr(btn, "_paint_" + btn.glyph))
 
 
-def test_the_rebalancing_glyph_is_two_mixes_of_the_same_colours():
+def test_the_rebalancing_glyph_is_two_mixes_of_the_same_colors():
     """The user's words: two pies, "different proportions of the same colors"."""
     assert dash.CORNER_GLYPHS["cornerBottomRight"] == "rebalance"
     for mix in (dash.CORNER_PIE_DRIFTED, dash.CORNER_PIE_TARGET):
         assert len(mix) == dash.CORNER_WEDGE_COUNT
         assert abs(sum(mix) - 1.0) < 1e-9
     assert dash.CORNER_PIE_DRIFTED != dash.CORNER_PIE_TARGET
-    # One colour list, handed to both pies, and it is the RING's list.
+    # One color list, handed to both pies, and it is the RING's list.
     from mammon.ui import charts
-    wedges = dash.corner_colours()["wedges"]
+    wedges = dash.corner_colors()["wedges"]
     assert wedges == charts.wedge_colors(
         [str(i) for i in range(dash.CORNER_WEDGE_COUNT)])
 
 
-def test_the_rebalancing_glyph_actually_paints_those_colours(qapp):
+def test_the_rebalancing_glyph_actually_paints_those_colors(qapp):
     """Not just constants: the pies are on the pixels. Sampling the render is
     the only check that survives a paintEvent that returns early."""
     btn = dash.CornerButton("Explore Rebalancing", glyph="rebalance")
@@ -2302,7 +2302,7 @@ def test_the_rebalancing_glyph_actually_paints_those_colours(qapp):
         seen = {image.pixelColor(x, y).name()
                 for y in range(0, image.height(), 2)
                 for x in range(0, image.width(), 2)}
-        wedges = set(dash.corner_colours()["wedges"])
+        wedges = set(dash.corner_colors()["wedges"])
         assert len(seen & wedges) >= 3, "the pies did not paint"
         btn.hide()
     finally:
@@ -2352,13 +2352,13 @@ def test_each_launcher_is_still_hittable_and_still_fires_its_own_action(
 
 def test_the_corner_graphics_paint_in_both_palettes(page, qapp, monkeypatch):
     """Reported before, about the plots: "poor contrast in both dark and light
-    mode". Every colour is a palette NAME resolved at paint time, so the same
+    mode". Every color is a palette NAME resolved at paint time, so the same
     glyph has to render under either theme without raising."""
     from mammon.ui import style
     _shown(page, qapp)
     for theme in ("light", "dark"):
         monkeypatch.setattr(style, "theme", lambda t=theme: t)
-        col = dash.corner_colours()
+        col = dash.corner_colors()
         pal = style.palette_for(theme)
         assert col["title"] == pal["text"]
         assert col["muted"] == pal["muted"]

@@ -145,7 +145,7 @@ class CategoryLineEdit(_FocusSelectLineEdit):
     """The category combo's line edit: pressing ':' autocompletes the current
     parent segment then inserts the ':' so typing flows into the subcategory
     (see :func:`parent_autocomplete`). Inherits the Tab-selects / click-appends
-    focus behaviour from :class:`_FocusSelectLineEdit`; every other key behaves
+    focus behavior from :class:`_FocusSelectLineEdit`; every other key behaves
     normally."""
 
     def __init__(self, combo, parent=None):
@@ -668,14 +668,14 @@ class ChoiceDelegate(QStyledItemDelegate):
 class FocusSelectDelegate(QStyledItemDelegate):
     """A plain text-cell editor whose Tab / keyboard / programmatic open SELECTS
     ALL its text (so the first keystroke REPLACES) while a mouse click leaves the
-    caret where it lands -- :class:`_FocusSelectLineEdit`'s behaviour, the very
+    caret where it lands -- :class:`_FocusSelectLineEdit`'s behavior, the very
     one the cash register's Payee/Memo editors rely on.
 
     Used for the crypto register's free-text and coin-quantity cells (Coin,
     Payee, Memo and the Decimal-text Quantity / Price / Coin In / Coin Out / Fee)
     so Tab and click behave there EXACTLY as they do in the cash register. The
     default delegate's bare QLineEdit gives neither the focus-select nor the
-    click-to-append distinction, which is one of the field-behaviour differences
+    click-to-append distinction, which is one of the field-behavior differences
     this register had. Reading/writing is the default EditRole round-trip; only
     the editor widget changes."""
 
@@ -733,7 +733,7 @@ class MoneyDelegate(QStyledItemDelegate):
         if isinstance(editor, QLineEdit):
             original = editor.property(self._ORIGINAL)
             # `original` is None only if setEditorData never ran; then fall
-            # through and commit, preserving the old behaviour rather than
+            # through and commit, preserving the old behavior rather than
             # silently swallowing a real edit.
             if original is not None and editor.text() == original:
                 return

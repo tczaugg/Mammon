@@ -12,7 +12,7 @@ The Calendar is a :class:`CalendarPanel` -- a PAGE OF THE REGISTER AREA rather
 than a window, shown there at startup and again from Tools > Financial
 Calendar. See the class docstring for why it is not a modal.
 
-The calendar colours each event by what it is, in both themes: a scheduled
+The calendar colors each event by what it is, in both themes: a scheduled
 payment red, a scheduled deposit green, a predicted payment yellow, a
 predicted deposit blue, a pending pre-entry muted, an entered row plain. A
 right-click on a day offers, for each prediction on it, Dismiss (the estimate
@@ -56,7 +56,7 @@ from mammon.ui.models import fmt_cents, fmt_date
 ALL_SPENDING = "All spending accounts"
 SPENDING_TYPES = predictions.SPENDING_TYPES
 
-# Event colours by theme: (light, dark).
+# Event colors by theme: (light, dark).
 _COLORS = {
     "scheduled_out": ("#b2382c", "#ff6b6b"),     # red
     "scheduled_in": ("#2e6b4e", "#7dbb98"),      # green
@@ -80,7 +80,7 @@ def _dark() -> bool:
 
 
 def event_color(e) -> Optional[str]:
-    """The colour an event is drawn in, for the active theme; None for an
+    """The color an event is drawn in, for the active theme; None for an
     entered row (plain text)."""
     i = 1 if _dark() else 0
     if e.source == projection.PREDICTED:

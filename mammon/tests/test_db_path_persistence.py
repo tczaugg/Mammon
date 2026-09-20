@@ -10,7 +10,7 @@ opened a *different* -- often brand-new, empty -- database, so rules committed i
 one session were invisible the next. The fix anchors the default DB to the Mammon
 install root, independent of the CWD.
 
-These tests pin that behaviour and prove an end-to-end two-session cycle: learn
+These tests pin that behavior and prove an end-to-end two-session cycle: learn
 in session 1 (launched from dir A) -> restart from dir B -> the persisted payee
 AND category are auto-filled on a matching import.
 """
@@ -66,7 +66,7 @@ def test_resolve_db_is_cwd_independent(tmp_path):
 
 
 def test_resolve_db_ignores_stray_cwd_db_when_anchored_exists(tmp_path):
-    # A leftover mammon.db from the old CWD-relative behaviour must NOT hijack the
+    # A leftover mammon.db from the old CWD-relative behavior must NOT hijack the
     # session away from the real anchored database.
     install = tmp_path / "install"
     (install / "data").mkdir(parents=True)

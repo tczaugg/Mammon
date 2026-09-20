@@ -4,7 +4,7 @@
 A tree of asset classes -- target percent (editable in place), current percent,
 the signed gap in points and relative terms, and the cents a rebalance would
 move -- each expanding into the HOLDINGS that make it up, with what each has
-gained since the target was last rebalanced. Out-of-band rows are coloured,
+gained since the target was last rebalanced. Out-of-band rows are colored,
 because the whole reason for a band is that most deviations are noise and a few
 are not.
 
@@ -57,7 +57,7 @@ from mammon import rebalance
 from mammon.ui import style
 from mammon.ui.models import fmt_money
 
-# Out-of-band colours by theme: (light, dark). Overweight reads as the
+# Out-of-band colors by theme: (light, dark). Overweight reads as the
 # "sell" direction and underweight as "buy", so they must not both be red.
 _OVER = ("#b2382c", "#ff6b6b")
 _UNDER = ("#1f5fa8", "#6fb1ff")

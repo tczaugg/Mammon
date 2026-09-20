@@ -7,7 +7,7 @@ with invented shares, and valued ten contracts at ten dollars' worth of premium
 instead of a thousand's. The last one is the net-worth error.
 
 Every test carries its NULL-kind twin. That is the point of the file as much as
-the option behaviour is: ``securities.kind`` NULL means UNCLASSIFIED, never
+the option behavior is: ``securities.kind`` NULL means UNCLASSIFIED, never
 "equity", so an unclassified forty-year ledger has to take exactly the code path
 it took before any of this landed. If a guard here starts firing on a NULL-kind
 row, these twins are what says so.
@@ -443,7 +443,7 @@ def test_null_kind_positions_are_never_option_problems(conn, acct):
 
 def test_a_classified_non_option_is_also_left_alone(conn, acct):
     """'equity' is not 'option': only the explicit option kind changes any
-    behaviour."""
+    behavior."""
     _security(conn, STOCK, kind=instruments.Kind.EQUITY.value)
     _trade(conn, acct, "Buy", STOCK, "100", "50.00")
     assert investments.is_option(conn, STOCK) is False

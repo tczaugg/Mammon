@@ -46,7 +46,7 @@ def shoot(out_dir: Path, theme: str, onscreen: bool, db_path: Path,
     # Stock appearance only. apply_theme falls back to each theme's own palette
     # for anything left unset, so passing just the theme name renders what a new
     # install looks like. Inheriting the saved display preferences instead put
-    # the DARK theme's row colours into the light screenshot -- dark text on
+    # the DARK theme's row colors into the light screenshot -- dark text on
     # dark rows, a combination the app never actually shows anyone.
     style.apply_theme(app, {"theme": theme})
 
@@ -99,7 +99,7 @@ def shoot(out_dir: Path, theme: str, onscreen: bool, db_path: Path,
     def show_register(account_id: int) -> None:
         """Open a register and land it on a whole row. Left where it opens, the
         table shows a half-height row clipped against the header -- correct
-        behaviour, but it reads as a rendering fault in a still image."""
+        behavior, but it reads as a rendering fault in a still image."""
         win.open_register(account_id)
         _settle(app)
         view = getattr(win.stack.currentWidget(), "view", None)

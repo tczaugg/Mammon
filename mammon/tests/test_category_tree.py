@@ -72,7 +72,7 @@ def test_a_third_shape_earns_its_own_answer_once_established(conn):
     :func:`test_a_stray_correction_does_not_capture_the_mainstream_branch` for
     why a one-vote node must not override its parent). Once the shape has
     MIN_COUNT corroboration it takes over, which is the "once counts get
-    established" behaviour: the tree does not need to be told that WWW is a
+    established" behavior: the tree does not need to be told that WWW is a
     different kind of Costco purchase, it works it out from how often it is
     corrected.
     """

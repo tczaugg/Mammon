@@ -1088,7 +1088,7 @@ def test_reconcile_summary_bounds_cleared_by_statement_date(conn, accounts):
     assert bounded["cleared_after"] == 500_00    # named, not silently folded in
     assert bounded["difference"] == 0            # so January can actually close
 
-    # Unbounded (no statement date) keeps the old whole-account behaviour.
+    # Unbounded (no statement date) keeps the old whole-account behavior.
     unbounded = ledger.reconcile_summary(conn, checking, 75_00)
     assert unbounded["cleared_total"] == -25_00 + 500_00
     assert unbounded["cleared_after"] == 0

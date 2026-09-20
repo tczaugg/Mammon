@@ -666,7 +666,7 @@ class RegisterWidget(TransferGotoMixin, QWidget):
         """Re-show a pending review list (toolbar Review… action).
 
         Reloads from the persisted ``review_items`` under THIS ACCOUNT'S saved
-        visibility, so re-opening shows the same mix of pending and greyed
+        visibility, so re-opening shows the same mix of pending and grayed
         history the toggle is set to -- survives restarts and reflects any bulk
         action. Loading pending-only here regardless of the setting made the
         panel disagree with its own toggle until the user flipped it."""
@@ -3842,7 +3842,7 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
 
     def scroll_to_newest(self) -> None:
         """Scroll to the newest (bottom) activity row on first open, matching
-        the cash register's behaviour (by request)."""
+        the cash register's behavior (by request)."""
         self.view.scrollToBottom()
 
     def has_open_editor(self) -> bool:
@@ -4288,11 +4288,11 @@ class HoldingsDialog(QDialog):
         self._fill_cash_row(len(self._held))
 
     def _fill_option_cells(self, row, ln, sym, shares, market):
-        """The three option columns, the short-as-a-liability colouring and the
+        """The three option columns, the short-as-a-liability coloring and the
         expiration cue for one row. Reached only when the account holds at least
         one contract, and a no-op for the share rows in that account.
 
-        Colours come from :mod:`mammon.ui.style` (never a literal), so both the
+        Colors come from :mod:`mammon.ui.style` (never a literal), so both the
         liability sign and the cue follow the theme into dark mode."""
         self.table.setItem(row, self.EXPIRES,
                            self._cell(fmt_date(ln.expiration) if ln.expiration else ""))
@@ -4323,9 +4323,9 @@ class HoldingsDialog(QDialog):
             expires_item.setToolTip(tip)
         if ln.cue is None:
             return
-        colour = (style.negative_color() if ln.cue == investments.OPTION_CUE_EXPIRED
+        color = (style.negative_color() if ln.cue == investments.OPTION_CUE_EXPIRED
                   else style.accent_color())
-        brush = QBrush(QColor(colour))
+        brush = QBrush(QColor(color))
         sym.setForeground(brush)
         expires_item.setForeground(brush)
 
@@ -4653,7 +4653,7 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
     ``set_view_mode`` / ``select_txn``. Get Quotes prices the coins and the
     Holdings button opens :class:`CryptoHoldingsDialog`.
 
-    BEHAVIOUR MATCHES THE CASH REGISTER (the parity pass): a right-click context
+    BEHAVIOR MATCHES THE CASH REGISTER (the parity pass): a right-click context
     menu edits/deletes a row (Edit… opens :class:`CryptoTransactionDialog`,
     Delete removes both legs of a transfer/swap), a trailing blank quick-entry
     row enters a new event by hand, a single click opens the editor and Tab and
@@ -4753,7 +4753,7 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
         self.view.setAlternatingRowColors(True)
         self.view.verticalHeader().setVisible(False)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # Field behaviour matches the cash register exactly (the whole point of
+        # Field behavior matches the cash register exactly (the whole point of
         # the parity pass): the edit triggers are keyboard-only, and a SINGLE
         # click opens the editor through `_on_cell_clicked` (not Qt's built-in
         # DoubleClicked/SelectedClicked triggers), so the click-to-edit path and
@@ -5697,7 +5697,7 @@ class NewAccountDialog(QDialog):
         # Native currency, chosen HERE and treated as immutable afterwards (the
         # user's request). Editable so any ISO 4217 code works; defaults to the
         # base currency so the common all-USD case needs no thought. Creation
-        # funnels through ledger.create_account, which normalises the value.
+        # funnels through ledger.create_account, which normalizes the value.
         self.currency = QComboBox()
         self.currency.setEditable(True)
         self.currency.addItems(list(dict.fromkeys(_CURRENCY_CODES)))
@@ -6652,7 +6652,7 @@ class SplitDialog(QDialog):
         else:
             # Seed line 1 with the transaction's existing single category, so a
             # split started from an already-categorized transaction KEEPS that
-            # category (Quicken behaviour) instead of discarding it; line 2 is
+            # category (Quicken behavior) instead of discarding it; line 2 is
             # empty. category_label is "" for an uncategorized transaction.
             self.add_line(self.txn.get("category_label") or "",
                           self.total / 100.0, "")
@@ -8994,7 +8994,7 @@ class MainWindow(QMainWindow):
 
         A migration set is the one operation in this app long enough to look
         hung: the import runs on the GUI thread, so Qt cannot repaint and the
-        window greys out with nothing to say for itself (the reported complaint).
+        window grays out with nothing to say for itself (the reported complaint).
         This is shown non-modally and driven by hand between files --
         ``show()``/``setValue()``, never ``exec_()``, which under the offscreen
         platform would block forever (CLAUDE.md, headless-modal hazard).
@@ -9476,7 +9476,7 @@ class MainWindow(QMainWindow):
             reg.apply_display_prefs(
                 prefs.account_view_mode(aid) if prefs.has_account_view_mode(aid)
                 else self.register_view_mode)
-        # The home Financial Calendar renders its day highlights, event colours
+        # The home Financial Calendar renders its day highlights, event colors
         # and spending bar chart from the ACTIVE theme at DRAW time, so a theme
         # switch must invalidate it: mark_stale repaints it now if it is the page
         # on screen, otherwise on its next show. Without this the spending chart,
@@ -9485,7 +9485,7 @@ class MainWindow(QMainWindow):
         if cal is not None:
             cal.mark_stale()
         # Same reasoning for the Investment Dashboard: its allocation and
-        # performance charts also take their colours from the active theme.
+        # performance charts also take their colors from the active theme.
         dash = getattr(self, "investment_dashboard", None)
         if dash is not None:
             dash.mark_stale()

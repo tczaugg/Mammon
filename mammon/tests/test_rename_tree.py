@@ -5,7 +5,7 @@ tie-breaks, contested leaves), the four steps of ``suggest`` (candidates,
 tree, leaf matching, fill-or-offer), the corrections-only corpus, LIVE labels
 (register edit, undo, forget), survival of review retention, the applied /
 overridden tallies, the action domain, bootstrap, the v60 migration seed, and
-the end-to-end behaviour through ``import_review`` that the user specified:
+the end-to-end behavior through ``import_review`` that the user specified:
 the raw text shows until the same text has been corrected twice, then the
 rename fills; a leaf with several payees is a dropdown, never a fill.
 """

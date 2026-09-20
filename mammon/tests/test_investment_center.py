@@ -13,7 +13,7 @@ of those assertions exist to pin down a difference rather than a number: the
 allocation's total is deliberately NOT the card's (options out, money-market as
 cash), and an account funded only by an opening balance gets no return at all,
 because the "gain" would be the funding arriving. Both are asserted as stated
-behaviour so a later "fix" that quietly reconciled them would fail here.
+behavior so a later "fix" that quietly reconciled them would fail here.
 
 Phases 3 and 4 add the activity and freshness panels, and two of their
 assertions pin a judgement rather than a number as well: a cash-only row's

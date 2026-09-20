@@ -137,7 +137,7 @@ def test_bar_chart_empty_report_renders_placeholder(qapp):
 
 def test_bar_chart_follows_dark_theme(qapp, monkeypatch):
     """The reported defect: in dark mode the chart kept matplotlib's light
-    defaults. The canvas must recolour its figure, axes, ticks and title from the
+    defaults. The canvas must recolor its figure, axes, ticks and title from the
     app's active theme palette (``mammon.ui.style``) so it reads on a dark
     background -- while the deliberate non-zero value baseline still holds. The
     spending/income bars keep their fixed red/green regardless of theme."""
@@ -203,7 +203,7 @@ def test_bar_chart_dark_to_light_toggle_restores_light(qapp, monkeypatch):
     assert ax.patches[0].get_facecolor() == to_rgba(charts._RED)
     assert ax.patches[3].get_facecolor() == to_rgba(charts._GREEN)
 
-    # Toggle to light and re-render the SAME canvas -- it must recolour the figure
+    # Toggle to light and re-render the SAME canvas -- it must recolor the figure
     # back to white while keeping the two red/green series.
     monkeypatch.setattr(style, "theme", lambda: "light")
     canvas.render()
@@ -211,7 +211,7 @@ def test_bar_chart_dark_to_light_toggle_restores_light(qapp, monkeypatch):
     assert canvas.figure.patch.get_facecolor() == to_rgba("white")
     assert ax.patches[0].get_facecolor() == to_rgba(charts._RED)
     assert ax.patches[3].get_facecolor() == to_rgba(charts._GREEN)
-    # Recolouring must not disturb the deliberate non-zero value baseline.
+    # Recoloring must not disturb the deliberate non-zero value baseline.
     lo, _hi = ax.get_ylim()
     assert lo > 0
 

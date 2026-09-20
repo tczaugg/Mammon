@@ -343,7 +343,7 @@ def looks_like_option(*texts) -> bool:
     rendering -- and "no" to everything else, including pre-2010 OPRA symbols
     (``IBMAF``) and broker prose (``XYZ 01/17/2026 150.00 C``). Those are false
     NEGATIVES on purpose: every caller uses this to REFUSE an action, so a miss
-    leaves today's behaviour and a false positive would block a legitimate
+    leaves today's behavior and a false positive would block a legitimate
     rename.
 
     It exists because :func:`ticker_of` cannot tell a contract from its
@@ -1358,7 +1358,7 @@ def _relieve_short(pos, q: Decimal) -> list:
     ``pos.qty`` is left to the caller, exactly as :func:`_relieve` does. Falls
     back to the aggregate average when no short lot history exists (a ShtSell
     from before this vocabulary, or a snapshot seeded position), which reproduces
-    the pre-existing average-credit behaviour to the cent."""
+    the pre-existing average-credit behavior to the cent."""
     if q <= 0 or pos.qty >= 0:
         return []
     q = min(q, -pos.qty)
@@ -1557,7 +1557,7 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
             # the date it was written on. Short is the normal direction for an
             # option, so "the position average" is not good enough here. ShtSell
             # is deliberately excluded: an equity short keeps the lot-less
-            # average behaviour it has always had. A negative lot is inert to the
+            # average behavior it has always had. A negative lot is inert to the
             # rest of the module -- both _spread_cost and _relieve return early
             # while the position quantity is not positive.
             pos.lots.append(_Lot(-q, -credit, t["date"], _row_value(t, "id")))
@@ -1972,7 +1972,7 @@ def rebuild_holdings(conn, account_id: int) -> list[dict]:
         # be re-read from the security registry every time or it survives exactly
         # until the next rebuild -- and a rebuild happens on every import, rename
         # and lot-method change. `securities.name` is the one place it lives;
-        # this column is a denormalised copy for display.
+        # this column is a denormalized copy for display.
         conn.execute(
             "INSERT INTO holdings(account_id, symbol, name, quantity, cost_basis) "
             "VALUES (?,?,(SELECT name FROM securities WHERE symbol=?),?,?)",
@@ -2170,7 +2170,7 @@ def _kind_identity_symbols(conn, symbol) -> list:
     option = instruments.Kind.OPTION.value
     kinds = {s: _stored_kind(conn, s) for s in syms}
     if not any(k == option for k in kinds.values()):
-        return syms                       # today's behaviour, untouched
+        return syms                       # today's behavior, untouched
     want_option = _stored_kind(conn, symbol) == option
     kept = [s for s in syms if (kinds.get(s) == option) == want_option]
     # Never widen back to the fused set when the partition empties: the asked-for
@@ -2627,7 +2627,7 @@ def record_prices_if_absent(conn, rows, replace_sources=()) -> int:
     Zero/blank closes are skipped -- a $0 price is not a valid quote.
 
     A row already carrying one of ``replace_sources`` IS overwritten; the
-    default replaces nothing, so every existing caller keeps the behaviour its
+    default replaces nothing, so every existing caller keeps the behavior its
     own docstring promises. :func:`fetch_quote_history` opts in with
     :data:`REFETCHABLE_SOURCES`, because ``DO NOTHING`` for every conflict made
     a downloaded price permanently uncorrectable: a whole history fetched on the
@@ -3024,7 +3024,7 @@ def option_terms(conn, symbol) -> Optional[dict]:
     ``{'symbol', 'multiplier', 'underlying', 'expiration', 'strike', 'right'}``.
     ``multiplier`` and ``strike`` come back Decimal (never float); ``multiplier``
     is ``None`` when the column is NULL, which the caller must treat as "not
-    recorded", NOT as a licence to assume 100 -- a mini contract is 10 and an
+    recorded", NOT as a license to assume 100 -- a mini contract is 10 and an
     index contract can be anything. Terms are READ here, never parsed: parsing
     belongs to :mod:`mammon.instruments` and the write belongs to the backfill.
     Resolved across the identity so a contract stored under either spelling of a
@@ -3180,7 +3180,7 @@ def _holdings_as_of(conn, account_id: int, as_of: Optional[str]):
     position vanished from the past (and an account closed out years ago reported
     its cash sleeve alone), making the whole net-worth curve understate history.
     The two row shapes -- ``holdings`` rows (symbol/quantity/cost_basis) and
-    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalised HERE,
+    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalized HERE,
     at the one boundary, so every caller above sees a single shape."""
     if as_of is None:
         for h in list_holdings(conn, account_id):

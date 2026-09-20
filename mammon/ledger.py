@@ -80,7 +80,7 @@ def create_account(
     """Create an account. ``currency`` is its native ISO 4217 code, chosen at
     creation (the New Account dialog offers it) and treated as an immutable
     account property thereafter -- it is not edited on the account-details dialog.
-    A blank/None currency normalises to the base ``'USD'`` (the schema default),
+    A blank/None currency normalizes to the base ``'USD'`` (the schema default),
     so a caller passing an empty field never writes an invalid code. This is the
     ONLY insert path for accounts, so it is where currency is set."""
     ccy = (currency or "USD").strip().upper() or "USD"
@@ -672,7 +672,7 @@ def tag_colors(conn: sqlite3.Connection) -> dict[str, str]:
     one. Keyed casefolded because ``tags.name`` collates NOCASE, so a renderer
     resolves a parsed tag name straight through ``.get(name.casefold())``. This is
     the single accessor the register cell, split dialog and By Tag report read to
-    color a tag, keeping money/colour logic out of ``ui/``."""
+    color a tag, keeping money/color logic out of ``ui/``."""
     rows = conn.execute(
         "SELECT name, color FROM tags WHERE color IS NOT NULL AND color <> ''"
     ).fetchall()

@@ -158,7 +158,7 @@ def test_refresh_with_only_base_accounts_writes_nothing(conn, monkeypatch):
 # ---------------------------------------------------------------------------
 # the editor refuses a bad rate rather than writing a zero/nonsense one
 # ---------------------------------------------------------------------------
-def test_editor_refuses_bad_input_and_normalises_good(conn, monkeypatch):
+def test_editor_refuses_bad_input_and_normalizes_good(conn, monkeypatch):
     warned = []
     monkeypatch.setattr(QMessageBox, "warning",
                         staticmethod(lambda *a, **k: warned.append(a[2])))

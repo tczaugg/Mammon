@@ -161,13 +161,13 @@ def _text(dlg, row, col):
     return item.text() if item is not None else None
 
 
-def _colour(dlg, row, col):
+def _color(dlg, row, col):
     from PyQt5.QtGui import QColor
     item = dlg.table.item(row, col)
     return QColor(item.foreground().color()).name()
 
 
-def _colour_name(spec):
+def _color_name(spec):
     from PyQt5.QtGui import QColor
     return QColor(spec).name()
 
@@ -264,12 +264,12 @@ def test_written_contract_reads_as_a_liability(qapp, conn, classified):
 
     assert _num(dlg, row, HoldingsDialog.SHARES) == Decimal(-1)
     assert _num(dlg, row, HoldingsDialog.MARKET) == Decimal("-250.00")
-    negative = _colour_name(style.negative_color())
-    assert _colour(dlg, row, HoldingsDialog.SHARES) == negative
-    assert _colour(dlg, row, HoldingsDialog.MARKET) == negative
+    negative = _color_name(style.negative_color())
+    assert _color(dlg, row, HoldingsDialog.SHARES) == negative
+    assert _color(dlg, row, HoldingsDialog.MARKET) == negative
 
 
-def test_null_kind_row_shows_no_terms_and_no_liability_colour(
+def test_null_kind_row_shows_no_terms_and_no_liability_color(
         qapp, conn, unclassified):
     """The TWIN. The unclassified contract-shaped security has no terms columns
     to fill at all, and its long position is painted like any other holding."""
@@ -279,7 +279,7 @@ def test_null_kind_row_shows_no_terms_and_no_liability_colour(
     assert _num(dlg, row, HoldingsDialog.SHARES) == Decimal(2)
     # Valued as 2 SHARES at 3.00 -- no multiplier, because nothing said option.
     assert _num(dlg, row, HoldingsDialog.MARKET) == Decimal("6.00")
-    assert _colour(dlg, row, HoldingsDialog.SHARES) != _colour_name(
+    assert _color(dlg, row, HoldingsDialog.SHARES) != _color_name(
         style.negative_color())
 
 
@@ -307,12 +307,12 @@ def test_expiring_and_expired_contracts_are_visually_distinguishable(
 
     # Expired and merely-expiring read differently, and both come from the
     # theme rather than a literal.
-    expired = _colour(dlg, rows[PAST], HoldingsDialog.SYMBOL)
-    expiring = _colour(dlg, rows[CALL], HoldingsDialog.SYMBOL)
-    assert expired == _colour_name(style.negative_color())
-    assert expiring == _colour_name(style.accent_color())
+    expired = _color(dlg, rows[PAST], HoldingsDialog.SYMBOL)
+    expiring = _color(dlg, rows[CALL], HoldingsDialog.SYMBOL)
+    assert expired == _color_name(style.negative_color())
+    assert expiring == _color_name(style.accent_color())
     assert expired != expiring
-    # An expired contract explains itself rather than just changing colour.
+    # An expired contract explains itself rather than just changing color.
     assert dlg.table.item(rows[PAST], HoldingsDialog.SYMBOL).toolTip()
 
 

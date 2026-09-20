@@ -1,7 +1,7 @@
 """Category Manager -- domain verbs (rename / reparent / merge) plus the
 offscreen dialog that projects them.
 
-The domain tests pin the behaviour that makes a merge safe on a 40-year archive:
+The domain tests pin the behavior that makes a merge safe on a 40-year archive:
 ids are preserved on a rename/reparent (so learned rules and budget lines keep
 pointing at the right category), and a merge REPOINTS every reference onto the
 survivor -- transactions, split lines, keyword rules, payee mappings, scheduled

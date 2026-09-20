@@ -78,7 +78,7 @@ def test_account_currency_defaults_to_usd(conn):
 
 def test_set_and_get_account_currency(conn):
     a = ledger.create_account(conn, "Euro Cash", "cash")
-    fx.set_account_currency(conn, a, "eur")           # normalised to upper-case
+    fx.set_account_currency(conn, a, "eur")           # normalized to upper-case
     assert fx.get_account_currency(conn, a) == "EUR"
 
 

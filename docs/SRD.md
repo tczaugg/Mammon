@@ -26,7 +26,7 @@ compartment is not sequential - do not renumber to tidy it.
 | **G** Learned rules | The five cooperating engines that turn bank gobbledygook into a payee and a category. Payee is resolved FIRST, category BELOW it. Nothing is seeded from history; all five learn only from what the user accepts. |
 | **H** Scheduled pre-entries, reminders and the calendar | Recurring bills and loan payments pre-entered as placeholder rows before the bank transaction arrives, and the forward-looking views built on them. A pre-entry matches on TOLERANCE, not exact cents. |
 | **I** Reconciliation | Reconciling a register against a paper or downloaded statement, and the audit trail for anything that changes a row after it is reconciled. |
-| **J** Reports, charts and customization | Read-only aggregations and how they are presented: the shared customization bar, chart behaviour, saved filter sets, export and print, and budgets. |
+| **J** Reports, charts and customization | Read-only aggregations and how they are presented: the shared customization bar, chart behavior, saved filter sets, export and print, and budgets. |
 | **K** Database, backups and encryption | The canonical schema, how it migrates, how balances stay fast over 40 years, and how the file is snapshotted. The database is one SQLite file the user owns. Encryption is its own document: `docs/encryption.md`. |
 | **L** Downloads, webSlinger and the MCP server | How transactions arrive from institutions, and the read-only tool surface an LLM sees. The app holds NO credentials: login and secrets belong entirely to the webSlinger/keyCocoon side. |
 | **M** Platform, architecture and open items | Non-functional requirements, the resolved technology decisions, and what is still open. |
@@ -170,7 +170,7 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   (date, id -- or date, time, id for crypto), so a same-day buy and sale of one
   security are never replayed as a short. **Balance
   keeps each row's date-ordered running value whatever the sort** (Quicken's
-  behaviour): sorting by payee never recomputes a balance. Num sorts numbers
+  behavior): sorting by payee never recomputes a balance. Num sorts numbers
   numerically, then text, blanks last; the money columns sort by magnitude;
   Clr ranks blank < c < R. An open editor is committed before the reset.
 - **Filter bar** (gear ▸ Filter Register, Ctrl+Shift+F): text over payee /
@@ -222,7 +222,7 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   batch edits via `update_investment_fields`, so no second write path opens and
   a cash-only transfer leg shown here is skipped rather than mis-resolved against
   the shared id space. Only the CONTENT differs (shares/price columns, an action
-  verb, no cash-only payee/category cells); the behaviour matches.
+  verb, no cash-only payee/category cells); the behavior matches.
 - **Tags** (the register's Tag column): a transaction carries any number of tags,
   entered and edited as ONE comma-separated string in the single Tag cell -- a
   free-text slot, NOT a multi-widget picker (explicit UX choice). Commas separate;
@@ -535,7 +535,7 @@ Code: `mammon/ledger.py`, `mammon/loans.py`.
   other. This is register-kind-blind in both directions: the cash/loan, the
   investment (5.8) and the crypto (5.8j) registers all OFFER it, and all three
   are valid destinations. A row that is not a transfer leg offers nothing -- the
-  entry is absent, not greyed. One entry per distinct counterpart account (a
+  entry is absent, not grayed. One entry per distinct counterpart account (a
   split touching the same account twice does not repeat it), the account itself
   is never offered, and a leg whose counterpart account no longer exists offers
   nothing rather than an unnamed jump.
@@ -701,7 +701,7 @@ floats and no money math in the UI layer.
 - **Currency is chosen at CREATION and is immutable.** The New Account dialog
   offers a currency selector (an editable ISO-4217 combo, defaulting to the base
   so the all-USD case needs no thought). Creation funnels through the sole account
-  writer `ledger.create_account`, which takes and normalises a `currency`
+  writer `ledger.create_account`, which takes and normalizes a `currency`
   argument — there is no second write path. Changing an account's currency after
   it holds transactions would silently reinterpret every past amount, so the
   Account Details dialog shows the currency **read-only** and never writes it back.
@@ -834,13 +834,13 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   package covers a source.
 - The investment register offers the same register toolkit as the cash register
   -- sort, filter, column chooser, multi-row batch edit, find-and-replace and
-  Void -- over the investment columns; see §5.1b for the shared behaviour and the
+  Void -- over the investment columns; see §5.1b for the shared behavior and the
   investment-specific Void.
 - Its row context menu carries **"Go to [account]" on a transfer leg**, the same
   entry the cash register has (5.2): it names the counterpart account and jumps to
   the mirror row. Both shapes this register shows are covered -- an XIn/XOut
   carrying a `transfer_account_id`, and a backfilled cash leg -- and the entry is
-  absent, not greyed, on a row that is not a transfer. `investment_transactions`
+  absent, not grayed, on a row that is not a transfer. `investment_transactions`
   has no pair-id column at all, so `investments.transfer_targets` locates the
   counterpart by (date, counter-account, |amount|); the register keeps no SQL of
   its own.
@@ -1110,15 +1110,15 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   matching category type, transfers excluded, splits honored), so the
   threshold/rollup/drill-down/percentage logic lives in exactly one place rather
   than being re-implemented per chart.
-- **Distinct wedge colours, with `Other` pinned** (`ui/charts.wedge_colors`,
+- **Distinct wedge colors, with `Other` pinned** (`ui/charts.wedge_colors`,
   `_PIE_PALETTE`). The palette carries enough visually separated hues for the
   worst realistic pie -- ~19 divisions, which happens when every real category is
   roughly 5% of the period and the sub-10% tail rolls up into an `Other` that is
   itself >=10%. The `Other` wedge always takes the palette's FINAL entry (a
-  neutral gray), so it stays a stable, recognizable colour no matter how many
-  real categories precede it. The old ten-colour list wrapped with `i % len`, so
+  neutral gray), so it stays a stable, recognizable color no matter how many
+  real categories precede it. The old ten-color list wrapped with `i % len`, so
   an 11th category reused -- and became indistinguishable from -- the `Other`
-  wedge's colour.
+  wedge's color.
 - **Net Worth Over Time reads against both axes** (`ui/charts.NetWorthCanvas`).
   The cumulative curve draws BOTH horizontal and vertical grid lines, the
   vertical ones aligned to the x-axis date ticks, at the crisp weight/opacity of
@@ -2310,7 +2310,7 @@ note.**
   is an invitation to confusion. Target percent editable in place (through
   `set_line_balanced`, which redraws every row, not just the edited one),
   current percent, signed drift in points and relative, and a Buy/Sell figure per class (cash reads Invest/Raise, never Sell);
-  out-of-band rows coloured (red overweight, blue underweight -- they must not
+  out-of-band rows colored (red overweight, blue underweight -- they must not
   both be red, since they mean opposite actions). MCP: `allocation_drift`.
 
 
@@ -2363,7 +2363,7 @@ note.**
 - **Preferred and convertible holdings map to `other`**, not to bonds or equity:
   they are hybrids, routinely under 0.5% of a fund, and Mammon has no class
   meaning either. `other` is the honest bucket rather than a guess about
-  behaviour.
+  behavior.
 - **Two rounding rules are load-bearing.** `normalize` forces the weights to
   total exactly 100 (a provider's own fractions sum to 99.98 or 100.01, and a
   mixture over 100 would allocate more than the position is worth), with the
@@ -2916,7 +2916,7 @@ was previously nowhere in the app to add the price it was complaining about.
   crypto id lives in the overlapping id space of `crypto_transactions`, so
   forwarding it could let an unrelated cash row's payee masquerade as the label —
   storing the label directly sidesteps that collision.
-- **The crypto register FUNCTIONS like the cash register (behavioural parity),
+- **The crypto register FUNCTIONS like the cash register (behavioral parity),
   differing only where the content requires it.** The gaps closed:
   - a per-row **context menu** (right-click) offering New / Edit / Delete. Edit
     opens `CryptoTransactionDialog` — the crypto twin of the cash
@@ -2926,7 +2926,7 @@ was previously nowhere in the app to add the price it was complaining about.
   - **"Go to [account]" on a transfer leg**, the same entry the cash register has
     (5.2): it names the counterpart account and jumps to the mirror row. It covers
     both shapes a crypto link takes — a crypto↔crypto pair, and a cash leg living
-    in an ordinary account — and it is absent, not greyed, on a row that is not a
+    in an ordinary account — and it is absent, not grayed, on a row that is not a
     transfer. `crypto.transfer_targets` locates the counterpart, so the register
     keeps no SQL of its own.
   - **Every field a posted crypto row legitimately has is editable — inline AND
@@ -2970,7 +2970,7 @@ was previously nowhere in the app to add the price it was complaining about.
     (`FocusSelectDelegate` → `_FocusSelectLineEdit`: Tab replaces the value, a
     mouse click appends), with the calendar `DateDelegate` on Date.
   Only the CONTENT differs (coin quantities as Decimal text, a coin-denominated
-  fee, and a wallet's absent Price / Amount / Cash Bal); the behaviour is the same.
+  fee, and a wallet's absent Price / Amount / Cash Bal); the behavior is the same.
   `show_review` must re-fire the selection handler AFTER revealing the panel:
   `set_entries` selects row 0 and emits while the panel is still hidden, so the
   first row — the one already selected, whose re-click changes no selection and
@@ -3036,7 +3036,7 @@ was previously nowhere in the app to add the price it was complaining about.
   `CustomizeDialog` -- not a second account picker invented for this page, which
   would be one more place for the user's idea of "which accounts" to drift. Its
   selection is the page's universe: the ring's wedges in both modes, both hole
-  charts, the centre line, the inflow arrows and the projection all read it. No
+  charts, the center line, the inflow arrows and the projection all read it. No
   selection means EVERY investment account, and a non-investment account ticked
   in the dialog never enters the scope -- the scope is intersected with the
   dashboard's own account set, so the gear narrows that set and can never widen
@@ -3055,7 +3055,7 @@ was previously nowhere in the app to add the price it was complaining about.
   (`portfolio.allocation(...).by_security`). Zero and negative values are
   omitted, and there is NO "Other" grouping in either mode -- folding small
   slices would make exactly the holdings the user is hunting for unclickable.
-  Colours are assigned in sorted-key order, so a wedge keeps its colour as
+  Colors are assigned in sorted-key order, so a wedge keeps its color as
   values move beneath it and across the mode toggle. Clicking a wedge filters
   the whole page to it (`filterChanged` carries `("account", id)` or
   `("security", symbol)`); clicking it again clears the filter, as does
@@ -3064,7 +3064,7 @@ was previously nowhere in the app to add the price it was complaining about.
   picked and no more: the ring's view limit is `1.0 + SELECTED_EXPLODE`, so
   every pixel of displacement is paid for by shrinking the whole donut, and a
   showy explode makes the picture smaller for no information.
-- **The centre line is the one line of numbers.** Inside the ring's hole, for
+- **The center line is the one line of numbers.** Inside the ring's hole, for
   whichever subject is selected (or "All investments"): total market value, the
   trailing-year gain, trailing-year dividends, and the annualized return at 1,
   3, 5 and 10 years. A horizon with too little history is ABSENT -- never shown
@@ -3077,17 +3077,17 @@ was previously nowhere in the app to add the price it was complaining about.
   children, not once at construction -- and it is NOT mouse-transparent. It was
   transparent at first, so that it could not swallow the clicks belonging to
   the chart underneath it; but the attribute makes Qt skip the widget's whole
-  subtree when it decides what is in front, which is exactly what "the centre
+  subtree when it decides what is in front, which is exactly what "the center
   line is invisible" turned out to mean, twice. Nothing is lost by taking the
   mouse there: the charts' rect reserves a blank strip the height of the line,
   so what the line covers is blank.
 - **The value-history chart shows what the subject has been worth**, sampled
   across a period the user picks (1, 2, 3, 5, 8, 10 years or Max, default 1
   year; Max is discovered from the ledger and capped at 40 years). It is drawn
-  in the selected wedge's colour, so the ring and the chart cannot be read as
+  in the selected wedge's color, so the ring and the chart cannot be read as
   describing different things; with no wedge selected it falls back to the
-  palette's accent rather than keeping the ex-selection's colour. Both hole
-  charts take every colour they draw with -- series, bands, ticks, labels,
+  palette's accent rather than keeping the ex-selection's color. Both hole
+  charts take every color they draw with -- series, bands, ticks, labels,
   spines, grid -- from the ACTIVE theme's palette, and both carry gridlines
   behind the data, because a chart tuned for a white page is unreadable on a
   dark one. They share one rectangle inside the hole, and that rectangle is not
@@ -3110,7 +3110,7 @@ was previously nowhere in the app to add the price it was complaining about.
   refreshed wherever the scope is, so it can never name a curve that is no
   longer drawn. Captions are as wide as the chart they caption and no wider.
 - **The projection is a percentile FAN, and it is labelled as an estimate.**
-  Below the centre line, over a horizon of 5/10/20/30/40/50 years (default 20),
+  Below the center line, over a horizon of 5/10/20/30/40/50 years (default 20),
   `forecast.fan` projects today's value forward from three stated inputs: the
   current market value, the annual contribution implied by the inflow arrows,
   and the risk level. It draws the 5-95% and 25-75% bands with a median line --
@@ -3143,7 +3143,7 @@ was previously nowhere in the app to add the price it was complaining about.
   captioned with the stocks/bonds/cash split it currently means. It starts on
   the rung matching the portfolio's REAL mix and follows it on every refresh, so
   its resting position is a measurement rather than a default. It is read-only
-  until What If is on. The handle is an OVAL painted on the coloured bar
+  until What If is on. The handle is an OVAL painted on the colored bar
   itself -- one widget, driven by click, drag and the arrow/page keys -- not a
   separate slider beside it, which read as a cross rather than a thermometer.
   It takes only a FRACTION of an even share of the left
@@ -3167,7 +3167,7 @@ was previously nowhere in the app to add the price it was complaining about.
   the ring wedge exactly as the rest of the page does: with an account selected,
   the starting value, the measured contribution, the measured mix and the
   editable inflow are all that account's, so a $100 change to a $5,000 account
-  visibly moves that account's curve. It used to grey itself out whenever a
+  visibly moves that account's curve. It used to gray itself out whenever a
   wedge was selected, and turning it on cleared the filter, which made the only
   question it is good for unanswerable (reported: "I want to be able to do what
   if on an individual account. Otherwise being able to change the inflow is
@@ -3177,7 +3177,7 @@ was previously nowhere in the app to add the price it was complaining about.
   refresh, never left portfolio-wide underneath a one-account What If fan -- and
   the What If control NAMES its scope in words ("All investments" or the
   selected account or security), because a scoped fan misread as the portfolio's
-  is a worse failure than the grey button was. Selecting or clearing a wedge
+  is a worse failure than the gray button was. Selecting or clearing a wedge
   while What If is on re-scopes the projection live rather than turning it off.
   Contributions follow SRD 5.8k's scoping rule above, so a SECURITY selection
   projects zero contributions and only the mix and horizon are in play.
@@ -3212,16 +3212,16 @@ was previously nowhere in the app to add the price it was complaining about.
   `open_rebalancing`) funnelling through two seams -- one modeless, one modal --
   so a test can assert what a corner aimed at without entering a modal loop.
 - **Each launcher is a prominent title over a themed graphic it paints itself.**
-  Four identical grey boxes of small text gave no clue which was which
+  Four identical gray boxes of small text gave no clue which was which
   (reported: "Replace the Explore Rebalancing box with a graphic showing two pie
   charts with different proportions of the same colors in each with an arrow
   between them and the title Explore Rebalancing. Similarly, replace the other
   boxes with themed graphics and prominant titles"). So the bottom-right corner
-  draws two pies -- the SAME wedge colours in different proportions, today's
+  draws two pies -- the SAME wedge colors in different proportions, today's
   drifted mix on the left and the target on the right, an arrow between them --
   and the other three draw what they open: a gain with the taxed share bitten
   out of it (twice, a short lot against a long one), a rising series under a
-  trend arrow, a legend of coloured swatches against named classes. The four
+  trend arrow, a legend of colored swatches against named classes. The four
   share one layout -- same box, same padding, title on top, graphic in what is
   left -- because they are seen together and per-corner tuning would show. The
   title word-wraps (a plain `QPushButton` clips "Capital Gains and Taxes" at any
@@ -3231,7 +3231,7 @@ was previously nowhere in the app to add the price it was complaining about.
   Everything is painted with `QPainter` from palette NAMES resolved at paint
   time -- no image files, no hex literals (reported before, of the plots: "poor
   contrast in both dark and light mode") -- and the category hues are the ring's
-  own wedge colours, so the pies are recognisably the ring's. The frame is still
+  own wedge colors, so the pies are recognisably the ring's. The frame is still
   drawn by the style and the widget is still an ordinary `QPushButton`: hover,
   focus, `childAt()` hit-testing and `clicked` are unchanged, and so is the
   z-order above.
@@ -3271,7 +3271,7 @@ was previously nowhere in the app to add the price it was complaining about.
 - **Staleness follows the shared contract.** The page takes an optional as-of
   date (today by default) that every query keys off, and `mark_stale()` refreshes
   at once when the page is visible and defers to the next show when it is not.
-  A refresh rebuilds the ring, the arrows, the centre line and both charts, and
+  A refresh rebuilds the ring, the arrows, the center line and both charts, and
   disturbs neither the current filter nor What If. The filter is DERIVED from
   the ring after every rebuild rather than remembered beside it: whatever the
   ring says is selected is the filter, and a refresh that drops the selected key
@@ -3964,7 +3964,7 @@ from **Tools ▸ Rules Manager…**. Rules are app-learned and never imported, a
 money movement.
 
 - **A condition narrows WHEN a keyword rule fires; all-NULL is the old
-  behaviour.** A rule may carry any subset of `account_id` (scope to one
+  behavior.** A rule may carry any subset of `account_id` (scope to one
   account), `amount_min_cents` / `amount_max_cents` (an inclusive SIGNED
   integer-cent range, negative = money out), and `memo_contains` (a
   case-insensitive substring). `keywords.match_rule(desc, rules, *,
@@ -4303,7 +4303,7 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   reminder, the projection and the calendar. A manual definition's standing
   pre-entry is a plain register row: edit it there; the definition's next date
   is a stored counter edited in the manager, and deleting a posted bill does
-  not roll it back (Quicken's behaviour too).
+  not roll it back (Quicken's behavior too).
 - **The projection learns what is regular only from the user.** It projects
   entered rows, defined reminders and loan schedules, and never guesses from
   history on its own. The manager's Suggest… (`scheduled.suggest_recurring`)
@@ -4389,7 +4389,7 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   sub-stream predictions are ordinary predictions — they pass through the same
   merge, the same entered-row and reminder dedup above, and the same per-payee
   dismissal (dismissing the payee dismisses all of its streams).
-- **The calendar colours what it shows**, in both themes: scheduled payment
+- **The calendar colors what it shows**, in both themes: scheduled payment
   red, scheduled deposit green, predicted payment yellow (amber on white),
   predicted deposit blue, pending pre-entry muted, entered row plain; a legend
   sits under the grid. Today's highlight comes from the theme: a fixed light
@@ -4711,7 +4711,7 @@ number — missing shares of one fund say nothing about another:
 ## Compartment J. Reports, charts and customization
 
 Read-only aggregations and how they are presented: the shared
-customization bar, chart behaviour, saved filter sets, export and print,
+customization bar, chart behavior, saved filter sets, export and print,
 and budgets.
 
 Code: `mammon/reports/` (pure functions returning plain data),

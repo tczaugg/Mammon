@@ -863,7 +863,7 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
         # overstates equity by the notional the premium did not buy, and
         # counting the premium as equity is a different thing again. Only an
         # EXPLICIT kind='option' is removed -- a NULL-kind row is UNCLASSIFIED,
-        # not "not an option", and keeps the pre-existing behaviour exactly.
+        # not "not an option", and keeps the pre-existing behavior exactly.
         opts = [h for h in v.holdings if investments.is_option(conn, h.symbol)]
         opt_symbols = {h.symbol for h in opts}
         opt_value = sum(int(h.market_value) for h in opts)

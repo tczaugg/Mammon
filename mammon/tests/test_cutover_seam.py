@@ -66,7 +66,7 @@ def test_a_qif_set_defers_its_watermark_so_every_file_lands(conn):
 
 
 def test_a_qif_set_imported_per_file_would_shut_out_the_rest(conn):
-    """The reason the deferral exists, pinned as behaviour: with the watermark
+    """The reason the deferral exists, pinned as behavior: with the watermark
     applied PER FILE (the default), a later year imported first makes every
     earlier row look already-migrated."""
     newer = [importers.NormalizedTxn(external_account="Checking",

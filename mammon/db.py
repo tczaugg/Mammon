@@ -935,7 +935,7 @@ CREATE TABLE reconcile_drafts (
 # Bank accounts need no such bound: there the beginning covers only reconciled
 # rows, so an older still-unreconciled item is genuinely outstanding and must
 # keep appearing. The column is nullable, and a NULL period start means the
-# unbounded behaviour (everything through the statement date).
+# unbounded behavior (everything through the statement date).
 # ---------------------------------------------------------------------------
 _V31 = """
 ALTER TABLE reconcile_drafts ADD COLUMN period_start TEXT NOT NULL DEFAULT '';
@@ -1058,7 +1058,7 @@ ALTER TABLE loan_params ADD COLUMN funding_account_id INTEGER
 """
 
 # Tax lots (roadmap item 7). ``accounts.lot_method`` names how a disposal is
-# costed (average | fifo | lifo; NULL = average, the behaviour every earlier
+# costed (average | fifo | lifo; NULL = average, the behavior every earlier
 # figure was computed under). ``holdings_checkpoints.lots`` carries the open
 # lots at each year end as JSON, so the snapshot+delta replay reproduces the
 # from-inception lot state exactly; the existing snapshots hold no lots and are

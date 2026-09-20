@@ -180,7 +180,7 @@ def test_unknown_mode_degrades_to_pending(conn, account):
     assert _ids(ir.load_review(conn, account, "nonsense")) == ["p"]
 
 
-def test_entries_carry_state_so_the_panel_can_grey_them(conn, account):
+def test_entries_carry_state_so_the_panel_can_gray_them(conn, account):
     b = ir.start_batch(conn, account)
     _row(conn, account, b, "p", state="pending")
     _row(conn, account, b, "a", state="accepted")
@@ -285,7 +285,7 @@ def _seed(conn, account_id):
     return b
 
 
-def test_accepted_row_stays_visible_and_greys_in_pending_plus_accepted(
+def test_accepted_row_stays_visible_and_grays_in_pending_plus_accepted(
         qapp, conn, account):
     from mammon.ui import prefs
     # A register line for the first seeded row, so it classifies MATCHING and can
@@ -309,8 +309,8 @@ def test_accepted_row_stays_visible_and_greys_in_pending_plus_accepted(
 
 
 def test_a_discarded_row_leaves_every_view(qapp, conn, account):
-    """Discard deletes its ``review_items`` row, so greying it would put the
-    screen at odds with a re-query -- the same disagreement the greying was
+    """Discard deletes its ``review_items`` row, so graying it would put the
+    screen at odds with a re-query -- the same disagreement the graying was
     introduced to fix, pointed the other way."""
     from mammon.ui import prefs
     _seed(conn, account)
@@ -325,7 +325,7 @@ def test_a_discarded_row_leaves_every_view(qapp, conn, account):
 
 
 def test_accepted_row_still_disappears_in_pending_only(qapp, conn, account):
-    """The old behaviour is still right for the view that hides actioned rows."""
+    """The old behavior is still right for the view that hides actioned rows."""
     from mammon.ui import prefs
     _seed(conn, account)
     panel = _panel(conn, account, prefs.VIS_PENDING)
@@ -614,7 +614,7 @@ def test_in_session_accept_can_still_be_clicked_back_to(qapp, conn, account,
 def test_accepting_with_edits_leaves_the_review_row_untouched(qapp, conn, account):
     """Edits made in the register's pending row go to the LEDGER, not back onto
     the review row. accept_new used to overwrite mapped.date / amount_cents /
-    check_number, so the greyed row afterwards showed the edit rather than what
+    check_number, so the grayed row afterwards showed the edit rather than what
     the bank sent -- and disagreed with its own stored row until a reload."""
     from mammon import ledger as L
     from mammon.ui import prefs
@@ -1147,7 +1147,7 @@ def test_every_dated_row_reaches_review_whatever_its_activity_text(qapp, conn, t
 
 def test_accept_on_an_already_accepted_row_does_nothing(qapp, conn, tmp_path):
     """An actioned row is history, not work. Accept did not check, so pressing it
-    on a greyed row committed the same import row a second time -- a duplicate
+    on a grayed row committed the same import row a second time -- a duplicate
     the register had no way to explain. discard_index has always guarded this."""
     from PyQt5.QtWidgets import QMessageBox
     from mammon.ui.widgets import MainWindow
@@ -1978,7 +1978,7 @@ def test_actioned_review_row_points_at_what_it_produced(qapp, conn, tmp_path):
         ).fetchone()[0]
 
         actioned = [i for i, s in enumerate(panel._states) if s.done]
-        assert actioned, "the accepted row should remain as greyed history"
+        assert actioned, "the accepted row should remain as grayed history"
         # Re-selecting an ALREADY-selected row emits no itemSelectionChanged, so
         # drive the handler the way a click on a different row would.
         panel.table.selectRow(actioned[0])
