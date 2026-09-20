@@ -75,6 +75,13 @@ LIGHT = {
     "cell_text": None,           # explicit table item-text color; None = keep the
                                  # widget palette default (light look unchanged)
     "branch_indicator": "#5b636e",  # tree expand/collapse arrows; 6.1:1 on white
+    # A warm accent for the one figure on a page that is READ rather than
+    # scanned -- currently the investment dashboard's center block. It is the
+    # theme's answer to "make it yellow": literal yellow is 1.07:1 on white and
+    # therefore invisible, so light mode gets the same hue taken down to a deep
+    # amber at 5.9:1 and dark mode gets the bright one at 10.8:1. Same family in
+    # both themes, legible in both.
+    "highlight": "#8a5a00",
     "btn_bg": "#f2f4f7",
     "btn_border": "#c7cdd6",
     "btn_hover": "#e7ebf1",
@@ -113,6 +120,7 @@ DARK = {
     "cell_text": "#e3e5e8",      # dark: table item text must be explicitly light,
                                  # or delegates fall back to a near-black palette
                                  # default and the register text is illegible
+    "highlight": "#ffc94d",      # see LIGHT["highlight"]; 10.8:1 on #1e1f22
     "branch_indicator": "#c5cad2",  # tree expand/collapse arrows: the platform
                                     # style draws these near-black, so on the
                                     # dark surfaces they vanished (reported).

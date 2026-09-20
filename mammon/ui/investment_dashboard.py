@@ -196,6 +196,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -358,11 +359,30 @@ EMPTY_FONT_SIZE = 10
 #: to be read at the same distance.
 LEGEND_FONT_SIZE = 10
 
-#: How much bigger the center line's type is than the page's (reported: "the
-#: centerline text needs a larger font too"). It is the one number on the page
-#: that is read rather than scanned, and it no longer shares a rectangle with
-#: the plots, so it can afford the size.
-CENTER_FONT_SCALE = 1.25
+#: How much bigger the center block's NUMBERS are than the page's type
+#: (reported: "the centerline text needs a larger font too", then "increase the
+#: font a bit"). They are the figures on the page that are read rather than
+#: scanned, and they no longer share a rectangle with the plots, so they can
+#: afford the size.
+CENTER_FONT_SCALE = 1.45
+
+#: The column headings sit at the page's own size -- deliberately SMALLER than
+#: the numbers under them. A stat block reads fastest when the label recedes and
+#: the figure carries the weight; matching their sizes makes the eye stop twice.
+CENTER_HEADING_SCALE = 1.0
+
+#: How far above the hole's midline the block sits, in lines of its own numbers
+#: (reported: "raise the centerline text by about one line"). Expressed in lines
+#: rather than pixels so it keeps its relationship to the type when the font
+#: scale changes. The strip reserved for it in the hole moves by the same amount
+#: -- see :meth:`InvestmentDashboardPage._sync_center_gap` -- or the top plot
+#: would run under the raised text.
+CENTER_RAISE_LINES = 1.0
+
+#: Horizontal gap between the block's columns. Wide enough that "1-yr gain" and
+#: "1-yr dividends" read as separate columns without a rule between them, which
+#: is what carries the separation now that there are no lines.
+CENTER_COLUMN_SPACING = 22
 
 #: The hole is WIDER than the inscribed square (reported: "both plots have room
 #: to expand to the left"). Widening it is bounded by the inner circle, not by
@@ -913,7 +933,21 @@ class RingArea(QWidget):
         widget = self.center
         hint = widget.sizeHint().height() if widget is not None else 0
         rect_h = max(1, hint)
-        return ((w - rect_w) // 2, (h - rect_h) // 2, rect_w, rect_h)
+        return ((w - rect_w) // 2, (h - rect_h) // 2 - self.center_lift(),
+                rect_w, rect_h)
+
+    def center_lift(self) -> int:
+        """Pixels the center block sits ABOVE the midline (reported: "raise the
+        centerline text by about one line").
+
+        One number, read by both things that have to agree about it: this
+        widget, which places the overlay, and the page, which reserves the blank
+        strip under it in the hole's layout. Lifting the overlay alone would
+        slide the text off its reserved strip and under the top plot."""
+        widget = self.center
+        if widget is None:
+            return 0
+        return int(round(CENTER_RAISE_LINES * widget.line_height()))
 
     def gear_rect(self):
         """``(x, y, w, h)`` for the account gear: top of the page, immediately
@@ -1393,16 +1427,37 @@ class CenterLine:
     annualized: dict = field(default_factory=dict)   # {years: Decimal percent}
     subject: str = "All investments"
 
-    def parts(self) -> list:
-        out = [f"Total {fmt_money(self.total)}"]
+    def columns(self) -> list:
+        """``[(heading, value), ...]`` -- one column of the center block.
+
+        THE source of truth for what the block says. It is rendered as a
+        two-row table (headings above, figures below, no rules), and
+        :meth:`parts` and :meth:`text` are flattened views of the same pairs, so
+        a column added here appears in every one of them at once.
+
+        An absent horizon contributes no column at all, which is how a scope
+        without enough history renders as nothing rather than as a dash or a
+        zero."""
+        out = [("Total", fmt_money(self.total))]
         if self.year_gain is not None:
-            out.append(f"1y gain {fmt_signed(self.year_gain)}")
-        out.append(f"Dividends {fmt_money(self.dividends)}")
+            out.append(("1-yr gain", fmt_signed(self.year_gain)))
+        out.append(("1-yr dividends", fmt_money(self.dividends)))
         for years in ANNUALIZED_YEARS:
             pct = self.annualized.get(years)
             if pct is not None:
-                out.append(f"{years}y {fmt_pct(pct)}")
+                # "return", not "gain": this one is an annualized RATE, and the
+                # dollar gain already has a column of its own next to it.
+                out.append((f"{years}-yr return", fmt_pct(pct)))
         return out
+
+    def headings(self) -> list:
+        return [head for head, _ in self.columns()]
+
+    def values(self) -> list:
+        return [value for _, value in self.columns()]
+
+    def parts(self) -> list:
+        return [f"{head} {value}" for head, value in self.columns()]
 
     def text(self) -> str:
         return "   |   ".join(self.parts())
@@ -1481,20 +1536,35 @@ def _scaled_font(font: QFont, scale: float) -> QFont:
 
 
 class CenterLineWidget(QWidget):
-    """The center line as one row of labels on the hole's horizontal midline.
+    """The center block: a two-row table in the hole -- headings above, figures
+    below, and no rules between them (reported: "make it a two-line table ...
+    with the headings ... and the numbers underneath. No lines, though").
 
-    It gets its own font, :data:`CENTER_FONT_SCALE` times the page's (reported:
-    "the centerline text needs a larger font too"). Set on the WIDGET, not on
-    each label, so :meth:`set_line` -- which throws its labels away and builds
-    new ones on every refresh -- cannot lose it."""
+    A grid, not two independently laid-out rows, because a heading and its
+    figure have to share a column edge: "1-yr dividends" is far wider than
+    "Total", and only a shared column keeps each number under its own label.
 
-    def __init__(self, line: Optional[CenterLine] = None, parent=None):
+    The rows are typed and colored differently on purpose. The headings recede
+    at the page's own size in the muted color; the figures carry
+    :data:`CENTER_FONT_SCALE` and the theme's ``highlight`` accent (reported:
+    "increase the font a bit and color it yellow or something so that it stands
+    out"). That accent is resolved from the ACTIVE palette on every rebuild, so
+    the block follows a light/dark switch instead of keeping one theme's amber
+    on the other theme's background; :meth:`restyle` is the hook the page's
+    ``changeEvent`` calls when nothing else would rebuild it.
+    """
+
+    def __init__(self, line=None, parent=None):
         super().__init__(parent)
         self._line = line or CenterLine(total=0)
-        lay = QHBoxLayout(self)
+        lay = QGridLayout(self)
         lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(10)
-        self._labels: list = []
+        # Columns breathe horizontally; the two ROWS sit tight against each
+        # other so a figure reads as belonging to the heading above it.
+        lay.setHorizontalSpacing(CENTER_COLUMN_SPACING)
+        lay.setVerticalSpacing(0)
+        self._headings = []
+        self._values = []
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # NOT Qt.WA_TransparentForMouseEvents. It was, on the theory that an
         # overlay must not steal the plots' clicks -- but what it sits on is
@@ -1506,14 +1576,52 @@ class CenterLineWidget(QWidget):
         # Leaving it hittable is what lets :meth:`RingArea._place_children`
         # prove the raise order held.
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-        self.setFont(self.scaled_font())
         self.set_line(self._line)
 
-    def scaled_font(self) -> QFont:
-        """This widget's font, enlarged by :data:`CENTER_FONT_SCALE`."""
-        return _scaled_font(self.font(), CENTER_FONT_SCALE)
+    # -- type and color -----------------------------------------------------
+    def value_font(self) -> QFont:
+        """The figures' font: the page's, enlarged and bolded."""
+        font = _scaled_font(self.font(), CENTER_FONT_SCALE)
+        font.setBold(True)
+        return font
 
-    def set_line(self, line: CenterLine) -> None:
+    def heading_font(self) -> QFont:
+        """The headings' font: the page's own size, not bold."""
+        font = _scaled_font(self.font(), CENTER_HEADING_SCALE)
+        font.setBold(False)
+        return font
+
+    def scaled_font(self) -> QFont:
+        """Back-compat name for :meth:`value_font` -- the block's type size is
+        the figures' size, which is what every caller meant by it."""
+        return self.value_font()
+
+    def accent_color(self) -> str:
+        """The figures' color, from the palette active NOW.
+
+        Resolved per rebuild rather than held as a literal: a literal tuned for
+        one background is the exact defect the two hole charts were reported
+        for (see :func:`chart_colors`)."""
+        return charts._active_palette()["highlight"]
+
+    def heading_color(self) -> str:
+        return charts._active_palette()["muted"]
+
+    def line_height(self) -> int:
+        """One line of the FIGURES -- the unit :data:`CENTER_RAISE_LINES` is in."""
+        return QFontMetrics(self.value_font()).height()
+
+    def restyle(self) -> None:
+        """Re-resolve both colors against the active palette. Cheap, idempotent,
+        and safe to call from a theme-change handler."""
+        accent, muted = self.accent_color(), self.heading_color()
+        for lab in self._values:
+            lab.setStyleSheet("color: %s;" % accent)
+        for lab in self._headings:
+            lab.setStyleSheet("color: %s;" % muted)
+
+    # -- content ------------------------------------------------------------
+    def set_line(self, line) -> None:
         self._line = line
         lay = self.layout()
         while lay.count():
@@ -1524,26 +1632,44 @@ class CenterLineWidget(QWidget):
                 # visible child sitting on top of its replacement.
                 item.widget().hide()
                 item.widget().deleteLater()
-        self._labels = []
-        lay.addStretch(1)
-        for part in line.parts():
-            lab = QLabel(part, self)
-            lab.setAlignment(Qt.AlignCenter)
-            lay.addWidget(lab)
+        for col in range(lay.columnCount()):
+            lay.setColumnStretch(col, 0)
+        self._headings = []
+        self._values = []
+        columns = line.columns()
+        # Empty stretch columns on the flanks center the block without
+        # stretching the gaps BETWEEN columns, which a stretch on the data
+        # columns would do -- and then the headings drift off their figures.
+        lay.setColumnStretch(0, 1)
+        lay.setColumnStretch(len(columns) + 1, 1)
+        value_font, heading_font = self.value_font(), self.heading_font()
+        accent, muted = self.accent_color(), self.heading_color()
+        for i, (head, value) in enumerate(columns, start=1):
+            top = QLabel(head, self)
+            top.setAlignment(Qt.AlignCenter)
+            top.setFont(heading_font)
+            top.setStyleSheet("color: %s;" % muted)
+            bottom = QLabel(value, self)
+            bottom.setAlignment(Qt.AlignCenter)
+            bottom.setFont(value_font)
+            bottom.setStyleSheet("color: %s;" % accent)
+            lay.addWidget(top, 0, i)
+            lay.addWidget(bottom, 1, i)
             # show() explicitly, for the mirror of the reason the old labels are
             # hide()n above. A child built for a parent that is ALREADY visible
             # stays hidden until the event loop gets round to showing it, and a
             # hidden widget contributes nothing to its layout's sizeHint. Every
             # caller of set_line reads that hint SYNCHRONOUSLY -- _sync_center_gap
             # reserves the strip from it and RingArea.center_rect sizes the
-            # overlay from it -- so without this the line measured 4px, its
-            # layout margins alone, and was placed as a 4px sliver. It stayed
-            # one: the hint is right again by the time the event loop runs, but
-            # nothing re-places the overlay then, so the text vanished on the
-            # first wedge click and never came back (reported).
-            lab.show()
-            self._labels.append(lab)
-        lay.addStretch(1)
+            # overlay from it -- so without this the block measured its layout
+            # margins alone and was placed as a sliver. It stayed one: the hint
+            # is right again by the time the event loop runs, but nothing
+            # re-places the overlay then, so the text vanished on the first
+            # wedge click and never came back (reported).
+            top.show()
+            bottom.show()
+            self._headings.append(top)
+            self._values.append(bottom)
 
     def line(self) -> CenterLine:
         return self._line
@@ -1551,8 +1677,17 @@ class CenterLineWidget(QWidget):
     def text(self) -> str:
         return self._line.text()
 
+    def heading_texts(self) -> list:
+        return [lab.text() for lab in self._headings]
+
+    def value_texts(self) -> list:
+        return [lab.text() for lab in self._values]
+
     def label_texts(self) -> list:
-        return [lab.text() for lab in self._labels]
+        """Each column flattened to "heading value" -- the same strings
+        :meth:`CenterLine.parts` produces, but read off the actual widgets."""
+        return [h.text() + " " + v.text()
+                for h, v in zip(self._headings, self._values)]
 
 
 class PlotHeader(QWidget):
@@ -3026,8 +3161,18 @@ class InvestmentDashboardPage(QWidget):
         self.center_gap = QWidget(hole)
         self.center_gap.setObjectName("centerGap")
         self.center_gap.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Below the gap, a second blank strip of TWICE the lift. Both charts
+        # stretch equally, so the free height splits evenly between them and the
+        # fixed pair sits in the middle: adding ``s`` below the gap moves the
+        # gap's center up by exactly ``s / 2``. That is how the reserved strip
+        # tracks RingArea.center_lift() without either of them hardcoding the
+        # other's number.
+        self.center_lift_spacer = QWidget(hole)
+        self.center_lift_spacer.setObjectName("centerLiftSpacer")
+        self.center_lift_spacer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         hole_lay.addWidget(self.history_chart, 1)
         hole_lay.addWidget(self.center_gap, 0)
+        hole_lay.addWidget(self.center_lift_spacer, 0)
         hole_lay.addWidget(self.projection_chart, 1)
         self.hole = hole
 
@@ -3060,6 +3205,10 @@ class InvestmentDashboardPage(QWidget):
         if gap is None:
             return
         gap.setFixedHeight(max(1, self.center.sizeHint().height()))
+        spacer = getattr(self, "center_lift_spacer", None)
+        if spacer is not None:
+            # Twice the lift: see the comment where the spacer is built.
+            spacer.setFixedHeight(max(0, 2 * self.ring_area.center_lift()))
 
     def _build_gear(self) -> None:
         """The accounts gear, at the top just left of the Performance Report
@@ -3277,6 +3426,12 @@ class InvestmentDashboardPage(QWidget):
         if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
             for btn in getattr(self, "mode_buttons", {}).values():
                 restyle_toggle(btn)
+            # The center block's accent and heading gray come from the active
+            # palette, and nothing else would rebuild it on a theme switch --
+            # it would keep one theme's amber on the other theme's background.
+            center = getattr(self, "center", None)
+            if center is not None:
+                center.restyle()
 
     # -- state --------------------------------------------------------------
     def mode(self) -> str:

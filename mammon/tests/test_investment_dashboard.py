@@ -388,20 +388,125 @@ def test_the_center_line_states_total_gain_dividends_and_annualized(page, conn):
 
     text = page.center_text()
     assert f"Total {dash.fmt_money(everything)}" in text
-    assert "1y gain " in text
-    assert "Dividends $25.00" in text
-    assert "1y " in text
+    assert "1-yr gain " in text
+    assert "1-yr dividends $25.00" in text
+    assert "1-yr return " in text
     assert page.center.label_texts() == line.parts()
+
+    # The block is a TABLE: every heading has a figure under it, and both rows
+    # come from the same columns() pairs.
+    assert page.center.heading_texts() == line.headings()
+    assert page.center.value_texts() == line.values()
+    assert len(page.center.heading_texts()) == len(page.center.value_texts())
+    assert page.center.heading_texts()[0] == "Total"
+    assert page.center.value_texts()[0] == dash.fmt_money(everything)
 
 
 def test_a_horizon_without_history_shows_nothing_not_a_dash_or_a_zero():
     line = dash.CenterLine(total=1_000_00, year_gain=50_00, dividends=10_00,
                            annualized={1: Decimal("8.2")})
     text = line.text()
-    assert "1y 8.2%" in text
-    for absent in ("3y", "5y", "10y"):
+    assert "1-yr return 8.2%" in text
+    for absent in ("3-yr return", "5-yr return", "10-yr return"):
         assert absent not in text
     assert "--" not in text and "0.0%" not in text
+    # A horizon with no history contributes no COLUMN either, so the table has
+    # no empty cell to explain.
+    assert [h for h in line.headings() if h.endswith("return")] == ["1-yr return"]
+
+
+def test_the_block_is_two_rows_with_no_rules_between_them(page, qapp):
+    """Reported: "make it a two-line table ... with the headings ... and the
+    numbers underneath. No lines, though"."""
+    from PyQt5.QtWidgets import QFrame, QGridLayout, QLabel
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    lay = page.center.layout()
+    assert isinstance(lay, QGridLayout), "columns must share edges with their headings"
+    assert lay.rowCount() == 2
+
+    # Every heading sits in row 0 directly above its figure in row 1.
+    for i, (head, value) in enumerate(page.center.line().columns(), start=1):
+        assert lay.itemAtPosition(0, i).widget().text() == head
+        assert lay.itemAtPosition(1, i).widget().text() == value
+
+    # No rules: nothing in the block is a frame, and no label draws a border.
+    for child in page.center.findChildren(QFrame):
+        assert not isinstance(child, QLabel) or child.frameShape() == QFrame.NoFrame
+    assert "border" not in page.center.styleSheet().lower()
+    page.hide()
+
+
+def test_the_figures_are_bigger_than_their_headings_and_carry_the_accent(page, qapp):
+    """Reported: "increase the font a bit and color it yellow or something so
+    that it stands out". The figures carry the size and the accent; the headings
+    recede, or nothing stands out against anything."""
+    from mammon.ui import charts
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    accent = charts._active_palette()["highlight"]
+    muted = charts._active_palette()["muted"]
+    for lab in page.center._values:
+        assert accent.lower() in lab.styleSheet().lower()
+        assert lab.font().bold()
+    for lab in page.center._headings:
+        assert muted.lower() in lab.styleSheet().lower()
+        assert not lab.font().bold()
+    heading_px = page.center._headings[0].font().pointSizeF()
+    value_px = page.center._values[0].font().pointSizeF()
+    assert value_px > heading_px
+    page.hide()
+
+
+def test_the_accent_is_legible_in_both_themes_not_a_literal_yellow():
+    """Pure yellow is 1.07:1 on white -- invisible. The accent is a palette
+    entry precisely so each theme gets a version that survives its own
+    background, and both must clear WCAG AA for normal text (4.5:1)."""
+    from mammon.ui import style
+
+    def luminance(hexstr):
+        hexstr = hexstr.lstrip("#")
+        chan = [int(hexstr[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        chan = [(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+                for c in chan]
+        return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+    def contrast(a, b):
+        la, lb = luminance(a), luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+    for palette in (style.LIGHT, style.DARK):
+        assert contrast(palette["highlight"], palette["window"]) >= 4.5
+
+
+def test_the_block_sits_a_line_above_the_midline_clear_of_both_plots(page, qapp):
+    """Reported: "raise the centerline text by about one line".
+
+    The strip reserved for it in the hole has to rise by the same amount. If
+    only the overlay moved, the text would slide off its blank strip and land on
+    the bottom of the top plot -- which is the defect the strip exists for.
+    """
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    area = page.ring_area
+    lift = area.center_lift()
+    assert lift > 0
+    # About one line of the figures, which is the unit the constant is in.
+    assert lift == pytest.approx(page.center.line_height(), abs=2)
+
+    block = page.center.geometry()
+    assert block.center().y() == pytest.approx(area.height() // 2 - lift, abs=2)
+
+    # The blank strip in the hole moved with it: the block clears both canvases.
+    from PyQt5.QtCore import QPoint, QRect
+    for chart in (page.history_chart, page.projection_chart):
+        origin = chart.canvas.mapTo(area, QPoint(0, 0))
+        canvas = QRect(origin, chart.canvas.size())
+        assert not block.intersects(canvas), "the block must not land on a plot"
+    page.hide()
 
 
 def test_filtering_to_an_account_recomputes_the_center_line(page, conn, seeded):
@@ -441,7 +546,8 @@ def test_set_line_leaves_a_usable_size_hint_immediately(page, qapp):
     qapp.processEvents()
     settled = page.center.sizeHint().height()
     page.center.set_line(dash.center_line(page.conn, page.as_of))
-    assert [lab.isHidden() for lab in page.center._labels] == [False] * 4
+    labels = page.center._headings + page.center._values
+    assert [lab.isHidden() for lab in labels] == [False] * len(labels)
     assert page.center.sizeHint().height() == settled
     page.hide()
 
