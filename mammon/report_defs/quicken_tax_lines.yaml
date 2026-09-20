@@ -1,0 +1,586 @@
+# Quicken tax line items, as a Mammon report definition.
+#
+# WHERE THE NAMES COME FROM
+#   * The 44 lines carrying an `export.txf_refnum` were sourced from Quicken
+#     itself: the distinct `R` values appearing in the `!Type:Cat` records of
+#     Quicken's own QIF exports, each resolved to its form and line
+#     description in the published TXF v042 reference-number table
+#     (taxdataexchange.org, TXF specification v042). Label text is that
+#     table's description verbatim, so a refnum and its label always agree.
+#   * The remaining 24 lines are standard Quicken Tax Link entries (Schedule
+#     C, Schedule D, Schedule SE, 1099-R, 1099-NEC and a few Form 1040 and
+#     Schedule A lines) that no `R` value covered. Their TXF reference
+#     numbers could not be established from the QIF exports or the v042
+#     table, so the `export:` block is OMITTED rather than guessed: a
+#     wrong refnum silently files a number on the wrong line. Add the block by
+#     hand once you have the number, or leave it off and read the figure from
+#     the report.
+#   * QIF category records store only the numeric `R` refnum, never a
+#     tax-line NAME, so no name here was lifted from the ledger. This file
+#     contains tax line names, labels, groups and reference numbers and
+#     nothing else -- no amounts, no accounts, no payees, no personal names.
+#
+# WHAT IT IS FOR
+#   Create Tax Report over this definition gives you every line with NO
+#   category selections; the unassigned lines are the to-do list. `year` and
+#   `default_range` only pick the default period -- the line NAMES are not
+#   year-specific, so copy this file into your own report-definitions
+#   directory and edit it there if you need a line this one got wrong.
+#
+# Signs follow Mammon's convention for a tax report: +1 on a line that
+# reports income or a receipt, -1 on a line that reports an expense, a
+# deduction or an amount withheld, so each line reads as a positive figure.
+
+version: 1
+id: "quicken_tax_lines"
+family: "quicken-tax-lines"
+title: "Quicken tax line items"
+kind: "tax"
+year: 2025
+default_range:
+  kind: "calendar_year"
+  year: 2025
+
+items:
+
+  # ---- W-2 ---------------------------------------------------------------
+  - name: "W-2:Salary"
+    label: "Salary"
+    group: "W-2"
+    kind: "SOSC"
+    sign: 1
+    seq: 10
+    export: {txf_refnum: 460, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Salary, spouse"
+    label: "Salary, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: 1
+    seq: 20
+    export: {txf_refnum: 506, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Federal withholding"
+    label: "Federal withholding"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 30
+    export: {txf_refnum: 461, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Federal withholding, spouse"
+    label: "Federal withholding, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 40
+    export: {txf_refnum: 507, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Soc Sec tax withholding"
+    label: "Soc Sec tax withholding"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 50
+    export: {txf_refnum: 462, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Soc Sec tax withhld, spouse"
+    label: "Soc Sec tax withhld, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 60
+    export: {txf_refnum: 508, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Medicare tax withholding"
+    label: "Medicare tax withholding"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 70
+    export: {txf_refnum: 480, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Medicare tax withhld, spouse"
+    label: "Medicare tax withhld, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 80
+    export: {txf_refnum: 510, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:State withholding"
+    label: "State withholding"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 90
+    export: {txf_refnum: 464, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:State withholding, spouse"
+    label: "State withholding, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 100
+    export: {txf_refnum: 511, txf_copy: 1, txf_format: 1}
+
+  - name: "W-2:Local withholding, spouse"
+    label: "Local withholding, spouse"
+    group: "W-2"
+    kind: "SOSC"
+    sign: -1
+    seq: 110
+    export: {txf_refnum: 509, txf_copy: 1, txf_format: 1}
+
+  # ---- Schedule B --------------------------------------------------------
+  - name: "Schedule B:Interest income"
+    label: "Interest income"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 200
+    export: {txf_refnum: 287, txf_copy: 1, txf_format: 3}
+
+  - name: "Schedule B:Interest inc., non-taxable"
+    label: "Interest inc., non-taxable"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 210
+    export: {txf_refnum: 489, txf_copy: 1, txf_format: 3}
+
+  - name: "Schedule B:Total dividend income"
+    label: "Total dividend income"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 220
+    export: {txf_refnum: 286, txf_copy: 1, txf_format: 3}
+
+  - name: "Schedule B:Qualified dividend"
+    label: "Qualified dividend"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 230
+    export: {txf_refnum: 683, txf_copy: 1, txf_format: 3}
+
+  - name: "Schedule B:Div inc., non-taxable"
+    label: "Div inc., non-taxable"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 240
+    export: {txf_refnum: 487, txf_copy: 1, txf_format: 3}
+
+  - name: "Schedule B:Div inc., capital gain dist"
+    label: "Div inc., capital gain dist"
+    group: "Schedule B"
+    kind: "SOSC"
+    sign: 1
+    seq: 250
+    export: {txf_refnum: 488, txf_copy: 1, txf_format: 3}
+
+  # ---- Schedule A --------------------------------------------------------
+  - name: "Schedule A:Medicine and drugs"
+    label: "Medicine and drugs"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 300
+    export: {txf_refnum: 273, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Doctors, dentists, hosp."
+    label: "Doctors, dentists, hosp."
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 310
+    export: {txf_refnum: 484, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Real estate tax"
+    label: "Real estate tax"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 320
+    export: {txf_refnum: 276, txf_copy: 1, txf_format: 1}
+
+  # TXF refnum not established -- see the header.
+  - name: "Schedule A:State and local income taxes"
+    label: "State and local income taxes"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 330
+
+  # TXF refnum not established -- see the header.
+  - name: "Schedule A:Personal property taxes"
+    label: "Personal property taxes"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 340
+
+  - name: "Schedule A:Home mortgage int. (1098)"
+    label: "Home mortgage int. (1098)"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 350
+    export: {txf_refnum: 283, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Home mortgage int. (no 1098)"
+    label: "Home mortgage int. (no 1098)"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 360
+    export: {txf_refnum: 545, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Cash charity contributions"
+    label: "Cash charity contributions"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 370
+    export: {txf_refnum: 280, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Non-cash charity contrib"
+    label: "Non-cash charity contrib"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 380
+    export: {txf_refnum: 485, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule A:Investment man. fees"
+    label: "Investment man. fees"
+    group: "Schedule A"
+    kind: "SOSC"
+    sign: -1
+    seq: 390
+    export: {txf_refnum: 282, txf_copy: 1, txf_format: 1}
+
+  # ---- Schedule C --------------------------------------------------------
+  # None of the Schedule C lines below carry a TXF refnum: see the header.
+  - name: "Schedule C:Gross receipts or sales"
+    label: "Gross receipts or sales"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: 1
+    seq: 400
+
+  - name: "Schedule C:Advertising"
+    label: "Advertising"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 410
+
+  - name: "Schedule C:Car and truck expenses"
+    label: "Car and truck expenses"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 420
+
+  - name: "Schedule C:Insurance, other than health"
+    label: "Insurance, other than health"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 430
+
+  - name: "Schedule C:Legal and professional fees"
+    label: "Legal and professional fees"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 440
+
+  - name: "Schedule C:Office expenses"
+    label: "Office expenses"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 450
+
+  - name: "Schedule C:Rent on other business property"
+    label: "Rent on other business property"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 460
+
+  - name: "Schedule C:Supplies"
+    label: "Supplies"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 470
+
+  - name: "Schedule C:Travel"
+    label: "Travel"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 480
+
+  - name: "Schedule C:Meals and entertainment"
+    label: "Meals and entertainment"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 490
+
+  - name: "Schedule C:Utilities"
+    label: "Utilities"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 500
+
+  - name: "Schedule C:Other business expenses"
+    label: "Other business expenses"
+    group: "Schedule C"
+    kind: "SOSC"
+    sign: -1
+    seq: 510
+
+  # ---- Schedule D --------------------------------------------------------
+  # Realized gain is computed from the lots, not summed from categories, so
+  # these two lines are RGAIN over the accounts the user selects. No TXF
+  # refnum: see the header.
+  - name: "Schedule D:Short-term gain/loss - security"
+    label: "Short-term gain/loss - security"
+    group: "Schedule D"
+    kind: "RGAIN"
+    sign: 1
+    seq: 600
+    options: {term: "short"}
+
+  - name: "Schedule D:Long-term gain/loss - security"
+    label: "Long-term gain/loss - security"
+    group: "Schedule D"
+    kind: "RGAIN"
+    sign: 1
+    seq: 610
+    options: {term: "long"}
+
+  # ---- Schedule E --------------------------------------------------------
+  - name: "Schedule E:Rents received"
+    label: "Rents received"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: 1
+    seq: 700
+    export: {txf_refnum: 326, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Royalties received"
+    label: "Royalties received"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: 1
+    seq: 710
+    export: {txf_refnum: 327, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Advertising"
+    label: "Advertising"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 720
+    export: {txf_refnum: 328, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Auto and travel"
+    label: "Auto and travel"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 730
+    export: {txf_refnum: 329, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Cleaning and maintenance"
+    label: "Cleaning and maintenance"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 740
+    export: {txf_refnum: 330, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Commissions"
+    label: "Commissions"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 750
+    export: {txf_refnum: 331, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Insurance"
+    label: "Insurance"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 760
+    export: {txf_refnum: 332, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Legal and professional"
+    label: "Legal and professional"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 770
+    export: {txf_refnum: 333, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Management fees"
+    label: "Management fees"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 780
+    export: {txf_refnum: 502, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Mortgage interest exp"
+    label: "Mortgage interest exp"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 790
+    export: {txf_refnum: 334, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Other interest expense"
+    label: "Other interest expense"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 800
+    export: {txf_refnum: 335, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Repairs"
+    label: "Repairs"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 810
+    export: {txf_refnum: 336, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Supplies"
+    label: "Supplies"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 820
+    export: {txf_refnum: 337, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Taxes"
+    label: "Taxes"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 830
+    export: {txf_refnum: 338, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Utilities"
+    label: "Utilities"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 840
+    export: {txf_refnum: 339, txf_copy: 1, txf_format: 1}
+
+  - name: "Schedule E:Other expenses"
+    label: "Other expenses"
+    group: "Schedule E"
+    kind: "SOSC"
+    sign: -1
+    seq: 850
+    export: {txf_refnum: 341, txf_copy: 1, txf_format: 3}
+
+  # ---- Schedule SE -------------------------------------------------------
+  # TXF refnum not established -- see the header.
+  - name: "Schedule SE:Net self-employment income"
+    label: "Net self-employment income"
+    group: "Schedule SE"
+    kind: "SOSC"
+    sign: 1
+    seq: 900
+
+  # ---- 1099-R ------------------------------------------------------------
+  # TXF refnums not established -- see the header.
+  - name: "1099-R:Total IRA gross distribution"
+    label: "Total IRA gross distribution"
+    group: "1099-R"
+    kind: "SOSC"
+    sign: 1
+    seq: 1000
+
+  - name: "1099-R:Pensions, annuities, gross"
+    label: "Pensions, annuities, gross"
+    group: "1099-R"
+    kind: "SOSC"
+    sign: 1
+    seq: 1010
+
+  - name: "1099-R:IRA federal tax withheld"
+    label: "IRA federal tax withheld"
+    group: "1099-R"
+    kind: "SOSC"
+    sign: -1
+    seq: 1020
+
+  # ---- 1099-NEC ----------------------------------------------------------
+  # TXF refnum not established -- see the header.
+  - name: "1099-NEC:Nonemployee compensation"
+    label: "Nonemployee compensation"
+    group: "1099-NEC"
+    kind: "SOSC"
+    sign: 1
+    seq: 1100
+
+  # ---- Form 1040 and Form 4952 -------------------------------------------
+  - name: "Form 1040:IRA contribution spouse"
+    label: "IRA contribution spouse"
+    group: "Form 1040"
+    kind: "SOSC"
+    sign: -1
+    seq: 1200
+    export: {txf_refnum: 481, txf_copy: 1, txf_format: 1}
+
+  - name: "Form 1040:Student loan interest"
+    label: "Student loan interest"
+    group: "Form 1040"
+    kind: "SOSC"
+    sign: -1
+    seq: 1210
+    export: {txf_refnum: 636, txf_copy: 1, txf_format: 1}
+
+  # TXF refnums not established -- see the header.
+  - name: "Form 1040:Federal estimated tax, qrtrly"
+    label: "Federal estimated tax, qrtrly"
+    group: "Form 1040"
+    kind: "SOSC"
+    sign: -1
+    seq: 1220
+
+  - name: "Form 1040:Alimony received"
+    label: "Alimony received"
+    group: "Form 1040"
+    kind: "SOSC"
+    sign: 1
+    seq: 1230
+
+  - name: "Form 1040:Social Security income, self"
+    label: "Social Security income, self"
+    group: "Form 1040"
+    kind: "SOSC"
+    sign: 1
+    seq: 1240
+
+  - name: "Form 4952:Investment interest expense"
+    label: "Investment interest expense"
+    group: "Form 4952"
+    kind: "SOSC"
+    sign: -1
+    seq: 1300
+    export: {txf_refnum: 426, txf_copy: 1, txf_format: 1}

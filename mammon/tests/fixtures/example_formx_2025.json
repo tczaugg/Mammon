@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "id": "example-formx-2025",
+  "family": "example-formx",
+  "title": "Example Form X, year 2025 (synthetic)",
+  "kind": "tax",
+  "year": 2025,
+  "default_range": { "kind": "calendar_year", "year": 2025 },
+  "items": [
+    {
+      "name": "FX:line 1",
+      "label": "Wages and salaries",
+      "kind": "SOSC",
+      "sign": 1,
+      "group": "Income",
+      "seq": 10,
+      "export": { "txf_refnum": 9001, "txf_copy": 1, "txf_format": 1 }
+    },
+    {
+      "name": "FX:line 6b",
+      "label": "Taxable interest",
+      "kind": "SOSC",
+      "sign": 1,
+      "group": "Income",
+      "seq": 60,
+      "tag_enabled": true,
+      "export": { "txf_refnum": 9006, "txf_copy": 1, "txf_format": 1 }
+    },
+    {
+      "name": "FX:line 9",
+      "label": "Gifts to charity",
+      "kind": "SOSC",
+      "sign": -1,
+      "group": "Deductions",
+      "seq": 90,
+      "export": { "txf_refnum": 9009, "txf_copy": 1, "txf_format": 1 }
+    },
+    {
+      "name": "FX:line 11",
+      "label": "Real estate taxes paid",
+      "kind": "SOSC",
+      "sign": -1,
+      "group": "Deductions",
+      "seq": 110,
+      "export": { "txf_refnum": 9011, "txf_copy": 1, "txf_format": 1 }
+    },
+    {
+      "name": "FX:line 20",
+      "label": "Year-end balance of reported accounts",
+      "kind": "EDAB",
+      "sign": 1,
+      "group": "Disclosures",
+      "seq": 200
+    }
+  ]
+}
