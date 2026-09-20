@@ -861,7 +861,7 @@ def _mouse(bar, kind, y, *, buttons=None):
 
 
 def _y_for(bar, fraction):
-    """The y a handle centerd at ``fraction`` of the ladder sits at."""
+    """The y a handle centered at ``fraction`` of the ladder sits at."""
     return bar.HANDLE_HEIGHT / 2.0 + (1.0 - fraction) * (bar.height()
                                                          - bar.HANDLE_HEIGHT)
 
@@ -1708,7 +1708,7 @@ def test_the_band_is_right_aligned_to_the_rings_left_tangent(page, qapp):
     of the ring (before it shrunk)", then "the arrow and thermometer need a
     spacer between them and the ring, maybe 50 pixels" -- so the band's right
     edge is ``ring center x - R_outer - BAND_RING_GAP``, with the blocks still
-    centerd on their plots."""
+    centered on their plots."""
     from PyQt5.QtCore import QPoint, Qt
     assert dash.BAND_RING_GAP == 50
     for width, height in ((1200, 800), (1000, 700)):

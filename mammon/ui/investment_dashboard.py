@@ -397,10 +397,10 @@ HOLE_WIDTH_SCALE = 1.10
 
 #: A SECOND widening, asked for as "stretch both plots by 10% of their width to
 #: the left": the left edge moves out by this fraction of the hole's width and
-#: the right edge stays where it was, so the hole is no longer centerd in the
+#: the right edge stays where it was, so the hole is no longer centered in the
 #: circle.
 #:
-#: This one cannot obey ``a^2 + b^2 <= r_inner^2`` and stay useful. A centerd
+#: This one cannot obey ``a^2 + b^2 <= r_inner^2`` and stay useful. A centered
 #: rect is the TALLEST rect of a given width that fits a circle, so buying the
 #: extra width entirely on the left is the expensive way to buy it: at the
 #: current scale, holding the inner circle would cost 43% of the plots' height.
@@ -612,7 +612,7 @@ def ring_outer_radius(width: int, height: int) -> float:
     what the user saw: "every time I switch from Accounts to Securities, the
     radius of the ring shrinks."
 
-    The axes box is square (``adjustable="box"``) and centerd, so the radius is
+    The axes box is square (``adjustable="box"``) and centered, so the radius is
     half the SHORT side, scaled down by :data:`RING_VIEW_LIMIT` because the data
     range reserves room for an exploded wedge."""
     return min(width, height) / 2.0 / RING_VIEW_LIMIT
@@ -730,7 +730,7 @@ class RingCanvas(charts.SlicesPieCanvas):
           ``set_aspect("equal", adjustable="datalim")``: it keeps the circle
           round by WIDENING the data range, which shrinks the drawn radius on a
           non-square canvas and compounds with every redraw. ``adjustable="box"``
-          keeps the data range fixed and shrinks the AXES to a centerd square
+          keeps the data range fixed and shrinks the AXES to a centered square
           instead, so the radius is exactly :func:`ring_outer_radius` of the
           widget's rect in both modes and after any number of renders."""
         fig = self.figure
@@ -897,7 +897,7 @@ class RingArea(QWidget):
         # b = sqrt(r^2 - a^2); max(0.0, ...) only guards float dust at a == r.
         half_h = math.sqrt(max(0.0, r_inner * r_inner - half_w * half_w))
         # Round each side to whole pixels FIRST, then center that integer rect:
-        # centring the float and truncating afterwards loses a pixel off one
+        # centering the float and truncating afterwards loses a pixel off one
         # side and leaves the hole visibly off-center inside the donut.
         rect_w = int(2.0 * half_w)
         rect_h = int(2.0 * half_h)
@@ -924,7 +924,7 @@ class RingArea(QWidget):
         Reported: the center line "needs its own rectangle on top of the plot
         rectangle so it can extend the full width of the circle". So it spans
         the inner circle's full width -- ``2 * r_inner``, wider than any hole
-        rect can be -- centerd on the hole's vertical midline, and it is a child
+        rect can be -- centered on the hole's vertical midline, and it is a child
         of THIS widget rather than a row in the hole's layout, which is what
         stops the hole's width from clipping it."""
         w, h = self.width(), self.height()
@@ -1041,7 +1041,7 @@ class RingArea(QWidget):
     def selector_rects(self) -> dict:
         """``{slot: (x, y, w, h)}`` for the selectors, OUTSIDE the hole rect.
 
-        Horizontally centerd on the hole; vertically in the gap the hole rect
+        Horizontally centered on the hole; vertically in the gap the hole rect
         leaves inside the inner circle, clamped to this widget so a short page
         cannot push one off the top.
 
@@ -2834,7 +2834,7 @@ class CornerButton(QPushButton):
         """Two gains of the same size, one with a big bite taken out of it and
         one with a small one: the short-term lot and the long-term lot the
         Capital Gains report exists to tell apart."""
-        # Two bars, kept near each other and centerd: pushed out to the box's
+        # Two bars, kept near each other and centered: pushed out to the box's
         # edges they read as two unrelated figures instead of one comparison,
         # which is the entire point of the glyph.
         bar_w = rect.width() * 0.30
@@ -3093,7 +3093,7 @@ class InvestmentDashboardPage(QWidget):
         # here made the arrows, the mode buttons, What If and the thermometer
         # unclickable. Nothing sits under the band that needs its clicks.
 
-        # Top: the arrows, centerd on the value-history chart.
+        # Top: the arrows, centered on the value-history chart.
         self.arrow_box = QWidget(band)
         self.arrow_box.setObjectName("arrowBand")
         self.arrow_layout = QVBoxLayout(self.arrow_box)
@@ -3127,7 +3127,7 @@ class InvestmentDashboardPage(QWidget):
         self.what_if_bar.toggled.connect(self._on_what_if_toggled)
         self.what_if_bar.resetRequested.connect(self.reset_what_if)
 
-        # Bottom: the thermometer, centerd on the projection fan.
+        # Bottom: the thermometer, centered on the projection fan.
         self.thermometer = Thermometer(band)
         self.thermometer.riskChanged.connect(self._on_risk_changed)
 
