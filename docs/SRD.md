@@ -5568,6 +5568,20 @@ recording (kind="user" task) with the full target_url / task_description / goals
 spec. Even "direct download" institutions still get a webSlinger script (for
 option 1) so downloading is one-click/automatic from Mammon.
 
+A SCRAPE script's `output_data` SHAPE is not a contract. The script is generated
+from a recorded demonstration, so the generator picks how to organize the rows
+and re-recording the same institution can change it: America First moved from
+`{"Checking": {"transactions": [...]}}` to
+`{"accounts": [{"accountName": "Checking", "transactions": [...]}]}` on
+2026-09-19, and a reader that recursed only through dict values found no records,
+reported "nothing returned", and left 8 transactions unimported. Mammon therefore
+reads the rows by the KEY they sit under (`transactions`/`records`/...), searched
+at EVERY depth through both dicts and the dicts inside lists, rather than by
+position. Where no such key is used, the fallback still gathers arrays that hold
+transaction-SHAPED dicts, or wrappers around them, so a per-bank array name keeps
+working while a lookup table beside the rows (America First's `subAccountList`)
+is rejected instead of becoming blank review rows.
+
 Runtime dependency: this makes webSlinger a required companion for downloads.
 Accepted by the user -- webSlinger has a $2/month execute-only tier that runs
 already-recorded scripts, which is the intended cost for Mammon users after their
