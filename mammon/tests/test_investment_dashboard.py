@@ -829,6 +829,118 @@ def test_eliding_does_not_feed_back_into_the_headers_width(page, qapp):
     page.hide()
 
 
+def test_the_corner_tiles_are_buttons_not_panels(page, qapp):
+    """Reported: "shrink the size of the 4 corner tiles so that they look more
+    like buttons than something that is actually trying to convey information.
+    Maybe add a border around them and round the corners a bit more"."""
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    area = page.ring_area
+    rects = area.corner_rects()
+    assert dash.CORNER_BOX_SCALE < 1.0
+    assert dash.CORNER_RADIUS >= 10, "rounder than the platform button"
+    assert dash.CORNER_BORDER >= 1
+
+    # Inset from the page's corner rather than bolted to it.
+    x, y, w, h = rects["cornerTopLeft"]
+    assert (x, y) == (dash.CORNER_INSET, dash.CORNER_INSET)
+    rx, ry, rw, rh = rects["cornerBottomRight"]
+    assert rx + rw == area.width() - dash.CORNER_INSET
+    assert ry + rh == area.height() - dash.CORNER_INSET
+
+    # All four the same size, and each smaller than the offcut it sits in.
+    sizes = {(r[2], r[3]) for r in rects.values()}
+    assert len(sizes) == 1
+    import math
+    radius = area.outer_radius()
+    side = radius * (1.0 - 1.0 / math.sqrt(2.0))
+    offcut_w = int(side + (area.width() - 2.0 * radius) / 2.0)
+    assert w < offcut_w
+
+    # The caption still fits at every tile's size -- shrinking the box must not
+    # clip a title, only step it down a size.
+    for name, btn in area.corners.items():
+        inner_w = btn.width() - 2 * dash.CORNER_PAD
+        inner_h = btn.height() - 2 * dash.CORNER_PAD
+        cap = max(1, int(inner_h * dash.CORNER_TITLE_MAX_FRACTION))
+        _font, height = btn._title_font(inner_w, cap)
+        assert height <= cap, f"{name}'s caption does not fit its tile"
+    page.hide()
+
+
+def test_the_account_scope_is_remembered_for_this_ledger(conn, seeded, qapp,
+                                                         tmp_path):
+    """Reported: "can we remember the account customization so that I don't
+    have to keep excluding the same accounts every time?" """
+    from PyQt5.QtCore import QSettings
+    from mammon.ui import prefs
+    store = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    path = tmp_path / "ledger.db"
+
+    assert prefs.dashboard_account_scope(path, store) is None      # never set
+    prefs.set_dashboard_account_scope(path, [seeded["ira"]], store)
+    assert prefs.dashboard_account_scope(path, store) == [seeded["ira"]]
+
+    # A DIFFERENT ledger must not inherit it: the ids mean nothing there.
+    assert prefs.dashboard_account_scope(tmp_path / "other.db", store) is None
+
+    # Forgetting restores "every investment account", which is not the same as
+    # an empty list (the user having unticked everything).
+    prefs.set_dashboard_account_scope(path, [], store)
+    assert prefs.dashboard_account_scope(path, store) == []
+    prefs.set_dashboard_account_scope(path, None, store)
+    assert prefs.dashboard_account_scope(path, store) is None
+
+
+def test_the_page_opens_on_the_remembered_scope(conn, seeded, qapp, monkeypatch,
+                                                tmp_path):
+    """The saved scope has to reach the PAGE at construction, not merely tick
+    the gear's checkboxes -- otherwise the first render is still everything and
+    the user re-applies the same exclusion they saved last time."""
+    from PyQt5.QtCore import QSettings
+    from mammon.ui import prefs
+    store = QSettings(str(tmp_path / "s2.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(prefs, "_settings", lambda settings=None: store)
+
+    page = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    try:
+        assert page.account_scope() is None          # nothing remembered yet
+        prefs.set_dashboard_account_scope(page._db_path(), [seeded["ira"]])
+    finally:
+        page.deleteLater()
+
+    reopened = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    try:
+        assert reopened.account_scope() == [seeded["ira"]]
+        assert reopened.center.line().total == investments.account_valuation(
+            conn, seeded["ira"], AS_OF).total
+    finally:
+        reopened.deleteLater()
+
+
+def test_a_remembered_account_that_is_gone_is_dropped(conn, seeded, qapp,
+                                                      monkeypatch, tmp_path):
+    """An id saved last month may not be an investment account today. The page
+    filters the remembered list the same way set_account_scope does, rather
+    than trusting it."""
+    from PyQt5.QtCore import QSettings
+    from mammon.ui import prefs
+    store = QSettings(str(tmp_path / "s3.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(prefs, "_settings", lambda settings=None: store)
+
+    page = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    db_path = page._db_path()
+    page.deleteLater()
+    prefs.set_dashboard_account_scope(db_path, [seeded["ira"], 999_999])
+
+    reopened = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    try:
+        assert reopened.account_scope() == [seeded["ira"]]
+    finally:
+        reopened.deleteLater()
+
+
 def test_an_unknown_period_is_refused(page):
     with pytest.raises(ValueError):
         page.history_chart.set_years(7)

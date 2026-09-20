@@ -214,7 +214,7 @@ from PyQt5.QtWidgets import (
 # (a crypto wallet is not valued by the brokerage engine). Importing the
 # brokerage engine directly is how the accounts ring lost crypto wallets.
 from mammon import forecast, ledger, portfolio
-from mammon.ui import charts, style
+from mammon.ui import charts, prefs, style
 from mammon.ui.models import fmt_date
 
 # --- the shape of the page, as constants so the tests can state them ---------
@@ -263,6 +263,26 @@ TITLE_GAP = 12
 #: offset by this -- the alignment rule is unchanged, the gap is new.
 BAND_RING_GAP = 50
 #: Smallest corner overlay worth reserving, in px.
+#: Reported: "shrink the size of the 4 corner tiles so that they look more like
+#: buttons than something that is actually trying to convey information."
+#:
+#: The box used to be the WHOLE corner offcut of the ring's bounding square,
+#: which on a wide page is a large panel -- and a large panel reads as content.
+#: These are launchers: their job is to be clicked, so they take this share of
+#: that offcut and leave the rest as air. The title keeps its own step-down
+#: search, so a smaller box means a smaller caption rather than a clipped one,
+#: and the glyph drops out on its own below CORNER_ART_MIN.
+CORNER_BOX_SCALE = 0.62
+#: Inset from the page's outer corner, so a tile reads as sitting ON the page
+#: rather than as a panel bolted to its edge.
+CORNER_INSET = 8
+#: Corner radius of a tile (reported: "add a border around them and round the
+#: corners a bit more"). Well above the platform button's 2-3px, which is what
+#: makes the set read as one family of buttons at a glance.
+CORNER_RADIUS = 12
+#: Border width of a tile. One crisp pixel from the palette's button border, in
+#: place of the platform bevel, which at this size looked like a sunken panel.
+CORNER_BORDER = 1
 CORNER_MIN_SIZE = 24
 #: How a corner launcher divides itself up. All four share these, which is the
 #: whole point: the set has to read as one family -- same box, same margin, the
@@ -1008,11 +1028,17 @@ class RingArea(QWidget):
         box_h = max(CORNER_MIN_SIZE, int(side + (h - 2.0 * radius) / 2.0))
         box_w = min(box_w, max(1, w // 2))
         box_h = min(box_h, max(1, h // 2))
+        # Take a SHARE of the offcut and inset it from the page edge, so the
+        # tile is a button sitting in the corner rather than a panel filling it.
+        box_w = max(CORNER_MIN_SIZE, int(box_w * CORNER_BOX_SCALE))
+        box_h = max(CORNER_MIN_SIZE, int(box_h * CORNER_BOX_SCALE))
+        pad = CORNER_INSET
+        right, bottom = w - box_w - pad, h - box_h - pad
         return {
-            "cornerTopLeft": (0, 0, box_w, box_h),
-            "cornerTopRight": (w - box_w, 0, box_w, box_h),
-            "cornerBottomLeft": (0, h - box_h, box_w, box_h),
-            "cornerBottomRight": (w - box_w, h - box_h, box_w, box_h),
+            "cornerTopLeft": (pad, pad, box_w, box_h),
+            "cornerTopRight": (right, pad, box_w, box_h),
+            "cornerBottomLeft": (pad, bottom, box_w, box_h),
+            "cornerBottomRight": (right, bottom, box_w, box_h),
         }
 
     def set_corners(self, corners: dict) -> None:
@@ -2845,7 +2871,7 @@ class CornerButton(QPushButton):
         opt.state |= (QStyle.State_Sunken if self.isDown()
                       else QStyle.State_Raised)
         p = QStylePainter(self)
-        p.drawControl(QStyle.CE_PushButtonBevel, opt)
+        self._paint_tile(p)
 
         inner = self.rect().adjusted(CORNER_PAD, CORNER_PAD,
                                      -CORNER_PAD, -CORNER_PAD)
@@ -2868,6 +2894,31 @@ class CornerButton(QPushButton):
         p.save()
         p.setRenderHint(QPainter.Antialiasing, True)
         painter(p, QRectF(art), col)
+        p.restore()
+
+    def _paint_tile(self, p) -> None:
+        """The tile's own rounded, bordered face.
+
+        Replaces ``CE_PushButtonBevel``. The platform bevel was fine when these
+        filled the corner offcut, but at button size it reads as a sunken panel
+        and its 2-3px radius is invisible; reported as "add a border around them
+        and round the corners a bit more". Fill, border and the pressed shade
+        all come from the ACTIVE palette's button names, so the tiles follow a
+        theme switch exactly as the rest of the page does.
+        """
+        pal = charts._active_palette()
+        fill = pal["btn_pressed"] if self.isDown() else (
+            pal["btn_hover"] if self.underMouse() else pal["btn_bg"])
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # Inset by half the pen so the stroke lands INSIDE the widget: a pen
+        # centered on the rect's edge is clipped to half its width and the
+        # border looks thinner on two sides than on the other two.
+        half = CORNER_BORDER / 2.0
+        box = QRectF(self.rect()).adjusted(half, half, -half, -half)
+        p.setPen(QPen(QColor(pal["btn_border"]), CORNER_BORDER))
+        p.setBrush(QBrush(QColor(fill)))
+        p.drawRoundedRect(box, CORNER_RADIUS, CORNER_RADIUS)
         p.restore()
 
     # -- the shared drawing primitives --------------------------------------
@@ -3086,6 +3137,15 @@ class InvestmentDashboardPage(QWidget):
         root.addWidget(self._build_ring_area(), 1)
         self._build_corners()
         self._build_gear()
+        # Open on the scope this ledger was last given (reported: "so that I
+        # don't have to keep excluding the same accounts every time"). Set
+        # directly rather than through set_account_scope, which exists to react
+        # to a CHANGE -- it clears the wedge filter and marks the page stale,
+        # and there is nothing yet to clear or redraw at construction.
+        remembered = prefs.dashboard_account_scope(self._db_path())
+        if remembered is not None:
+            allowed = set(_account_ids(self.conn))
+            self._account_scope = [int(a) for a in remembered if int(a) in allowed]
         # The reported stack, bottom to top: band, then the ring area (whose own
         # children are the corner launchers under the ring). The ring area is
         # masked to the union of its children, so raising it over the band costs
@@ -3313,11 +3373,17 @@ class InvestmentDashboardPage(QWidget):
         selected the investment accounts"). It listed the WHOLE roster before,
         all ticked, and :meth:`set_account_scope` then silently dropped every
         non-investment id -- checkboxes that could not do anything."""
-        from mammon.ui.report_filters import CustomizeDialog, customize_button
+        from mammon.ui.report_filters import (
+            CustomizeDialog, customize_button, set_account_picker_ids)
         start = years_before(self.as_of, MAX_HISTORY_YEARS)
         self.customize_dialog = CustomizeDialog(
             self.conn, start, self.as_of, show_accounts=True,
             account_types=ledger.INVESTMENT_LIKE_TYPES, parent=self)
+        # Pre-tick whatever this ledger was last scoped to, so the gear opens
+        # showing the user's own selection rather than everything.
+        saved = prefs.dashboard_account_scope(self._db_path())
+        if saved is not None and self.customize_dialog.filters.account_list is not None:
+            set_account_picker_ids(self.customize_dialog.filters.account_list, saved)
         self.customize_dialog.applied.connect(self._on_accounts_customized)
         self.gear = customize_button(self.customize_dialog, parent=self.ring_area)
         self.gear.setObjectName("accountGear")
@@ -3325,8 +3391,25 @@ class InvestmentDashboardPage(QWidget):
         self.ring_area.set_gear(self.gear)
 
     def _on_accounts_customized(self) -> None:
-        """Adopt the gear's account selection and redraw everything on it."""
-        self.set_account_scope(self.customize_dialog.filters.selected_account_ids())
+        """Adopt the gear's account selection, remember it, and redraw on it."""
+        chosen = self.customize_dialog.filters.selected_account_ids()
+        self.set_account_scope(chosen)
+        # Store what the page RESOLVED, not the raw picker output: set_account_scope
+        # drops non-investment ids, and saving the unfiltered list would restore a
+        # scope the page cannot honor.
+        prefs.set_dashboard_account_scope(self._db_path(), self.account_scope())
+
+    def _db_path(self) -> str:
+        """This connection's file, for keying the remembered scope. Empty for an
+        in-memory ledger, which simply shares one key -- there is no file to tell
+        two of them apart, and tests pass their own QSettings anyway."""
+        try:
+            for _seq, name, filename in self.conn.execute("PRAGMA database_list"):
+                if name == "main" and filename:
+                    return str(filename)
+        except Exception:
+            pass
+        return ""
 
     def account_scope(self) -> Optional[list]:
         """The gear's account selection, or None for "every investment

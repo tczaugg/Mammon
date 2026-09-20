@@ -160,6 +160,68 @@ def has_account_view_mode(account_id, settings: QSettings | None = None) -> bool
     return stored in ("one", "two")
 
 
+# ---- the investment dashboard's account scope -------------------------------
+# Reported: "can we remember the account customization so that I don't have to
+# keep excluding the same accounts every time?"
+#
+# Keyed by LEDGER, not stored flat like the per-account view mode above. Account
+# ids are only meaningful inside the database that issued them, so a scope saved
+# against one ledger and replayed against another would silently exclude
+# whatever happened to hold those numbers. The key is a digest of the absolute
+# path, which keeps it short and free of the "/" QSettings reads as a group
+# separator.
+_DASHBOARD_SCOPE_PREFIX = "investment_dashboard/accounts/"
+#: Marks a stored scope, so an empty list is not read back as "unset".
+_SCOPE_TAG = "ids:"
+
+
+def _ledger_key(db_path) -> str:
+    import hashlib
+    import os
+    text = os.path.normcase(os.path.abspath(str(db_path or "")))
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def dashboard_account_scope(db_path, settings: QSettings | None = None):
+    """The saved account scope for this ledger's investment dashboard, or None.
+
+    None means "never customized", which the page reads as its own None -- every
+    investment account, including any opened since. That is deliberately NOT the
+    same as an empty list, which would mean the user had unticked everything."""
+    raw = _settings(settings).value(
+        _DASHBOARD_SCOPE_PREFIX + _ledger_key(db_path), None)
+    if raw is None:
+        return None
+    # The stored form is tagged, because "" is ambiguous otherwise: an empty
+    # list (the user unticked everything) and an absent key (never customized)
+    # both serialize to it, and they mean opposite things -- no accounts versus
+    # every account. The tag is what makes the round trip faithful.
+    if isinstance(raw, str):
+        if not raw.startswith(_SCOPE_TAG):
+            return None
+        body = raw[len(_SCOPE_TAG):]
+        raw = body.split(",") if body else []
+    out = []
+    for item in raw:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def set_dashboard_account_scope(db_path, account_ids,
+                                settings: QSettings | None = None) -> None:
+    """Remember (or, with ``None``, forget) this ledger's dashboard scope."""
+    s = _settings(settings)
+    key = _DASHBOARD_SCOPE_PREFIX + _ledger_key(db_path)
+    if account_ids is None:
+        s.remove(key)
+    else:
+        s.setValue(key, _SCOPE_TAG + ",".join(str(int(a)) for a in account_ids))
+    s.sync()
+
+
 # ---- transaction-accepted sound ---------------------------------------------
 DEFAULT_SOUND = True
 
