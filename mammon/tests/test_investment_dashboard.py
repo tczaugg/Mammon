@@ -697,13 +697,136 @@ def test_max_looks_back_only_as_far_as_the_money_goes(conn, seeded):
 
 
 def test_changing_the_period_redraws_the_value_chart(page):
-    before = page.history_chart.points()
+    """Both directions, and stated relative to each other rather than to the
+    default: the default moved from 1 year to 10 (reported), and a test that
+    assumed "3 is longer than the default" silently became an assertion about
+    the fixture's data span instead of about the period control."""
+    assert page.history_chart.years() == dash.DEFAULT_HISTORY_YEARS
+    page.history_chart.set_years(1)
+    short = page.history_chart.points()
+    assert page.history_chart.years() == 1
     page.history_chart.set_years(3)
-    after = page.history_chart.points()
+    longer = page.history_chart.points()
     assert page.history_chart.years() == 3
-    assert after != before
-    assert after[0][0] < before[0][0]        # a longer look-back
-    assert after[-1] == before[-1] == (AS_OF, before[-1][1])
+    assert longer != short
+    assert longer[0][0] < short[0][0]        # 3 years reaches further back
+    assert longer[-1] == short[-1] == (AS_OF, short[-1][1])
+
+
+def test_both_plots_open_on_ten_years(page):
+    """Reported: "I'd like the default time ranges for both plots to be 10
+    years". The two used to disagree -- 1 year above, 20 below."""
+    assert dash.DEFAULT_HISTORY_YEARS == 10
+    assert dash.DEFAULT_PROJECTION_YEARS == 10
+    assert 10 in [years for years, _ in dash.HISTORY_PERIODS]
+    assert 10 in dash.PROJECTION_HORIZONS
+    assert page.history_chart.years() == 10
+    assert page.projection_chart.years() == 10
+
+
+def test_the_plot_area_grew_left_into_the_margin_not_the_ring(page):
+    """Reported: "both of the plots have some extra space to their left they
+    could grow into ... increase the width by 10% and shift the center to the
+    left by half that amount".
+
+    The HOLE could not do that -- its corners are capped at the ring's outer
+    edge and were already against the cap. The room was inside the canvas,
+    where the left margin reserved 23.6% of the width for tick labels that need
+    a third of it.
+    """
+    was_left, was_right = 0.26 / dash.HOLE_WIDTH_SCALE, 0.99
+    now_left, now_right = dash.PLOT_AXES_LEFT, dash.PLOT_AXES_RIGHT
+    assert now_right == was_right, "growth is leftward; the right edge holds"
+    assert (now_right - now_left) == pytest.approx((was_right - was_left) * 1.10,
+                                                   abs=0.002)
+    moved = ((now_left + now_right) / 2) - ((was_left + was_right) / 2)
+    assert moved == pytest.approx(-(was_right - was_left) * 0.05, abs=0.002)
+
+
+def test_the_left_margin_still_clears_an_eight_figure_portfolio(qapp):
+    """The margin is what stops "$12,500,000" running off the left edge, so the
+    10% the plot took back has to leave that label its room."""
+    from matplotlib.figure import Figure
+    canvas_px = 689
+    fig = Figure(figsize=(canvas_px / 100, 2.5), dpi=100)
+    ax = fig.add_subplot(111)
+    ax.tick_params(labelsize=dash.TICK_FONT_SIZE)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["$12,500,000", "$12,500,000"])
+    fig.canvas.draw()
+    widest = max(lab.get_window_extent().width for lab in ax.get_yticklabels())
+    assert widest < dash.PLOT_AXES_LEFT * canvas_px
+
+
+def test_the_title_keeps_a_gap_from_the_dropdown_and_elides_rather_than_clips(
+        page, qapp, conn, seeded):
+    """Reported: the title "is sometimes truncated by running into the
+    time-range dropdown". A QLabel clips, it does not elide, and a cut-off word
+    beside a control reads as a collision; an ellipsis reads as "there is more".
+    """
+    from PyQt5.QtGui import QFontMetrics
+    from mammon import ledger
+    long_id = ledger.create_account(
+        conn, "Vanguard Total Stock Market Index Admiral", "investment",
+        opening_balance=5_000_00, opening_date=OPEN_DATE)
+    page.resize(1200, 800)
+    page.show()
+    page.refresh()
+    qapp.processEvents()
+
+    for key in (None, seeded["ira"], long_id):
+        if key is None:
+            page.clear_filter()
+        else:
+            page.select_slice(key)
+        for _ in range(3):
+            qapp.processEvents()
+        header = page.history_header
+        label = header.title_label
+        gap = (header.selector.geometry().x()
+               - (label.geometry().x() + label.geometry().width()))
+        assert gap >= dash.TITLE_GAP, "the title ran into the dropdown"
+        needed = QFontMetrics(label.font()).horizontalAdvance(label.text())
+        assert needed <= label.width() + 1, "displayed text must not be clipped"
+    # The one that cannot fit is shortened with an ellipsis, not cut off.
+    assert page.history_header.displayed_title() != page.history_header.title()
+    assert page.history_header.displayed_title().rstrip().endswith("\u2026")
+    page.hide()
+
+
+def test_the_header_asks_for_the_full_title_immediately(page, qapp):
+    """The slot reads sizeHint() synchronously inside the same refresh, so a new
+    title has to reach the hint before set_title returns -- the deferred-hint
+    trap that left "Test IRA Performance" wearing the shorter title's width with
+    600px of hole free beside it."""
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    header = page.history_header
+    header.set_title("A Very Long Portfolio Name Indeed Performance")
+    from PyQt5.QtGui import QFontMetrics
+    wanted = QFontMetrics(header.title_label.font()).horizontalAdvance(header.title())
+    assert header.sizeHint().width() >= wanted + dash.TITLE_GAP
+    page.hide()
+
+
+def test_eliding_does_not_feed_back_into_the_headers_width(page, qapp):
+    """sizeHint must describe the FULL title. If it described the elided text,
+    a narrowed header would elide, report a smaller hint, be granted less, and
+    walk itself down to an ellipsis at a width where the title would have fit."""
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    header = page.history_header
+    header.set_title("Another Rather Long Account Name Performance")
+    qapp.processEvents()
+    first = header.sizeHint().width()
+    for _ in range(4):
+        header.resize(260, header.height())   # force repeated elision
+        qapp.processEvents()
+    assert header.sizeHint().width() == first
+    assert header.title() == "Another Rather Long Account Name Performance"
+    page.hide()
 
 
 def test_an_unknown_period_is_refused(page):

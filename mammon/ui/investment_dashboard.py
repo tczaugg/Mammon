@@ -250,6 +250,13 @@ RING_VIEW_LIMIT = 1.0 + SELECTED_EXPLODE
 LEFT_BAND_WIDTH = 150
 #: Vertical gap between the band's blocks, and the band's own inset.
 BAND_SPACING = 4
+
+#: Space between a plot's title and its period dropdown (reported: the title
+#: "is sometimes truncated by running into the time-range dropdown ... ensure
+#: there is a small space"). BAND_SPACING's 4px is the page's general gutter and
+#: read as a collision at the title's weight; this is the one gap that has to be
+#: legible as a gap.
+TITLE_GAP = 12
 #: Clear air between the band's right edge and the ring's left outer tangent
 #: (reported: "the arrow and thermometer need a spacer between them and the
 #: ring, maybe 50 pixels"). The band stays RIGHT-ALIGNED to the tangent, just
@@ -310,7 +317,11 @@ ANNUALIZED_YEARS = (1, 3, 5, 10)
 #: measured, not assumed -- see :func:`history_span`.
 HISTORY_PERIODS = ((1, "1 year"), (2, "2 years"), (3, "3 years"), (5, "5 years"),
                    (8, "8 years"), (10, "10 years"), (None, "Max"))
-DEFAULT_HISTORY_YEARS = 1
+#: Both plots open on 10 years (reported). The history default was 1 year, which
+#: showed a nearly flat line and made the page look like it had no history; the
+#: projection's was 20, so the two plots disagreed about what "the period" meant
+#: on first open.
+DEFAULT_HISTORY_YEARS = 10
 #: Samples drawn across the selected period. Each one is a full valuation, so
 #: this is a cost knob, not a cosmetic one: keep it small.
 HISTORY_POINTS = 13
@@ -320,7 +331,7 @@ MAX_HISTORY_YEARS = 40
 
 #: The lower chart's horizon selector (design 2.3).
 PROJECTION_HORIZONS = (5, 10, 20, 30, 40, 50)
-DEFAULT_PROJECTION_YEARS = 20
+DEFAULT_PROJECTION_YEARS = 10   # see DEFAULT_HISTORY_YEARS
 
 #: Slider units per ladder level: the ladder is continuous (design 4.5), so the
 #: integer slider is a tenth-of-a-level grid over [0, MAX_RISK_LEVEL].
@@ -413,6 +424,25 @@ HOLE_WIDTH_SCALE = 1.10
 #: canvas, so no ink of the plots reaches those corners. Where even that cap
 #: bites, the stretch is whatever fits -- this is a ceiling, not a promise.
 HOLE_LEFT_STRETCH = 0.10
+
+#: The axes box inside each hole canvas, as a fraction of the canvas width.
+#:
+#: Reported twice, and the second time is why these are literals instead of a
+#: fraction derived from :data:`HOLE_WIDTH_SCALE`: "both plots have room to
+#: expand to the left", then "increase the width by 10% and shift the center to
+#: the left by half that amount". The HOLE cannot grow left to do that -- its
+#: corners are capped at the ring's outer edge and are already against that cap,
+#: and taking the growth anyway would put them 58px out over the left band. The
+#: room the report is pointing at is INSIDE the canvas: the left margin was
+#: reserving 23.6% of it for y tick labels that do not need anything like that.
+#:
+#: Measured at 9pt (:data:`TICK_FONT_SIZE`) on a 689px canvas: "$17,500" is
+#: 52px, "$1,250,000" is 72px, "$12,500,000" is 80px -- so 0.161 (111px) clears
+#: an eight-figure portfolio with 31px to spare. The axes box therefore grows
+#: 10% wider, entirely leftward, which moves its center left by half of that --
+#: the asked-for transformation, applied where it is free.
+PLOT_AXES_LEFT = 0.161
+PLOT_AXES_RIGHT = 0.99
 
 #: The fan's bands, named by the percentiles design 5.3 actually draws. "1 sigma"
 #: would be a lie twice over: the fan is lognormal, not normal, and 5.4 requires
@@ -1712,7 +1742,8 @@ class PlotHeader(QWidget):
         lay.setSpacing(1)
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(BAND_SPACING)
+        row.setSpacing(TITLE_GAP)
+        self._title = title
         self.title_label = QLabel(title, self)
         self.title_label.setObjectName("plotTitle")
         font = QFont(self.title_label.font())
@@ -1738,10 +1769,72 @@ class PlotHeader(QWidget):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
     def set_title(self, text: str) -> None:
-        self.title_label.setText(text)
+        self._title = text
+        self._apply_title()
+        # The slot reads sizeHint() SYNCHRONOUSLY right after this, from
+        # RingArea.selector_rects. A label's new text does not reach its
+        # layout's hint until the event loop gets round to it, so without these
+        # the header keeps the width the PREVIOUS title asked for: "Test IRA
+        # Performance" needs 340px and was handed the 289px the shorter title
+        # had, with 612px of hole sitting free next to it. Same deferred-hint
+        # trap as the center block's labels.
+        self.title_label.updateGeometry()
+        self.layout().invalidate()
+        self.layout().activate()
+        self.updateGeometry()
 
     def title(self) -> str:
+        """The FULL title, not what is currently displayed -- :meth:`_apply_title`
+        may be showing an elided version of it."""
+        return self._title
+
+    def displayed_title(self) -> str:
         return self.title_label.text()
+
+    def _title_budget(self) -> int:
+        """Pixels the title may occupy: whatever is left once the dropdown and
+        the gap have taken theirs."""
+        margins = self.layout().contentsMargins()
+        selector = max(self.selector.sizeHint().width(),
+                       self.selector.width())
+        return (self.width() - margins.left() - margins.right()
+                - selector - TITLE_GAP)
+
+    def _apply_title(self) -> None:
+        """Show the title, ELIDED if it cannot fit beside the dropdown.
+
+        A QLabel clips; it does not elide. Clipping is what produced the report,
+        because a cut-off word reads as a collision with the control next to it
+        whereas an ellipsis reads as "there is more". Elision only ever applies
+        when the granted width is genuinely short -- :meth:`sizeHint` asks for
+        the FULL title, so a header with room shows all of it."""
+        budget = self._title_budget()
+        if budget <= 0 or self.width() <= 0:
+            self.title_label.setText(self._title)
+            return
+        metrics = QFontMetrics(self.title_label.font())
+        self.title_label.setText(
+            metrics.elidedText(self._title, Qt.ElideRight, budget))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_title()
+
+    def sizeHint(self):
+        """The width the FULL title wants, never the elided one.
+
+        Deliberately independent of what is on screen. Deriving it from the
+        label's current text would feed elision back into the hint: a narrowed
+        header elides, the shorter text reports a smaller hint, the slot grants
+        less, and the title walks itself down to an ellipsis at a width where it
+        would have fitted."""
+        hint = super().sizeHint()
+        margins = self.layout().contentsMargins()
+        full = QFontMetrics(self.title_label.font()).horizontalAdvance(self._title)
+        want = (full + TITLE_GAP + self.selector.sizeHint().width()
+                + margins.left() + margins.right())
+        hint.setWidth(max(hint.width(), want))
+        return hint
 
     def note(self) -> str:
         return self.note_label.text() if self.note_label is not None else ""
@@ -1929,13 +2022,7 @@ class _HoleCanvas(FigureCanvasQTAgg):
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         ax.tick_params(labelsize=TICK_FONT_SIZE, length=2, pad=1)
-        # The margins follow the type size: 8pt numbers need more room than the
-        # 6pt ones these were cut for, or "$1,250,000" runs off the left edge.
-        # The left margin comes back in as a FRACTION while the canvas itself
-        # got wider (:data:`HOLE_WIDTH_SCALE`), so the tick labels keep the same
-        # pixels they had and the plot area is what banks the extra width --
-        # reported as "both plots have room to expand to the left".
-        self.figure.subplots_adjust(left=0.26 / HOLE_WIDTH_SCALE, right=0.99,
+        self.figure.subplots_adjust(left=PLOT_AXES_LEFT, right=PLOT_AXES_RIGHT,
                                     top=0.96, bottom=0.26)
         return ax
 
