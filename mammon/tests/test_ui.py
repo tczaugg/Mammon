@@ -3345,7 +3345,7 @@ def test_holdings_button_opens_dialog(qapp, tmp_path, monkeypatch):
 
 def test_holdings_dialog_double_click_charts_price_history(qapp, conn, monkeypatch):
     # Double-clicking a priced holding opens its price-history chart; an unpriced
-    # holding shows an informational message instead of an empty chart.
+    # holding is ASKED whether to add prices instead of getting an empty chart.
     from mammon.ui import charts, widgets
     from mammon.ui.widgets import HoldingsDialog
 
@@ -3357,21 +3357,27 @@ def test_holdings_dialog_double_click_charts_price_history(qapp, conn, monkeypat
     charted = []
     monkeypatch.setattr(
         charts.ChartDialog, "exec_", lambda self: charted.append(self.canvas))
-    infos = []
+    # The no-prices branch ASKS ("Add prices now?") rather than merely informing,
+    # so the seam to patch is QMessageBox.question. This test used to patch
+    # .information, which left a real modal to exec_() -- under the offscreen
+    # platform that blocks forever and hung the entire run. Answer No so the
+    # price-history editor does not open either.
+    asked = []
     monkeypatch.setattr(
-        widgets.QMessageBox, "information",
-        staticmethod(lambda *a, **k: infos.append(a)))
+        widgets.QMessageBox, "question",
+        staticmethod(
+            lambda *a, **k: (asked.append(a), widgets.QMessageBox.No)[1]))
 
     # AAPL has a recorded price -> a real price-history canvas is charted
     dlg.show_price_history("AAPL")
     assert len(charted) == 1
     assert charted[0].figure.axes                    # a real Axes was drawn
-    assert not infos
+    assert not asked
 
-    # OBSCURE has no recorded prices -> informational message, no chart
+    # OBSCURE has no recorded prices -> the user is asked, and no chart opens
     dlg.show_price_history("OBSCURE")
     assert len(charted) == 1                          # still no new chart
-    assert infos                                      # user was told instead
+    assert asked                                      # user was asked instead
 
 
 def test_price_history_canvas_priced_and_placeholder(qapp):
@@ -3534,23 +3540,28 @@ def test_register_charts_any_security_including_sold_out(qapp, conn, monkeypatch
     charted = []
     monkeypatch.setattr(
         charts.ChartDialog, "exec_", lambda self: charted.append(self.canvas))
-    infos = []
+    # The no-prices branch ASKS ("Add prices now?") rather than merely informing,
+    # so the seam to patch is QMessageBox.question. Patching .information instead
+    # left a real modal to exec_() -- under the offscreen platform that blocks
+    # forever and wedged the whole run. Answer No so the editor does not open.
+    asked = []
     monkeypatch.setattr(
-        widgets.QMessageBox, "information",
-        staticmethod(lambda *a, **k: infos.append(a)))
+        widgets.QMessageBox, "question",
+        staticmethod(
+            lambda *a, **k: (asked.append(a), widgets.QMessageBox.No)[1]))
 
     # double-click the sold-out ZZZ's Security cell -> a real price-history chart
     zrow = _register_row_for(reg, "ZZZ")
     reg._on_cell_double_clicked(reg.model.index(zrow, M.SECURITY))
     assert len(charted) == 1
     assert charted[0].figure.axes
-    assert not infos
+    assert not asked
 
-    # a held security with no recorded prices -> info note, not an empty chart
+    # a held security with no recorded prices -> the user is asked, not an empty chart
     nrow = _register_row_for(reg, "NOPX")
     reg._on_cell_double_clicked(reg.model.index(nrow, M.SECURITY))
     assert len(charted) == 1                 # no new chart
-    assert infos                             # user was told instead
+    assert asked                             # user was asked instead
 
     # double-clicking a NON-Security column does nothing (guard)
     reg._on_cell_double_clicked(reg.model.index(zrow, M.DATE))
@@ -5096,9 +5107,11 @@ def test_tools_menu_has_accounts_and_toolbar_lacks_it(qapp, conn, accounts):
     win.close()
 
 
-def test_view_menu_has_calendar_and_investment_center_placeholder(qapp, conn, accounts):
-    """Financial Calendar moved off Tools onto View, alongside a disabled
-    Investment Center placeholder for the not-yet-built holdings landing page."""
+def test_view_menu_has_calendar_and_investment_dashboard(qapp, conn, accounts):
+    """Financial Calendar moved off Tools onto View, alongside the Investment
+    Dashboard. That second entry was a disabled "Investment Center…" placeholder
+    until the dashboard page existed; it is now a live action (its behaviour is
+    pinned by test_dashboard_menu.py)."""
     from mammon.ui.widgets import MainWindow
     win = MainWindow(conn, webslinger=_fake_client())
 
@@ -5108,9 +5121,10 @@ def test_view_menu_has_calendar_and_investment_center_placeholder(qapp, conn, ac
 
     view_labels = [a.text() for a in menu("View").actions()]
     assert "Financial Calendar" in view_labels
-    assert "Investment Center…" in view_labels
-    ic = next(a for a in menu("View").actions() if a.text() == "Investment Center…")
-    assert ic.isEnabled() is False
+    assert "Investment Dashboard…" in view_labels
+    dash = next(a for a in menu("View").actions()
+                if a.text() == "Investment Dashboard…")
+    assert dash.isEnabled() is True
 
     assert "Financial Calendar" not in [a.text() for a in menu("Tools").actions()]
     win.close()

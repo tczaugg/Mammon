@@ -48,7 +48,8 @@ class ReplacementCategoryDialog(QDialog):
     type a new ``Parent:Child`` name to create one."""
 
     def __init__(self, parent=None, *, doomed_path: str = "",
-                 choices: Optional[list[str]] = None, usage: int = 0):
+                 choices: Optional[list[str]] = None, usage: int = 0,
+                 note: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Reassign Transactions")
         form = QFormLayout()
@@ -64,8 +65,8 @@ class ReplacementCategoryDialog(QDialog):
         layout = QVBoxLayout(self)
         hint = QLabel(
             "'%s' is used by %d transaction(s). Choose an existing category or "
-            "type a new name to reassign them to before it is deleted."
-            % (doomed_path, usage))
+            "type a new name to reassign them to before it is deleted.%s"
+            % (doomed_path, usage, ("\n\n" + note) if note else ""))
         hint.setWordWrap(True)
         layout.addWidget(hint)
         layout.addLayout(form)
@@ -199,6 +200,25 @@ class CategoriesDialog(QDialog):
             self, title, text, QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No) == QMessageBox.Yes
 
+    def _report_item_note(self, category_id: int, limit: int = 6) -> str:
+        """"N report items reference this category", or "" when none do.
+
+        A merge or a delete moves transactions, and `report_item_categories`
+        rows point at a category id -- so the report quietly starts summing
+        something else, or stops summing anything, with no error anywhere. The
+        count is not a veto (the user may well be tidying up before a merge);
+        it is the one fact he cannot see from the category tree (SRD 5.9r).
+        """
+        from mammon.reports import custom
+        uses = custom.items_using_category(self.conn, category_id)
+        if not uses:
+            return ""
+        shown = ", ".join("%s / %s" % (r, i) for r, i in uses[:limit])
+        if len(uses) > limit:
+            shown += ", and %d more" % (len(uses) - limit)
+        return ("%d report item(s) reference this category: %s. Check those "
+                "reports afterwards." % (len(uses), shown))
+
     # ---- public verbs (no modals: exercised directly by tests) -----------
     def add_category(self, path: str) -> Optional[int]:
         """Get-or-create a category from a ``Parent:Child`` path; reload + signal."""
@@ -290,11 +310,13 @@ class CategoriesDialog(QDialog):
         to_id = next((c["id"] for c in others if c["path"] == target), None)
         if to_id is None:
             return
+        note = self._report_item_note(cat["id"])
         if not self._confirm(
                 "Merge Category",
                 "Merge '%s' into '%s'? Every transaction, rule and budget line "
-                "moves onto '%s' and '%s' is removed."
-                % (cat["path"], target, target, cat["path"])):
+                "moves onto '%s' and '%s' is removed.%s"
+                % (cat["path"], target, target, cat["path"],
+                   ("\n\n" + note) if note else "")):
             return
         try:
             self.merge_into(cat["id"], to_id)
@@ -306,9 +328,12 @@ class CategoriesDialog(QDialog):
         if cat is None:
             return
         usage = ledger.count_category_usage(self.conn, cat["id"])
+        note = self._report_item_note(cat["id"])
         if usage == 0:
             if not self._confirm(
-                    "Delete Category", "Delete the category '%s'?" % cat["path"]):
+                    "Delete Category",
+                    "Delete the category '%s'?%s"
+                    % (cat["path"], ("\n\n" + note) if note else "")):
                 return
             self.delete_category(cat["id"])
             return
@@ -317,7 +342,8 @@ class CategoriesDialog(QDialog):
         # transactions are never orphaned onto NULL.
         choices = [c["path"] for c in self._others(cat["id"])]
         dlg = ReplacementCategoryDialog(
-            self, doomed_path=cat["path"], choices=choices, usage=usage)
+            self, doomed_path=cat["path"], choices=choices, usage=usage,
+            note=note)
         if dlg.exec_() != QDialog.Accepted:
             return
         replacement = ledger.create_category(self.conn, dlg.value())

@@ -114,6 +114,24 @@ def cache_dir() -> Path:
     return data_dir() / "cache"
 
 
+def report_defs_dir() -> Path:
+    """The user's own report (tax-form) year definitions.
+
+    ``$MAMMON_REPORT_DEFS_DIR``, else ``data_dir()/'report_defs'``. It sits
+    under the data directory on purpose: a definition a user writes for his own
+    return names his forms and his lines, so it is his data, it follows
+    ``$MAMMON_DATA_DIR``, and it is gitignored with the rest of ``data/``.
+    Definitions SHIPPED with the app are the other search root --
+    ``install_root()/'mammon'/'report_defs'``, read-only, and the user's copy
+    wins on a name collision (see ``mammon/reports/report_defs.py``). This
+    function answers the question for both of them, because nothing outside
+    this module gets to decide where data lives."""
+    env = os.environ.get("MAMMON_REPORT_DEFS_DIR")
+    if env:
+        return Path(env)
+    return data_dir() / "report_defs"
+
+
 def default_db_path() -> Path:
     """The database file a launch falls back to when nothing else names one:
     no ``--db``, and no remembered last-used database (:mod:`mammon.last_db`)."""

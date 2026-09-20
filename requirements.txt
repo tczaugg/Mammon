@@ -9,6 +9,7 @@ matplotlib>=3.7
 yfinance>=0.2
 mcp>=1.2,<2       # python -m mammon.mcp_server; 2.0 removed mcp.server.fastmcp
 sqlcipher3>=0.6   # at-rest encryption; prebuilt wheels on Windows/Linux/macOS
+PyYAML>=6         # report definition files: .yaml/.yml line lists (SRD 5.9)
 pytest>=8         # the test suite is part of the product, not an extra
 pytest-xdist>=3   # python -m pytest mammon/tests -q -n auto (the pre-push run)
 

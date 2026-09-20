@@ -88,6 +88,16 @@ TAX_TREATMENT_LABELS = {
     "special": "Special purpose (529, HSA, held for others)",
     "": "Not set",
 }
+#: Treatments whose gains are NOT capital gains to the owner. A sale inside a
+#: 401(k), a traditional IRA, a Roth or a 529/HSA produces no Schedule D line and
+#: no holding-period clock: the tax (if any) happens on the way OUT of the
+#: wrapper, at ordinary rates or not at all, and never depends on whether the
+#: shares were held a year. User, 2026-09-19: *"401K, IRA and Roth IRA do not pay
+#: capital gains."* An account with no treatment recorded is assumed TAXABLE --
+#: the conservative default, and the only one that keeps existing files reading
+#: the way they did. Never inferred from the name: "IRA" appears in Roth IRAs too
+#: and "Trust" appears in taxable ones.
+CAPITAL_GAINS_EXEMPT_TREATMENTS = ("deferred", "roth", "special")
 #: How far back a holding's change is measured when the target has never been
 #: marked rebalanced.
 DEFAULT_SINCE_DAYS = 365
@@ -219,6 +229,17 @@ def account_treatment(acct) -> str:
     except (KeyError, IndexError, TypeError):
         return ""
     return value if value in TAX_TREATMENTS else ""
+
+
+def is_capital_gains_exempt(acct) -> bool:
+    """True when this account's gains never reach a Schedule D -- a 401(k), a
+    traditional IRA, a Roth, a 529 or an HSA (:data:`CAPITAL_GAINS_EXEMPT_TREATMENTS`).
+
+    One function so the Capital Gains report and the rebalancer agree on what a
+    retirement dollar is; a second copy keyed off the account NAME is the bug the
+    user reported ("401K, IRA and Roth IRA do not pay capital gains"). Unset
+    treatment reads as taxable, so nothing changes for a file that never said."""
+    return account_treatment(acct) in CAPITAL_GAINS_EXEMPT_TREATMENTS
 
 
 def set_account_treatment(conn, account_id: int, treatment) -> None:

@@ -46,6 +46,12 @@ dependencies = [
     # NOTE the package name: `sqlcipher3` has the full matrix; the older
     # `sqlcipher3-binary` is Linux-x86_64 only despite its name.
     "sqlcipher3>=0.6",
+    # Report definition files (mammon/reports/report_defs.py) may be written in
+    # YAML as well as JSON, and a definition Mammon SHIPS is in YAML, so the
+    # reader is on the ordinary path rather than a lucky one. The `import yaml`
+    # stays lazy and still explains itself when it fails, but that is now a
+    # damaged-install message, not a supported configuration.
+    "PyYAML>=6",
     # The test suite is part of the product, not a contributor luxury: CLAUDE.md
     # instructs every task to run test_smoke.py plus the files it changed, and
     # `-n auto` before a push. A checkout that cannot do that is broken.
@@ -73,4 +79,11 @@ mammon-mcp = "mammon.mcp_server:main"
 include = ["mammon*"]
 
 [tool.setuptools.package-data]
-mammon = ["tests/fixtures/*"]
+# mammon/report_defs/ holds the report definitions SHIPPED with the app (the
+# second search root in mammon/reports/report_defs.py). It has no __init__.py,
+# so packages.find never sees it and a wheel would silently omit it, leaving
+# the bundled tax lines dead on an installed copy. The three globs mirror that
+# module's SUFFIXES = (".json", ".yaml", ".yml") - a definition dropped in as
+# any of the accepted forms has to ship, not just the one that exists today.
+mammon = ["tests/fixtures/*",
+          "report_defs/*.json", "report_defs/*.yaml", "report_defs/*.yml"]

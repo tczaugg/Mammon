@@ -2078,6 +2078,87 @@ CREATE TABLE IF NOT EXISTS allocation_target_accounts (
 );
 """
 
+# 75 -- a saved REPORT DEFINITION is data the user owns, so it lives in the
+# ledger and not in QSettings: it must ride the backups and snapshots, move with
+# the .db to another machine, appear in export.py's dump, and cascade when a
+# category or an account is deleted. A report is a `report_defs` header (name,
+# kind, the stored date range) plus ordered `report_items`, each of one KIND
+# (SOSC = signed net of the selected categories, EDAB/SDAB = end/start display
+# account balance, HOLDVAL/RGAIN/NETGAIN and COMPUTED arriving in later phases).
+# The selections are SEPARATE child tables keyed by INTEGER ID, never by name --
+# `ledger.rename_category` keeps the id, so a name-keyed mapping would evaporate
+# the moment the user tidied a category name (SRD 5.9c records that failure for
+# the report filter bar; a tax report losing its Schedule E mapping is the worst
+# version of it). `include_subtree` is stored as a FLAG, not as an expanded id
+# list, so a child category added next year is picked up with no edit.
+# Securities are the one name-keyed child, because `securities` is keyed by
+# `symbol TEXT PRIMARY KEY` and identity across a ticker change is protected by
+# `security_aliases` (migration 64) instead. Report item tags are ORDINARY tags:
+# there is deliberately no report_tags table, because two tag vocabularies would
+# mean two things to type and two things to rename.
+_V75 = """
+CREATE TABLE IF NOT EXISTS report_defs (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'custom',   -- 'custom' | 'tax'
+    definition_id TEXT,                             -- e.g. 'us-1040-2025', or NULL
+    range_kind    TEXT NOT NULL DEFAULT 'fixed',    -- 'fixed'|'calendar_year'|'preset'
+    range_start   TEXT,                             -- ISO YYYY-MM-DD
+    range_end     TEXT,
+    range_year    INTEGER,
+    range_preset  TEXT,
+    notes         TEXT,
+    created_at    TEXT NOT NULL,
+    UNIQUE(name)
+);
+
+CREATE TABLE IF NOT EXISTS report_items (
+    id          INTEGER PRIMARY KEY,
+    report_id   INTEGER NOT NULL REFERENCES report_defs(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    name        TEXT NOT NULL,
+    label       TEXT,
+    group_label TEXT,
+    kind        TEXT NOT NULL,                      -- SOSC|EDAB|SDAB|HOLDVAL|RGAIN|NETGAIN|COMPUTED
+    sign        INTEGER NOT NULL DEFAULT 1,         -- +1 or -1
+    tag_enabled INTEGER NOT NULL DEFAULT 0,
+    options     TEXT,                               -- small JSON, kind-specific
+    expr        TEXT,                               -- COMPUTED only
+    txf_refnum  INTEGER,                            -- export metadata, NULL for non-tax
+    txf_copy    INTEGER NOT NULL DEFAULT 1,
+    txf_format  INTEGER,
+    UNIQUE(report_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_report_items_report ON report_items(report_id);
+
+CREATE TABLE IF NOT EXISTS report_item_categories (
+    item_id         INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    category_id     INTEGER NOT NULL REFERENCES categories(id)   ON DELETE CASCADE,
+    include_subtree INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (item_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_report_item_categories_cat
+    ON report_item_categories(category_id);
+
+CREATE TABLE IF NOT EXISTS report_item_accounts (
+    item_id    INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id)     ON DELETE CASCADE,
+    PRIMARY KEY (item_id, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS report_item_securities (
+    item_id INTEGER NOT NULL REFERENCES report_items(id)   ON DELETE CASCADE,
+    symbol  TEXT    NOT NULL REFERENCES securities(symbol) ON DELETE CASCADE,
+    PRIMARY KEY (item_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS report_item_refs (
+    item_id     INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    ref_item_id INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    PRIMARY KEY (item_id, ref_item_id)
+);
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -2154,6 +2235,7 @@ MIGRATIONS: list[str] = [
     _V72,
     _V73,
     _V74,
+    _V75,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

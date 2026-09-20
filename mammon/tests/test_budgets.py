@@ -26,8 +26,10 @@ def test_budgets_is_importable_first_no_circular_import():
     budget_vs_actual that breaks it."""
     for first in ("import mammon.budgets",
                   "from mammon.ui import budget_widget"):
+        # timeout= is mandatory: a child interpreter that wedges on import would
+        # otherwise block the whole suite forever with no output to say why.
         r = subprocess.run([sys.executable, "-c", first + "; print('ok')"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f"{first!r} failed:\n{r.stderr}"
         assert "ok" in r.stdout
 

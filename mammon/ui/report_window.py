@@ -69,6 +69,7 @@ import datetime as _dt
 import html as _html
 import io
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Callable
 
 from PyQt5.QtCore import Qt
@@ -131,12 +132,21 @@ class ReportRow:
     per-column strings for every column BUT the trailing amount; when present it
     overrides the section/label projection. ``section``/``label`` stay populated
     as a plain-text summary so nothing that reads them breaks.
+
+    ``tooltips`` is ``{column_index: text}`` for cells whose full meaning does not
+    fit the column. A column wide enough for a sentence pushes the money columns
+    off screen (the defect reported against Capital Gains: *"the tax consequences
+    field is way too long and unreadable without expanding the report to full
+    screen"*), so the SHORT form goes in the cell and the sentence hangs off it
+    here. Export still reads ``cells``, which is why the short form has to be
+    true on its own rather than a teaser.
     """
 
     section: str
     label: str
     amount: int
     cells: list = None
+    tooltips: dict = None
 
 
 def cash_flow_rows(report: "reports.CashFlowReport") -> list[ReportRow]:
@@ -399,6 +409,196 @@ def investment_performance_rows(report: "reports.InvestmentPerformanceReport", *
             cells=["Portfolio", "Return of Capital",
                    fmt_cents(report.total_return_of_capital), "", "", "", ""]))
     return rows
+
+
+# -- Capital Gains and Taxes (the dashboard's top-left launcher) --------------
+# One line per OPEN TAX LOT, because the holding period -- the whole point of this
+# report -- is a property of the lot, not of the position: the same ticker can hold
+# a long-term lot and a short-term one at once. "If Sold Now" comes BEFORE the
+# money columns on purpose: the trailing column is always right-aligned by
+# ``_populate``, and a right-aligned verdict reads as a figure. It holds a few
+# characters ("+$412 tax"), never the sentence -- see :func:`_if_sold_now_cell`.
+CAPITAL_GAINS_COLUMNS = ["Account", "Ticker", "Acquired", "Term",
+                         "Becomes Long-Term", "If Sold Now", "Shares",
+                         "Cost Basis", "Market Value", "Unrealized"]
+
+#: How a lot's term reads in the Term column. ``unknown`` is its own word rather
+#: than a blank: a lot whose acquisition date was never recorded is a question,
+#: not a long-term holding. There is no sheltered term any more -- a
+#: 401(k)/IRA/Roth account never reaches this table at all (see
+#: :func:`capital_gains_footnote`).
+_TERM_TEXT = {"long": "Long-term", "short": "Short-term", "unknown": "Unknown"}
+
+#: Longest an "If Sold Now" cell may render. The column has to sit between two
+#: date columns and four money columns in a 1000px window, so the cell is a
+#: verdict ("+$412 tax") and the sentence lives in its tooltip.
+IF_SOLD_NOW_MAX_CHARS = 16
+
+
+def _whole_dollars(cents: int) -> str:
+    """Signed-magnitude cents as WHOLE dollars with separators ('1,234'). Cents
+    are noise in a verdict cell and cost four characters; the tooltip keeps the
+    exact figure."""
+    d = (Decimal(abs(int(cents))) / 100).quantize(Decimal(1),
+                                                  rounding=ROUND_HALF_UP)
+    return f"{int(d):,}"
+
+
+def _if_sold_now_cell(r) -> str:
+    """The "If Sold Now" verdict for one lot, in a few characters.
+
+    Each form is complete on its own (it is what CSV export carries): '+$412 tax'
+    = selling this short-term gain now costs $412 MORE tax than waiting;
+    '-$95 tax' = this short-term LOSS is worth $95 more taken now; '$412 tax' =
+    what a long-term lot's gain would cost, with no deadline. A tax-deferred
+    account has no verdict here because it has no row here at all."""
+    if r.unrealized is None:
+        return "No price"
+    if r.term == "unknown":
+        return "Term unknown"
+    if r.term == "long":
+        if r.unrealized > 0:
+            return "$%s tax" % _whole_dollars(r.tax_at_long_rate or 0)
+        if r.unrealized < 0:
+            # No figure: a long-term loss has no deadline and no extra tax, so a
+            # dollar amount here would only duplicate the Unrealized column.
+            return "LT loss"
+        return "No gain"
+    extra = r.extra_tax_if_sold_now or 0
+    if r.unrealized > 0:
+        return "+$%s tax" % _whole_dollars(extra)
+    if r.unrealized < 0:
+        return "-$%s tax" % _whole_dollars(extra)
+    return "No gain"
+
+
+def capital_gains_footnote(report: "reports.CapitalGainsReport") -> str:
+    """The sentences that belong under the table rather than inside a cell: the
+    rate assumptions every tax figure rests on, and the names of the accounts
+    the report dropped because the user marked them tax-deferred.
+
+    The exclusion sentence is the report's own :attr:`exclusion_note`, not a
+    phrasing invented here: it is the ONLY trace those accounts leave, so the
+    wording lives with the rule that omits them."""
+    parts = ["Tax figures are estimates at %s long-term / %s ordinary income; "
+             "Mammon does not know your bracket."
+             % (_rate_text(report.long_term_rate),
+                _rate_text(report.short_term_rate))]
+    note = getattr(report, "exclusion_note", None)
+    if note:
+        parts.append(note + ". These accounts owe no capital gains, so no row "
+                            "or total above includes them.")
+    parts.append("Hover any If Sold Now cell for the full explanation.")
+    return "  ".join(parts)
+
+# Click-to-sort keys for the flat Capital Gains report, over a LotTaxRow. A lot
+# with no acquisition date sorts last under either date key (it is the one the
+# user has to go fix), and an unpriced lot sorts as zero unrealized rather than
+# scattering.
+_LOT_SORT_KEYS = {
+    "account":    lambda r: ((r.account_name or "").lower(), (r.symbol or "").lower(),
+                             r.acquired or "9999-12-31"),
+    "ticker":     lambda r: ((r.symbol or "").lower(), r.acquired or "9999-12-31"),
+    "acquired":   lambda r: r.acquired or "9999-12-31",
+    # Short lots first, then long, then unknown, then the tax-deferred ones: a
+    # deadline outranks a holding with no deadline, which is what the user opened
+    # this report to see, and a sheltered lot has no tax story at all.
+    "term":       lambda r: ({"short": 0, "long": 1, "unknown": 2}.get(r.term, 3),
+                             r.long_term_on or "9999-12-31"),
+    "longon":     lambda r: r.long_term_on or "9999-12-31",
+    "value":      lambda r: r.market_value,
+    "unrealized": lambda r: r.unrealized if r.unrealized is not None else 0,
+}
+
+
+def capital_gains_rows(report: "reports.CapitalGainsReport", *,
+                       sort_key: str = None,
+                       sort_desc: bool = False) -> list[ReportRow]:
+    """Project a :class:`~mammon.reports.CapitalGainsReport` into flat rows aligned
+    to :data:`CAPITAL_GAINS_COLUMNS`: one line per open tax lot carrying its
+    account, ticker, acquisition date, whether it is long- or short-term TODAY, the
+    date a short lot turns long-term (with the days still to run), a SHORT verdict
+    on selling it now (the report's own sentence rides along in ``tooltips``), and
+    the lot's shares, cost basis, market value and unrealized gain. Then the
+    totals, split long/short and gain/loss, plus a tax-deferred line when any
+    account is sheltered, and what selling the whole short-term book now costs
+    over waiting.
+
+    Pure — every figure is the report's own cents and its own annotation string;
+    nothing here computes a tax or a holding period. Dates render through the one
+    :func:`fmt_date` chokepoint. ``sort_key``/``sort_desc`` reorder only the lot
+    lines, exactly as :func:`investment_performance_rows` does; the totals are
+    appended afterwards and never move."""
+    from mammon.ui.models import fmt_date
+
+    lots = list(report.lots)
+    keyfn = _LOT_SORT_KEYS.get(sort_key)
+    if keyfn is not None:
+        lots = sorted(lots, key=keyfn, reverse=sort_desc)
+
+    rows: list[ReportRow] = []
+    for r in lots:
+        # "SYM (n sh)" so _row_symbol recognizes a holding line and offers its
+        # price history, the same composite the performance report renders.
+        ticker = "%s (%s sh)" % (r.symbol, _fmt_qty(r.quantity))
+        becomes = ""
+        if r.term == "short" and r.long_term_on:
+            becomes = fmt_date(r.long_term_on)
+            if r.days_to_long is not None:
+                becomes += " (%d day%s)" % (r.days_to_long,
+                                            "" if r.days_to_long == 1 else "s")
+        # The VERDICT in the cell, the report's own sentence in the tooltip: a
+        # column wide enough for that sentence pushed the money columns off
+        # screen, which is the second defect the user reported.
+        rows.append(ReportRow(
+            r.account_name, r.symbol, r.unrealized or 0,
+            cells=[r.account_name, ticker,
+                   fmt_date(r.acquired) if r.acquired else "",
+                   _TERM_TEXT.get(r.term, r.term), becomes, _if_sold_now_cell(r),
+                   _fmt_qty(r.quantity), fmt_cents(r.cost_basis),
+                   fmt_cents(r.market_value),
+                   "" if r.unrealized is None else fmt_cents(r.unrealized)],
+            tooltips={5: r.annotation} if r.annotation else None))
+
+    def _total(label: str, cents: int, note: str = "",
+               short: str = "") -> ReportRow:
+        return ReportRow("Totals", label, cents,
+                         cells=["Totals", label, "", "", "", short, "", "", "",
+                                fmt_cents(cents)],
+                         tooltips={5: note} if note else None)
+
+    # Gains and losses stay in separate buckets here because they are separate in
+    # the pure report -- netting them is a tax question (wash sales,
+    # carry-forwards, the $3,000 cap) neither layer answers.
+    rows.append(_total("Long-term gain", report.total_long_term_gain))
+    rows.append(_total("Long-term loss", report.total_long_term_loss))
+    rows.append(_total("Short-term gain", report.total_short_term_gain))
+    rows.append(_total("Short-term loss", report.total_short_term_loss))
+    if report.total_unknown_term:
+        rows.append(_total("Unknown term", report.total_unknown_term,
+                           "Acquisition date missing on these lots, so Mammon "
+                           "cannot say whether they are long- or short-term.",
+                           "No date"))
+    # No sheltered-money row: a tax-deferred account is out of this report
+    # entirely (user: "if they're not taxed, don't put them in the report"), and
+    # the footnote -- not a row -- names what was left out.
+    rows.append(_total("Total unrealized", report.total_unrealized))
+    rows.append(_total(
+        "Extra tax if the short-term book is sold now",
+        report.total_extra_tax_if_sold_now,
+        "Estimated at %s long-term / %s ordinary; a short-term LOSS is worth more "
+        "now, which pushes this figure down."
+        % (_rate_text(report.long_term_rate), _rate_text(report.short_term_rate)),
+        "Estimate"))
+    return rows
+
+
+def _rate_text(rate) -> str:
+    """A tax rate (a Decimal fraction) as a percent for the totals note. Not
+    ``Decimal.normalize`` -- that renders 0.50 -> '5E+1' once scaled."""
+    pct = (Decimal(str(rate)) * 100).quantize(Decimal("0.1"))
+    s = f"{pct}"
+    return (s[:-2] if s.endswith(".0") else s) + "%"
 
 
 def _row_symbol(row: ReportRow) -> str:
@@ -792,6 +992,19 @@ class ReportSpec:
     # columns are ALL figures (Investment Performance: Amount, Dividends, the gain
     # dollars and both percents). None aligns only the last column, as before.
     right_align_from: int = None
+    # Size EVERY column to its contents after each populate, for a wide report
+    # whose columns are all short but of very different widths (Capital Gains:
+    # two dates, a term, a verdict and four money columns). Distinct from
+    # ``fit_first_column``, and deliberately a one-shot resize rather than
+    # ``ResizeToContents`` mode, so the user can still drag a column afterwards.
+    fit_columns: bool = False
+    # ``footnote(report) -> str`` for the wrapping label under the table: the
+    # assumptions and exclusions that belong to the whole report rather than to
+    # any one cell. Putting them in a cell is what made the Capital Gains "If
+    # Sold Now" column unreadable. None (the default) shows no label.
+    footnote: Callable = None
+    # Opening size for a report whose default 620x640 would clip it. ``(w, h)``.
+    default_size: tuple = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -894,6 +1107,17 @@ def _run_investment_performance(conn, f):
                                           include_hidden=f.include_hidden())
 
 
+def _run_capital_gains(conn, f):
+    # A snapshot as of the "To" date: the holding period of every OPEN lot is
+    # measured to that date, and the lot is valued at the price on it. There is no
+    # start date to honour -- a lot's term depends on when it was bought and what
+    # day it is, not on a reporting window -- so the bar's "From" is ignored here
+    # rather than silently dropping lots bought before it.
+    return reports.capital_gains(conn, f.end_iso(),
+                                 account_ids=f.selected_account_ids(),
+                                 include_hidden=f.include_hidden())
+
+
 def _run_itemize(conn, f):
     # The hierarchical Itemize: INCOME / EXPENSES / TRANSFERS sections, each
     # category expanding into its sub-categories and finally its transactions, with
@@ -948,6 +1172,28 @@ INVESTMENT_PERFORMANCE_SPEC = ReportSpec("Investment Performance",
                                                    5: "pct", 6: "annual"},
                                          right_align_from=2,
                                          price_history=True)
+# Sortable: Account (col 0), Ticker (col 1), Acquired (col 2), Term (col 3),
+# Becomes Long-Term (col 4), Market Value (col 8) and Unrealized (col 9). The
+# "If Sold Now" verdict (5) and the share count (6) are left inert -- sorting
+# "+$412 tax" alphabetically answers no question; sort by Term instead.
+# Ten columns, so it fits them to their contents and opens wider than the shared
+# default: at 620px the money columns fell off the right edge, which is the
+# defect the user reported ("unreadable without expanding the report to full
+# screen"). The prose that used to be in column 5 now hangs off it as a tooltip
+# and under the table as ``capital_gains_footnote``.
+CAPITAL_GAINS_SPEC = ReportSpec("Capital Gains and Taxes", _run_capital_gains,
+                                capital_gains_rows,
+                                columns=CAPITAL_GAINS_COLUMNS,
+                                sortable={0: "account", 1: "ticker",
+                                          2: "acquired", 3: "term",
+                                          4: "longon", 8: "value",
+                                          9: "unrealized"},
+                                right_align_from=6,
+                                show_end_date=True,
+                                fit_columns=True,
+                                footnote=capital_gains_footnote,
+                                default_size=(1040, 660),
+                                price_history=True)
 ITEMIZE_SPEC = ReportSpec("Itemize by Category", _run_itemize, itemize_tree_rows,
                           show_hidden_toggle=False,
                           category_kind=CATEGORY_KIND_BOTH,
@@ -1124,9 +1370,22 @@ class ReportWindow(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(self.close_button)
 
+        # The whole-report caveats (rate assumptions, which accounts were left out
+        # of the tax math) live here rather than repeated down a table column --
+        # that repetition is what made Capital Gains unreadable at default width.
+        self.footnote_label = None
+        if self.spec.footnote is not None:
+            self.footnote_label = QLabel("")
+            self.footnote_label.setWordWrap(True)
+            f = self.footnote_label.font()
+            f.setPointSizeF(max(f.pointSizeF() - 1, 6.0))
+            self.footnote_label.setFont(f)
+
         layout = QVBoxLayout(self)
         layout.addLayout(period_row)
         layout.addWidget(self._body_widget)
+        if self.footnote_label is not None:
+            layout.addWidget(self.footnote_label)
         layout.addLayout(buttons)
 
         # Apply in the popup re-runs the report, then the dialog dismisses itself
@@ -1147,7 +1406,9 @@ class ReportWindow(QDialog):
         self.close_button.clicked.connect(self.reject)
 
         self._reload_saved_filters()
-        self.resize(620, 640)
+        # 620px suits a three-column report; a ten-column one opens wider or the
+        # user has to maximize the window to read it (the reported defect).
+        self.resize(*(self.spec.default_size or (620, 640)))
         self.refresh()
 
     # The window used to build its own category name list here
@@ -1211,7 +1472,20 @@ class ReportWindow(QDialog):
                     color = tag_colors.get((r.label or "").casefold())
                     if color:
                         item.setIcon(color_square_icon(color))
+                # The long form of a cell that had to be short. Hover, not width:
+                # a column sized to hold the sentence is what pushed the money
+                # columns off screen in Capital Gains.
+                tip = (r.tooltips or {}).get(col) if r.tooltips else None
+                if tip:
+                    item.setToolTip(tip)
                 self.table.setItem(i, col, item)
+        if self.spec.fit_columns:
+            # One-shot, AFTER the rows exist: leaves every column interactive, so
+            # the user can still widen one by hand (ResizeToContents would not).
+            self.table.resizeColumnsToContents()
+        if self.footnote_label is not None:
+            self.footnote_label.setText(self.spec.footnote(self._report)
+                                        if self._report is not None else "")
 
     # -- right-click: price history (Investment Performance) -----------------
     def _symbol_at(self, index) -> str:

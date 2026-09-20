@@ -19,7 +19,8 @@ per-platform default font in `ui/style.py`) but are untested - do not assume a
 change works there without saying so.
 
 Packaging: `requirements.txt` and `pyproject.toml` list the SAME required set
-(PyQt5, matplotlib, yfinance, mcp, sqlcipher3, pytest, pytest-xdist) and there
+(PyQt5, matplotlib, yfinance, mcp, sqlcipher3, PyYAML, pytest, pytest-xdist) and
+there
 are NO optional-dependency extras - an absent Python package is a broken install,
 not a configuration. Everything runs from the repo root against the ambient
 interpreter with no install step; the heavy imports stay lazy, so an offline
@@ -126,7 +127,7 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
   text.
 - **Never edit an existing migration.** `db.py` holds an ordered `MIGRATIONS`
   list; index *i* upgrades the DB from version *i* to *i+1*, tracked in
-  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 74).
+  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 75).
   Append a new `_Vn` and add it to the list - real databases have already
   applied the existing ones. `init_db()` is idempotent and safe on new and
   existing files. (That number is pinned by

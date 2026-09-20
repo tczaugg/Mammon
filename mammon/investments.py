@@ -1187,6 +1187,19 @@ def _add_year(d: _dt.date) -> _dt.date:
         return d.replace(year=d.year + 1, day=28)
 
 
+def long_term_date(acquired: str) -> str:
+    """The first date on which shares acquired on ``acquired`` (ISO) are
+    LONG-term: the anniversary plus one day.
+
+    This is the SAME rule :attr:`RealizedGain.term` applies -- long when the sale
+    falls strictly AFTER the anniversary -- expressed as a date instead of a
+    verdict, so a report that counts the days down to long-term treatment can
+    never disagree with the term the realized-gain rows report. Do not restate
+    the holding period anywhere else; call this."""
+    return (_add_year(_dt.date.fromisoformat(acquired))
+            + _dt.timedelta(days=1)).isoformat()
+
+
 @dataclass
 class RealizedGain:
     """One sale matched to one lot -- what the tax form asks for: when the
@@ -1849,6 +1862,44 @@ def compute_holdings(conn, account_id: int, as_of: Optional[str] = None) -> dict
     }
 
 
+@dataclass
+class OpenLot:
+    """One OPEN tax lot of one security in one account -- the public projection
+    of the replay's private ``_Lot``. ``quantity`` is ``Decimal``, ``cost_basis``
+    signed integer cents, ``acquired`` an ISO date or ``None`` when the lot's
+    history is not known (shares restored from a pre-lot-tracking snapshot)."""
+    account_id: int
+    symbol: str
+    quantity: Decimal
+    cost_basis: int                  # cents
+    acquired: Optional[str]          # ISO YYYY-MM-DD, or None if unknown
+    txn_id: Optional[int]            # the acquiring transaction
+
+
+def open_lots(conn, account_id: int, as_of: Optional[str] = None) -> dict:
+    """The account's still-open tax lots as ``{symbol: [OpenLot, ...]}``, oldest
+    acquisition first. Pure read -- a thin projection of :func:`_replay_positions`
+    (the SAME replay behind :func:`compute_holdings` and the Holdings window), so
+    the lots always reconcile: per symbol they sum to that position's quantity and
+    cost basis, whatever the account's lot method did to them.
+
+    :func:`compute_holdings` answers "how much do I hold and what did it cost" --
+    one average-cost figure per symbol, which cannot say WHEN the shares were
+    acquired. Anything that needs the holding period of the shares still on hand
+    (the capital-gains/tax report) needs this instead.
+
+    Lots with a non-positive quantity are omitted: a negative lot is the premium
+    of a WRITTEN option, an obligation rather than shares held, and it has no
+    holding period to run (see :attr:`RealizedGain.term_override`)."""
+    return {
+        sym: [OpenLot(account_id=account_id, symbol=sym, quantity=lot.qty,
+                      cost_basis=lot.cost, acquired=lot.date, txn_id=lot.txn_id)
+              for lot in pos.lots if lot.qty > 0]
+        for sym, pos in _replay_positions(conn, account_id, as_of).items()
+        if any(lot.qty > 0 for lot in pos.lots)
+    }
+
+
 def _states_no_cash(t) -> bool:
     """True for a buy or sell trade whose amount is stated as exactly zero.
 
@@ -2219,6 +2270,22 @@ def record_price(conn, symbol: str, date: str, close_price, source: Optional[str
         (symbol, date, _qty_text(_D(close_price)), source),
     )
     conn.commit()
+
+
+def delete_price(conn, symbol: str, date: str) -> bool:
+    """Remove ONE recorded price. Returns True if a row went.
+
+    Deleting is the whole repertoire for a bad quote, deliberately. A price is an
+    OBSERVATION -- what the market closed at on a day -- so "correct" it and the
+    question becomes what the right number was, which nobody in this app is in a
+    position to answer offline; the honest state is then no price for that day,
+    which every valuation already knows how to report (an unpriced holding says
+    so rather than inventing a number). A replacement close comes from the same
+    download path every other price does."""
+    cur = conn.execute("DELETE FROM price_history WHERE symbol = ? AND date = ?",
+                       (symbol, date))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def record_prices(conn, rows) -> int:
@@ -2841,6 +2908,28 @@ def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
     events = _split_events(conn, symbol)
     return [(row["date"],
              _split_adjusted(events, row["date"], row["source"], row["close_price"]))
+            for row in conn.execute(sql, params)]
+
+
+def stored_prices(conn, symbol: str) -> list:
+    """Every recorded price for ``symbol``'s identity, AS STORED, ascending.
+
+    ``[{symbol, date, close_price (Decimal), source}]``. The symbol is per ROW,
+    not the one asked for, because an aliased ticker's series spans both names
+    (:func:`_identity_symbols`) and an editor has to delete the row where it
+    actually lives.
+
+    Deliberately NOT split-adjusted, which is the whole reason this exists beside
+    :func:`price_history`. That one divides every close by the splits dated after
+    it so the chart reads in today's units; an editor showing those numbers would
+    write a rescaled price back as though it were the as-traded one, and one
+    round-trip through the dialog would silently restate the history. What is
+    shown here is what is in the table."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = ("SELECT symbol, date, close_price, source FROM price_history "
+           "WHERE " + clause + " ORDER BY date, id")
+    return [{"symbol": row["symbol"], "date": row["date"],
+             "close_price": _D(row["close_price"]), "source": row["source"]}
             for row in conn.execute(sql, params)]
 
 

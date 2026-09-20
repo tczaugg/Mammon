@@ -114,6 +114,33 @@ def scope_account_ids(conn, scope: str = "investments",
             if (a["type"] or "") in types]
 
 
+def account_valuation(conn, account_id: int, as_of: Optional[str] = None,
+                      prices: Optional[dict] = None, *,
+                      money_market_as_cash: bool = False):
+    """One account's :class:`investments.AccountValuation`, valued by the right
+    engine for its KIND -- the single dispatch every scope-wide caller must use.
+
+    A crypto account's money lives in ``crypto_transactions``, and the brokerage
+    valuation cannot see it: it reads the bank transfer legs alone and reported a
+    wallet whose own balance is zero as tens of thousands of NEGATIVE cash. The
+    mistake is easy to repeat because both engines return the SAME dataclass, so
+    calling the wrong one type-checks and merely produces a wrong number -- the
+    Investment Dashboard ring did exactly that and dropped a Coinbase account out
+    of the accounts ring entirely (its bogus total valued <= 0). Scope comes from
+    :func:`scope_account_ids`, whose ``investments`` scope is
+    ``ledger.INVESTMENT_LIKE_TYPES`` and therefore INCLUDES crypto; anything that
+    values those ids must come through here.
+
+    ``money_market_as_cash`` is a brokerage-only reporting choice and is ignored
+    for crypto, which has no sweep.
+    """
+    acct = ledger.get_account(conn, account_id)
+    if crypto.is_crypto_account(acct):
+        return crypto.account_valuation(conn, account_id, as_of, prices)
+    return investments.account_valuation(conn, account_id, as_of, prices,
+                                         money_market_as_cash=money_market_as_cash)
+
+
 # Actions that move money across the ACCOUNT's boundary (cash or shares
 # transferred in / out), signed toward the account.
 _EXTERNAL_IN = {"xin", "shrsin", "addshares", "contribx"}
@@ -600,10 +627,18 @@ def account_performance(conn, account_id: int, start: str, end: str,
                         prices: Optional[dict] = None) -> Performance:
     """The account's money-weighted return over ``[start, end]``: its value
     the day before ``start`` is money put in, each external flow is money in
-    or out on its date, its value at ``end`` is money back."""
+    or out on its date, its value at ``end`` is money back.
+
+    Both endpoint values go through :func:`account_valuation`, so a crypto
+    wallet is valued by the crypto engine. Its FLOWS are still brokerage-only:
+    :func:`external_flows` reads ``investment_transactions``, which a crypto
+    account has none of, so a wallet's deposits are not recognised as money in
+    and its return reads as if the whole change in value were gain. That is a
+    known gap (it needs crypto sleeve events in ``external_flows``), but it is
+    strictly better than the endpoints themselves being wrong."""
     before = _day_before(start)
-    start_value = investments.account_valuation(conn, account_id, before, prices).total
-    end_value = investments.account_valuation(conn, account_id, end, prices).total
+    start_value = account_valuation(conn, account_id, before, prices).total
+    end_value = account_valuation(conn, account_id, end, prices).total
     flows = external_flows(conn, account_id, start, end)
     money_in = sum(c for _, c in flows if c > 0)
     money_out = -sum(c for _, c in flows if c < 0)
@@ -817,17 +852,11 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
             by_class[cls] = by_class.get(cls, 0) + value
             total += value
             continue
-        if crypto.is_crypto_account(acct):
-            # A crypto account's money lives in crypto_transactions, and the
-            # brokerage valuation cannot see it: it read the bank transfer legs
-            # alone and reported a wallet whose own balance is zero as tens of
-            # thousands of NEGATIVE cash in the mix (and in the "no holdings
-            # recorded" note). One valuation per kind of account, the same one
-            # the accounts list and net worth show.
-            v = crypto.account_valuation(conn, aid, as_of, prices)
-        else:
-            v = investments.account_valuation(conn, aid, as_of, prices,
-                                              money_market_as_cash=money_market_as_cash)
+        # One valuation per KIND of account, the same one the accounts list and
+        # net worth show -- see account_valuation for what calling the brokerage
+        # engine on a wallet reported instead.
+        v = account_valuation(conn, aid, as_of, prices,
+                              money_market_as_cash=money_market_as_cash)
         # Option contracts come OUT before anything is totalled (SRD 5.8e-9).
         # An allocation answers "how much of what do I own", and a contract has
         # no honest answer: counting one as 100 shares of the underlying
@@ -889,3 +918,119 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     out.by_account = [Slice(str(aid), name, v, pct(v))
                       for aid, (name, v) in sorted(by_acct.items(), key=lambda kv: -kv[1][1])]
     return out
+
+
+# ---------------------------------------------------------------------------
+# recent activity and price freshness (reads for a glance page)
+# ---------------------------------------------------------------------------
+@dataclass
+class ActivityRow:
+    """One investment transaction as a reader sees it: the account by NAME, the
+    quantity as Decimal, the amount in signed cents."""
+
+    id: int
+    date: str
+    account_id: int
+    account_name: str
+    action: str
+    symbol: str
+    quantity: Optional[Decimal]      # None for a cash-only row (a dividend)
+    amount: int                      # cents, signed (negative = money out)
+    memo: str = ""
+
+
+def recent_investment_activity(conn, account_ids: Optional[Iterable[int]] = None,
+                               limit: int = 25, include_hidden: bool = False) -> list:
+    """The ``limit`` most recent investment transactions across the given
+    accounts, newest first (:class:`ActivityRow`).
+
+    One ordered query, not one per account: a glance panel that asked per
+    account would then have to merge and re-sort in the presentation layer, and
+    the merge is exactly the part that gets the tie-break wrong. The order is
+    ``date DESC, id DESC`` -- the same tie-break the replay uses, so two rows
+    entered on one day read in the reverse of the order they were entered.
+
+    VOIDED rows are left out. A void keeps its row and zeroes its numbers
+    (:func:`investments.void_investment`), so including one would show a
+    0.00 "Buy" that the user cannot act on;
+    :func:`investments.is_void_investment` stays the authority on what a void
+    is, the SQL prefix filter only saving the rows from being fetched.
+
+    ``account_ids`` defaults to the investment scope
+    (:func:`scope_account_ids`, closed and hidden accounts excluded).
+    """
+    if account_ids is None:
+        ids = scope_account_ids(conn, "investments", include_hidden=include_hidden)
+    else:
+        ids = [int(a) for a in account_ids]
+    n = int(limit)
+    if not ids or n <= 0:
+        return []
+    marks = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT t.id AS id, t.date AS date, t.account_id AS account_id, "
+        "       a.name AS account_name, t.action AS action, t.symbol AS symbol, "
+        "       t.quantity AS quantity, t.amount AS amount, t.memo AS memo "
+        "FROM investment_transactions t "
+        "LEFT JOIN accounts a ON a.id = t.account_id "
+        f"WHERE t.account_id IN ({marks}) "
+        "  AND (t.memo IS NULL OR t.memo NOT LIKE ?) "
+        "ORDER BY t.date DESC, t.id DESC LIMIT ?",
+        list(ids) + [ledger.VOID_PREFIX + "%", n]).fetchall()
+    out = []
+    for r in rows:
+        if investments.is_void_investment(r):
+            continue
+        qty = r["quantity"]
+        out.append(ActivityRow(
+            id=int(r["id"]), date=r["date"] or "",
+            account_id=int(r["account_id"] or 0),
+            account_name=r["account_name"] or "",
+            action=r["action"] or "", symbol=r["symbol"] or "",
+            quantity=(_D(qty) if qty not in (None, "") else None),
+            amount=int(r["amount"] or 0), memo=r["memo"] or ""))
+    return out
+
+
+@dataclass
+class PriceFreshness:
+    """How current the price series behind one symbol's valuation is."""
+
+    symbol: str
+    latest: Optional[str]            # ISO date of the newest close, None if never priced
+    days: Optional[int]              # its age at the as-of date, None if never priced
+
+
+def price_freshness(conn, symbols: Iterable[str], as_of: Optional[str] = None) -> list:
+    """For each of ``symbols``, the newest ``price_history`` date and how old it
+    is at ``as_of`` -- worst first: never priced, then oldest, then by symbol.
+
+    The age is measured against ``as_of`` (defaulting to
+    :func:`investments.valuation_as_of`, the ledger's own latest known date) and
+    NOT against today's clock, so an archived file does not report every symbol
+    as months stale merely because time passed outside it. It never goes
+    negative: a close dated after ``as_of`` is current, not "-3 days old".
+
+    Each symbol is asked over its whole canonical identity
+    (:func:`investments._price_identity_clause`), the same rule
+    :func:`investments.latest_price` values it by -- one grouped
+    ``MAX(date)`` over the raw symbol column would call a renamed ticker
+    unpriced while the valuation happily prices it from the old spelling. No
+    price is rescaled here: this is a date, and a split does not move it.
+    """
+    when = as_of if as_of is not None else investments.valuation_as_of(conn)
+    out = []
+    for symbol in dict.fromkeys(s for s in symbols if s):
+        clause, params = investments._price_identity_clause(conn, symbol)
+        row = conn.execute(
+            "SELECT MAX(date) AS latest FROM price_history WHERE " + clause,
+            params).fetchone()
+        latest = row["latest"] if row is not None else None
+        days = None
+        if latest and when:
+            days = max(0, (_dt.date.fromisoformat(when)
+                           - _dt.date.fromisoformat(latest)).days)
+        out.append(PriceFreshness(symbol=symbol, latest=latest or None, days=days))
+    return sorted(out, key=lambda f: (f.latest is not None,
+                                      -(f.days if f.days is not None else 0),
+                                      f.symbol))

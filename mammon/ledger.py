@@ -441,6 +441,172 @@ def transactions_with_tag(
     return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
 
 
+def validate_report_item_tag_name(
+    conn: sqlite3.Connection, name, *, item_id: Optional[int] = None
+) -> str:
+    """Validate a name that is about to double as a TAG, and return it cleaned.
+
+    A report item whose ``tag_enabled`` is set has its name looked up in ``tags``
+    at evaluation time (SRD 5.9, compartment F): a line tagged with the name is
+    pulled into that item, a line tagged ``!name`` is pushed out. That makes the
+    name subject to the three constraints tag STORAGE already imposes, which is
+    why this check lives here -- this module owns tag naming, parsing and the
+    ``transactions.tag`` cache, and a second copy of these rules in the report
+    layer would drift from them.
+
+    * **No comma.** ``transactions.tag`` is a comma-joined cache parsed back by
+      :func:`parse_tags`, so a comma in a name silently becomes two tags.
+    * **No leading ``!``.** Reserved for the negation form; a tag literally
+      called ``!x`` could never be included, only exclude.
+    * **Unique case-insensitively among tag-enabled item names, ledger-wide.**
+      ``tags.name`` collates NOCASE, so two items named ``TX-1040:Line 20`` and
+      ``TX-1040:line 20`` would fight over ONE tag row and each silently claim
+      the other's lines. Scoping the check to one report would not help: the tag
+      table is shared. Seeded tax definitions namespace by form prefix, so in
+      practice this never fires.
+
+    A colon is fine -- free text, and the register already tolerates it.
+    ``item_id`` is the item being saved, excluded from the collision search so
+    re-saving an item is not a collision with itself.
+    """
+    clean = (name or "").strip()
+    if not clean:
+        raise ValueError("a tag-enabled item needs a name")
+    if "," in clean:
+        raise ValueError(
+            f"{clean!r} cannot be a tag name: a comma separates tags "
+            "(transactions.tag is comma-joined)")
+    if clean.startswith("!"):
+        raise ValueError(
+            f"{clean!r} cannot be a tag name: a leading '!' is reserved for "
+            "the exclusion form")
+    sql = ("SELECT d.name AS report_name, i.name AS item_name "
+           "FROM report_items i JOIN report_defs d ON d.id = i.report_id "
+           "WHERE i.tag_enabled = 1 AND i.name = ? COLLATE NOCASE")
+    params: list[Any] = [clean]
+    if item_id is not None:
+        sql += " AND i.id <> ?"
+        params.append(int(item_id))
+    clash = conn.execute(sql + " LIMIT 1", tuple(params)).fetchone()
+    if clash is not None:
+        raise ValueError(
+            f"{clean!r} collides with the tag-enabled item {clash['item_name']!r} "
+            f"in report {clash['report_name']!r} (tag names are "
+            "case-insensitive)")
+    return clean
+
+
+def set_split_tag(conn: sqlite3.Connection, split_id: int, name) -> None:
+    """Set (or clear, with ``None``) the single tag on ONE split leg.
+
+    A narrow writer on purpose. :func:`set_splits` already threads ``tag_id``
+    through, but it replaces every leg of the transaction and re-runs the
+    transfer-mirror adoption while doing it -- far too much machinery to move one
+    column, and it would rewrite legs the caller never touched. Leg tags still go
+    through this module because ``ledger`` owns tag naming and the ``tags`` table;
+    the difference from :func:`set_tags` is only that a leg holds ONE tag_id
+    rather than a junction, so there is no cache to refresh (``transactions.tag``
+    is the PARENT's tags, which this does not touch)."""
+    row = conn.execute("SELECT id FROM splits WHERE id = ?",
+                       (int(split_id),)).fetchone()
+    if row is None:
+        raise KeyError(f"no split line {split_id}")
+    clean = (name or "").strip()
+    conn.execute("UPDATE splits SET tag_id = ? WHERE id = ?",
+                 (_tag_id(conn, clean) if clean else None, int(split_id)))
+    conn.commit()
+
+
+def split_leg_tag(conn: sqlite3.Connection, split_id: int) -> Optional[str]:
+    """The tag name on one split leg, or ``None``."""
+    row = conn.execute(
+        "SELECT g.name AS name FROM splits s LEFT JOIN tags g ON g.id = s.tag_id "
+        "WHERE s.id = ?", (int(split_id),)).fetchone()
+    if row is None:
+        raise KeyError(f"no split line {split_id}")
+    return row["name"]
+
+
+def exclusion_tag_name(item_name: str) -> str:
+    """The tag that pushes a line OUT of the report item called ``item_name``."""
+    return "!" + (item_name or "").strip()
+
+
+def toggle_report_exclusion(conn: sqlite3.Connection, item_name: str,
+                            txn_id: int, split_id: Optional[int] = None) -> bool:
+    """Add or remove ``!<item_name>`` on one line. Returns True if the line is
+    now EXCLUDED from that report item.
+
+    This is the write behind the custom report's right-click, and it is here
+    rather than in the window because the rule about WHERE an exclusion may live
+    is a fact about tag storage, not about Qt:
+
+    * a TRANSACTION holds many tags (the ``transaction_tags`` junction), so
+      ``!item`` simply joins the comma-separated list and nothing is displaced;
+    * a split LEG holds exactly one (``splits.tag_id``, a single column -- there
+      is no ``split_tags`` junction), so ``!item`` can only go on a leg whose
+      slot is free. A leg already tagged ``7344 Muirfield`` cannot also be
+      ``!Schedule E:Rents received``, and silently replacing the property tag
+      would destroy the very attribution that put the line in the report;
+    * an exclusion is REFUSED on a transaction whose legs carry tags. The parent's
+      tags apply to every leg (``_lines.effective_tags`` is the union), so
+      ``!item`` there would drop legs that a per-leg tag deliberately pulled in --
+      a blunt instrument wearing the costume of a precise one.
+
+    A COMMA in the item's name is refused outright, whatever the target.
+    ``transactions.tag`` is a comma-joined cache parsed back by
+    :func:`parse_tags`, so ``!Schedule B:Div inc., non-taxable`` would be stored
+    and read back as the two tags ``!Schedule B:Div inc.`` and ``non-taxable`` --
+    an exclusion that matches nothing plus a junk tag in the user's vocabulary.
+    :func:`validate_report_item_tag_name` already refuses a comma for the same
+    reason when an item's name is made tag-enabled; this is that rule applied to
+    the other half of the mechanism, and it is checked BEFORE anything is
+    written.
+
+    Every refusal raises ``ValueError`` explaining itself, so the caller has one
+    place to read the reason and no rule of its own.
+    """
+    name = exclusion_tag_name(item_name)
+    if name == "!":
+        raise ValueError("an exclusion needs the report item's name")
+    if "," in name:
+        raise ValueError(
+            f"{item_name!r} cannot be excluded by tag: its name contains a "
+            "comma, and a comma separates tags, so the exclusion would be "
+            "stored as two. Rename the report line to drop the comma.")
+    if split_id is not None:
+        current = split_leg_tag(conn, split_id)
+        if current is not None and current.casefold() != name.casefold():
+            raise ValueError(
+                f"this split line already carries the tag {current!r}, and a "
+                "split line holds only one tag. Exclude it by tagging the whole "
+                "transaction, or clear that tag first.")
+        if current is None:
+            set_split_tag(conn, split_id, name)
+            return True
+        set_split_tag(conn, split_id, None)
+        return False
+    if get_transaction(conn, txn_id) is None:
+        raise KeyError(f"no transaction {txn_id}")
+    tagged_legs = conn.execute(
+        "SELECT g.name AS name FROM splits s JOIN tags g ON g.id = s.tag_id "
+        "WHERE s.transaction_id = ? ORDER BY s.id LIMIT 1",
+        (int(txn_id),)).fetchone()
+    if tagged_legs is not None:
+        raise ValueError(
+            f"this transaction's split lines carry their own tags (e.g. "
+            f"{tagged_legs['name']!r}). Excluding the whole transaction would "
+            "drop those lines too; exclude the individual split line instead.")
+    names = get_tags(conn, txn_id)
+    folded = name.casefold()
+    keep = [n for n in names if n.casefold() != folded]
+    if len(keep) == len(names):
+        set_tags(conn, txn_id, names + [name])
+        return True
+    set_tags(conn, txn_id, keep)
+    return False
+
+
 # --------------------------------------------------------------------------
 # Tag colors and tag management (the Tag Manager's domain verbs)
 # --------------------------------------------------------------------------

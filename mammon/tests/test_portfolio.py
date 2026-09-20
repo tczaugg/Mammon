@@ -308,3 +308,110 @@ def test_hidden_accounts_and_records_gaps_are_kept_out_of_the_way(conn, world):
 
     # A brokerage with real holdings AND idle cash is not a records gap.
     assert "Brokerage" not in names
+
+
+# ---------------------------------------------------------------------------
+# recent activity
+# ---------------------------------------------------------------------------
+def test_recent_activity_is_newest_first_and_names_its_account(conn, world):
+    inv = world["inv"]
+    second = ledger.create_account(conn, "Rollover IRA", "investment",
+                                   opening_balance=0)
+    investments.record_investment(conn, second, "2025-07-04", "Buy", symbol="MSFT",
+                                  quantity="5", price="20.00", amount=-100_00)
+    investments.rebuild_holdings(conn, second)
+
+    rows = portfolio.recent_investment_activity(conn)
+    assert [(r.date, r.account_name, r.action, r.symbol) for r in rows] == [
+        ("2025-07-04", "Rollover IRA", "Buy", "MSFT"),
+        ("2025-06-01", "Brokerage", "Div", "AAPL"),
+        ("2025-01-03", "Brokerage", "Buy", "AAPL")]
+    # Money stays signed cents; a quantity stays Decimal, and a cash-only row
+    # (the dividend) has none at all rather than a zero that claims shares moved.
+    assert [r.amount for r in rows] == [-100_00, 200_00, -10000_00]
+    assert rows[0].quantity == Decimal("5")
+    assert isinstance(rows[0].quantity, Decimal)
+    assert rows[1].quantity is None
+    # The checking account contributed nothing: this reads investment rows only.
+    assert {r.account_id for r in rows} == {inv, second}
+
+
+def test_recent_activity_honours_the_cap_and_an_empty_scope(conn, world):
+    assert len(portfolio.recent_investment_activity(conn, limit=1)) == 1
+    assert portfolio.recent_investment_activity(conn, limit=1)[0].date == "2025-06-01"
+    # Nothing in scope, and nothing asked for: both are an empty list, never the
+    # whole ledger.
+    assert portfolio.recent_investment_activity(conn, account_ids=[]) == []
+    assert portfolio.recent_investment_activity(conn, limit=0) == []
+    assert portfolio.recent_investment_activity(conn, account_ids=[world["chk"]]) == []
+
+
+def test_recent_activity_leaves_voided_rows_out(conn, world):
+    inv = world["inv"]
+    txn = investments.record_investment(conn, inv, "2025-08-01", "Sell",
+                                        symbol="AAPL", quantity="10",
+                                        price="110.00", amount=1100_00)
+    investments.rebuild_holdings(conn, inv)
+    assert portfolio.recent_investment_activity(conn)[0].id == txn
+
+    assert investments.void_investment(conn, txn) is True
+    investments.rebuild_holdings(conn, inv)
+    rows = portfolio.recent_investment_activity(conn)
+    assert txn not in [r.id for r in rows]
+    # The cap still yields a full page: the void was filtered before the LIMIT,
+    # not after it.
+    assert len(portfolio.recent_investment_activity(conn, limit=2)) == 2
+
+
+def test_recent_activity_skips_a_hidden_account_unless_asked(conn, world):
+    ledger.set_account_hidden(conn, world["inv"], True)
+    assert portfolio.recent_investment_activity(conn) == []
+    assert len(portfolio.recent_investment_activity(conn, include_hidden=True)) == 2
+
+
+# ---------------------------------------------------------------------------
+# price freshness
+# ---------------------------------------------------------------------------
+def test_price_freshness_ages_against_the_given_date(conn, world):
+    fresh = portfolio.price_freshness(conn, ["AAPL"], as_of="2026-01-30")
+    assert [(f.symbol, f.latest, f.days) for f in fresh] == [
+        ("AAPL", "2025-12-31", 30)]
+    # An as-of BEFORE the newest close is zero days old, never negative.
+    assert portfolio.price_freshness(conn, ["AAPL"], as_of="2025-06-30")[0].days == 0
+    # The default reference point is the ledger's own latest known date.
+    when = investments.valuation_as_of(conn)
+    assert portfolio.price_freshness(conn, ["AAPL"])[0].days == (
+        portfolio.price_freshness(conn, ["AAPL"], as_of=when)[0].days)
+
+
+def test_price_freshness_reports_a_never_priced_symbol_as_unknown(conn, world):
+    portfolio.set_security(conn, "ZZNP", name="Zeta Never Priced Fund")
+    fresh = portfolio.price_freshness(conn, ["AAPL", "ZZNP"], as_of="2026-01-30")
+    # Worst first: no price at all outranks merely old.
+    assert [f.symbol for f in fresh] == ["ZZNP", "AAPL"]
+    never = fresh[0]
+    assert never.latest is None and never.days is None
+
+
+def test_price_freshness_sorts_oldest_first_and_dedupes(conn, world):
+    portfolio.set_security(conn, "ZZOLDER", name="Zeta Older Fund")
+    investments.record_price(conn, "ZZOLDER", "2025-03-31", "5.00")
+    fresh = portfolio.price_freshness(conn, ["AAPL", "ZZOLDER", "AAPL"],
+                                      as_of="2026-01-30")
+    assert [(f.symbol, f.days) for f in fresh] == [("ZZOLDER", 305), ("AAPL", 30)]
+
+
+def test_price_freshness_follows_a_rename(conn, world):
+    """A renamed ticker is ONE identity: the close recorded under the old
+    spelling is the surviving symbol's newest close, not a missing price."""
+    portfolio.set_security(conn, "ZZNEW", name="Zeta Renamed Fund")
+    portfolio.set_security(conn, "ZZOLD", name="Zeta Renamed Fund (old ticker)")
+    investments.record_price(conn, "ZZOLD", "2025-11-30", "9.00")
+    investments.add_alias(conn, "ZZOLD", "ZZNEW")
+    fresh = portfolio.price_freshness(conn, ["ZZNEW"], as_of="2025-12-31")
+    assert (fresh[0].latest, fresh[0].days) == ("2025-11-30", 31)
+
+
+def test_price_freshness_of_nothing_is_nothing(conn, world):
+    assert portfolio.price_freshness(conn, []) == []
+    assert portfolio.price_freshness(conn, [""], as_of="2026-01-30") == []

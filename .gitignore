@@ -39,6 +39,9 @@ docs/*_design.md
 # proposal that quotes the user verbatim, whose public form is an SRD section.
 # Matched by SHAPE for the same reason as the globs above.
 docs/*_taxonomy.md
+# Throwaway investigation write-ups (what hung, what was measured) are planning
+# notes too: matched by SHAPE, same reason as the globs above.
+docs/*_fix_report.md
 
 # Build output: installer/build.py's build/ and dist/ (the Setup ZIP), its
 # download cache of the Python embeddable package, and the icon preview blowups.

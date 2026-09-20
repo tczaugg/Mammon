@@ -120,6 +120,36 @@ def _chart_palette(for_print: bool = False):
     return style.palette_for("dark") if style.theme() == "dark" else None
 
 
+def _active_palette(for_print: bool = False) -> dict:
+    """The ACTIVE theme's palette dict, light INCLUDED.
+
+    :func:`_chart_palette` deliberately returns ``None`` in light mode so the
+    chrome matplotlib already draws well (near-black ticks on white) is left
+    byte-for-byte alone. That rule cannot serve a colour the chart must pick for
+    ITSELF in both themes -- a series line, a shaded band -- because there is no
+    matplotlib default to fall back on: hardcoding one gives a hue tuned for one
+    background and unreadable on the other, which is exactly what the investment
+    dashboard's two hole charts were reported for. Those colours come from here,
+    so ``style.py``'s semantic names (``blue``, ``negative``, ``muted``) stay the
+    single source of truth in either theme. ``for_print`` forces the light
+    palette, matching :func:`_chart_palette`'s "print is always white" rule."""
+    if for_print:
+        return style.palette_for("light")
+    return style.palette_for(style.theme())
+
+
+def _theme_grid(ax, pal, *, axis: str = "both") -> None:
+    """Turn on a subtle-but-visible grid, coloured for the active theme.
+
+    One helper so every chart's grid has the same weight and the same colour
+    rule: the dark palette's ``line`` when ``pal`` is a dark palette, the light
+    grid grey otherwise. ``set_axisbelow`` keeps the lines BEHIND the data, so a
+    grid never crosses a bar or a filled band."""
+    ax.set_axisbelow(True)
+    ax.grid(True, axis=axis, color=(pal["line"] if pal else _GRID_LIGHT),
+            linewidth=_GRID_LINEWIDTH, alpha=_GRID_ALPHA)
+
+
 def _theme_axes_chrome(ax, pal) -> None:
     """Recolour an axes' spines, tick marks, tick labels, y-grid and title from a
     dark palette. A no-op when ``pal`` is ``None`` (light mode keeps matplotlib's
@@ -550,10 +580,7 @@ class NetWorthCanvas(FigureCanvasQTAgg):
         # matching the financial calendar's grid weight/opacity. In dark mode the
         # colour is the palette's line colour -- the same value _theme_axes_chrome
         # gives the y-gridlines -- so both axes stay consistent.
-        grid_color = pal["line"] if pal else _GRID_LIGHT
-        ax.set_axisbelow(True)
-        ax.grid(True, axis="both", color=grid_color,
-                linewidth=_GRID_LINEWIDTH, alpha=_GRID_ALPHA)
+        _theme_grid(ax, pal, axis="both")
         _theme_axes_chrome(ax, pal)
         self.draw_idle()
 
@@ -897,9 +924,14 @@ class ProjectedBalanceCanvas(FigureCanvasQTAgg):
 
 
 class ChartDialog(QDialog):
-    """A simple modal frame that embeds a chart canvas + a Close button."""
+    """A simple modal frame that embeds a chart canvas + a Close button.
 
-    def __init__(self, title, canvas, parent=None):
+    ``on_edit`` adds an "Edit Price History…" button beside Close. A price chart
+    is where a user NOTICES a wrong or missing close -- a spike, a flat run, a
+    series that stops -- so it is where the way to fix one belongs; every price
+    chart passes it, and nothing else does."""
+
+    def __init__(self, title, canvas, parent=None, on_edit=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.canvas = canvas
@@ -908,5 +940,11 @@ class ChartDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
+        self.edit_button = None
+        if on_edit is not None:
+            self.edit_button = buttons.addButton(
+                "Edit Price History…", QDialogButtonBox.ActionRole)
+            self.edit_button.setAutoDefault(False)
+            self.edit_button.clicked.connect(lambda _c=False: on_edit())
         lay.addWidget(buttons)
         self.resize(720, 560)

@@ -3945,8 +3945,11 @@ class InvestmentRegisterWidget(TransferGotoMixin, QWidget):
 # price-history chart (shared by the register + the holdings window)
 # ---------------------------------------------------------------------------
 def _chart_price_history(parent, conn, symbol, account_id=None):
-    """Open a line chart of ``symbol``'s recorded price history, or an info note
-    when nothing is recorded (never an empty chart). Shared by HoldingsDialog
+    """Open a line chart of ``symbol``'s recorded price history, or -- when
+    nothing is recorded -- ASK whether to add prices (never an empty chart).
+    That ask is a ``QMessageBox.question``, not ``.information``: a test driving
+    the no-prices branch must patch ``question`` or the real modal exec_()s and
+    blocks forever under the offscreen platform. Shared by HoldingsDialog
     (double/right-click a holding) and InvestmentRegisterWidget (double/right-click
     a Security cell) so both entry points behave identically; the matplotlib chart
     classes are imported LAZILY here so base widgets stay matplotlib-free.
@@ -3959,22 +3962,45 @@ def _chart_price_history(parent, conn, symbol, account_id=None):
     account context still gets the plain (USD) chart."""
     if not symbol:
         return
-    # Bounds included, so a derived price plots its uncertainty (PriceHistoryCanvas).
-    points = investments.price_history_bounds(conn, symbol)
-    if not points:
-        QMessageBox.information(
-            parent, "Price History",
-            f"No recorded price history for {symbol} yet.")
-        return
+    from mammon.ui.price_history_dialog import price_symbol_for
+    # A COIN's prices are filed as ``{SYM}-USD``, so asking for the holding's
+    # own symbol found nothing at all and every crypto holding reported "no
+    # recorded price history". One mapping, used by both entry points.
+    filed = price_symbol_for(conn, symbol)
     currency = None
     if account_id is not None:
         currency = fx.get_account_currency(conn, int(account_id))
+    # Bounds included, so a derived price plots its uncertainty (PriceHistoryCanvas).
+    points = investments.price_history_bounds(conn, filed)
+    if not points:
+        # Still offer the editor: "nothing recorded" is the case a backfill
+        # exists to fix, and an information box that only says no was a dead end
+        # -- there was nowhere in the app to add the price it is complaining is
+        # missing.
+        if QMessageBox.question(
+                parent, "Price History",
+                f"No recorded price history for {filed} yet.\n\n"
+                "Add prices now?",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            _edit_price_history(parent, conn, filed, currency)
+        return
     from mammon.ui.charts import ChartDialog, PriceHistoryCanvas
-    canvas = PriceHistoryCanvas(symbol, points, currency=currency)
-    title = f"Price History - {symbol}"
+    canvas = PriceHistoryCanvas(filed, points, currency=currency)
+    title = f"Price History - {filed}"
     if currency:
         title = f"{title} ({currency})"
-    ChartDialog(title, canvas, parent=parent).exec_()
+    dlg = ChartDialog(title, canvas, parent=parent,
+                      on_edit=lambda: _edit_price_history(
+                          dlg, conn, filed, currency))
+    dlg.exec_()
+
+
+def _edit_price_history(parent, conn, symbol, currency=None):
+    """Open the price-history editor for ``symbol``. The one place that window is
+    constructed, so the chart button and both holdings menus open the same
+    thing."""
+    from mammon.ui.price_history_dialog import PriceHistoryDialog
+    PriceHistoryDialog(conn, symbol, parent=parent, currency=currency).exec_()
 
 
 def _chart_loan_projection(parent, conn, account_id):
@@ -4381,6 +4407,7 @@ class HoldingsDialog(QDialog):
             return
         menu = QMenu(self)
         act = menu.addAction(f"Price history: {symbol}…")
+        edit_act = menu.addAction(f"Edit price history: {symbol}…")
         # A fund conversion (SRD 5.8d): measure this holding's return from the
         # fund it replaced. Offered only where the rule holds, so nothing here can
         # link two ordinary trades.
@@ -4398,6 +4425,8 @@ class HoldingsDialog(QDialog):
         chosen = menu.exec_(table.viewport().mapToGlobal(pos))
         if chosen is act:
             self.show_price_history(symbol)
+        elif chosen is edit_act:
+            self.edit_price_history(symbol)
         elif chosen in choices:
             what = choices[chosen]
             if what[0] == "link":
@@ -4424,6 +4453,15 @@ class HoldingsDialog(QDialog):
         account, so it hands that account down and the chart is labelled in the
         account's currency."""
         _chart_price_history(self, self.conn, symbol, self.account_id)
+
+    def edit_price_history(self, symbol):
+        """Open the price-history EDITOR for ``symbol`` -- the same window the
+        chart's corner button opens, reached without charting first."""
+        if not symbol:
+            return
+        from mammon.ui.price_history_dialog import price_symbol_for
+        _edit_price_history(self, self.conn, price_symbol_for(self.conn, symbol),
+                            fx.get_account_currency(self.conn, self.account_id))
 
 
 # ---------------------------------------------------------------------------
@@ -4480,6 +4518,15 @@ class CryptoHoldingsDialog(QDialog):
         hh.setSectionResizeMode(self.SYMBOL, QHeaderView.Stretch)
         for col in (self.QUANTITY, self.COST, self.PRICE, self.MARKET, self.GAIN):
             hh.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        # A coin position reaches its prices exactly as a security position does.
+        # It reached NOTHING before: this dialog had no menu and no double-click,
+        # and the chart helper looked the symbol up under the bare ticker while a
+        # coin's prices are filed as ``{SYM}-USD``, so both halves had to land
+        # before a coin's price history was reachable at all.
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._row_menu)
+        self.table.doubleClicked.connect(
+            lambda idx: self.show_price_history(self.symbol_at(idx.row())))
         self._fill_table()
         outer.addWidget(self.table)
 
@@ -4502,6 +4549,46 @@ class CryptoHoldingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         outer.addWidget(buttons)
         self.resize(560, 360)
+
+    # -- reaching a coin's prices -------------------------------------------
+    def symbol_at(self, row):
+        """The coin on ``row``, or "" for the CASH row (which has no price)."""
+        if row < 0 or row >= len(self._held):
+            return ""
+        # ``crypto.holding_values`` yields HoldingValue dataclasses, not the
+        # ``crypto_holdings`` dicts that ``list_holdings`` returns.
+        return self._held[row].symbol
+
+    def _row_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        symbol = self.symbol_at(item.row())
+        if not symbol:
+            return
+        menu = QMenu(self)
+        chart = menu.addAction(f"Price history: {symbol}…")
+        edit = menu.addAction(f"Edit price history: {symbol}…")
+        chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if chosen is chart:
+            self.show_price_history(symbol)
+        elif chosen is edit:
+            self.edit_price_history(symbol)
+
+    def show_price_history(self, symbol):
+        """Chart the coin's prices, through the same helper the securities
+        holdings window uses -- which maps the coin to its ``{SYM}-USD`` series."""
+        if symbol:
+            _chart_price_history(self, self.conn, symbol, self.account_id)
+
+    def edit_price_history(self, symbol):
+        """Open the price-history editor for the coin."""
+        if not symbol:
+            return
+        from mammon.ui.price_history_dialog import price_symbol_for
+        _edit_price_history(self, self.conn,
+                            price_symbol_for(self.conn, symbol),
+                            fx.get_account_currency(self.conn, self.account_id))
 
     def _fill_table(self):
         for i, h in enumerate(self._held):
@@ -5300,6 +5387,15 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
                         and not self.model.is_pending_row(index.row()))
         act_edit.setEnabled(editable_row)
         act_delete.setEnabled(editable_row)
+        # The coin's prices, exactly as the investment register offers a
+        # security's. A crypto row NAMES its coin, so the register is a place a
+        # user reasonably looks for them -- and it offered nothing at all.
+        symbol = self.symbol_at(index.row()) if index.isValid() else ""
+        act_price = act_edit_price = None
+        if symbol:
+            menu.addSeparator()
+            act_price = menu.addAction(f"Price history: {symbol}…")
+            act_edit_price = menu.addAction(f"Edit price history: {symbol}…")
         goto_actions = self._add_goto_actions(
             menu, index.row() if index.isValid() else -1)
         chosen = menu.exec_(self.view.viewport().mapToGlobal(pos))
@@ -5311,6 +5407,37 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
             self._edit_row(index.row())
         elif chosen == act_delete and editable_row:
             self._delete_row(index.row())
+        elif act_price is not None and chosen is act_price:
+            self.show_price_history(symbol)
+        elif act_edit_price is not None and chosen is act_edit_price:
+            self.edit_price_history(symbol)
+
+    def symbol_at(self, row) -> str:
+        """The COIN a register row names, or "" for a row that names none (the
+        blank quick-entry row, a cash-only move, a wallet transfer label)."""
+        if row is None or row < 0 or self.model.is_blank_row(row):
+            return ""
+        txn = self.model.txn_at(row)
+        if txn is None:
+            return ""
+        try:
+            return (txn["symbol"] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+    def show_price_history(self, symbol) -> None:
+        """Chart the coin's prices -- through the shared helper, which maps the
+        coin to its ``{SYM}-USD`` series."""
+        if symbol:
+            _chart_price_history(self, self.conn, symbol, self.account_id)
+
+    def edit_price_history(self, symbol) -> None:
+        if not symbol:
+            return
+        from mammon.ui.price_history_dialog import price_symbol_for
+        _edit_price_history(self, self.conn,
+                            price_symbol_for(self.conn, symbol),
+                            fx.get_account_currency(self.conn, self.account_id))
 
     def _transfer_pairs(self, row):
         """The crypto register's answer for the shared 'Go to [account]' entry.
@@ -5890,7 +6017,11 @@ class AccountDetailsDialog(QDialog):
         self.tax_treatment.setToolTip(
             "Which kind of money this account holds. Target & Drift groups "
             "accounts by it, so a 401(k) mix is never averaged with a Roth one, "
-            "and money held for someone else can be left out entirely.")
+            "and money held for someone else can be left out entirely.\n\n"
+            "It also tells the Capital Gains report which accounts owe no "
+            "capital gains: anything but Taxable is left out of every gain, "
+            "loss and tax figure there. Leave it unset and the account is "
+            "treated as taxable.")
         self._details_form = form
         form.addRow("Tax treatment", self.tax_treatment)
         form.addRow("Crypto kind", self.crypto_kind)
@@ -8269,12 +8400,7 @@ class MainWindow(QMainWindow):
             act.setChecked(self.register_view_mode == mode)
             group.addAction(act)
         view.addAction("Financial Calendar", self.show_calendar)
-        # Investment Center is a future landing page for holdings/allocation
-        # across every investment account; disabled until it exists so the
-        # end-state menu shape is visible without a dead click.
-        investment_center_act = view.addAction("Investment Center…")
-        investment_center_act.setEnabled(False)
-        investment_center_act.setToolTip("Coming soon.")
+        view.addAction("Investment Dashboard…", self.show_investment_dashboard)
 
         tools = self.menuBar().addMenu("&Tools")
         tools.addAction("Download Log…", self._download_log_dialog)
@@ -8326,6 +8452,10 @@ class MainWindow(QMainWindow):
         reports.addAction("Transactions (Window)…", self._listing_window)
         reports.addAction("Investment Performance (Window)…",
                           self._investment_performance_window)
+        reports.addAction("Capital Gains and Taxes (Window)…",
+                          self._capital_gains_window)
+        reports.addSeparator()
+        reports.addAction("Taxes and Custom Reports…", self._custom_reports_window)
         reports.addSeparator()
         # Allocation is a REPORT, not a tool: it answers "where is my money",
         # which is what everything else on this menu answers. (Quicken hangs it
@@ -8572,6 +8702,16 @@ class MainWindow(QMainWindow):
                                 f"Database saved to:\n{path}")
 
     def closeEvent(self, event):
+        """Stop the autobackup timer when the window closes.
+
+        The timer repeats for the life of the session (see _start_autobackup) and
+        is parented to the window, so nothing else ever stops it. A closed window
+        that still owns a running repeating timer keeps firing _autobackup_tick
+        against a connection the user is done with, and leaves a live timer for
+        sip to tear down at interpreter exit -- the shape that makes PyQt5 on
+        Windows hang instead of returning to the shell. Stopping it here costs
+        nothing while the window is open: the timer is started again by
+        _start_autobackup for any window that follows."""
         if self._autobackup_timer is not None:
             self._autobackup_timer.stop()
         super().closeEvent(event)
@@ -8592,6 +8732,14 @@ class MainWindow(QMainWindow):
         from mammon.ui.projection_dialogs import CalendarPanel
         self.calendar = CalendarPanel(conn, self)
         self.stack.addWidget(self.calendar)
+        # The Investment Dashboard is a second home page, appended AFTER the
+        # calendar so index 0 stays the calendar (_drop_register falls back to
+        # setCurrentIndex(0)). It lives as long as the window and obeys the same
+        # mark_stale/refresh_if_stale contract, so View > Investment Dashboard
+        # reuses this one instance instead of rebuilding the whole picture.
+        from mammon.ui.investment_dashboard import InvestmentDashboardPage
+        self.investment_dashboard = InvestmentDashboardPage(conn, self)
+        self.stack.addWidget(self.investment_dashboard)
         splitter.addWidget(self.stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -9336,6 +9484,11 @@ class MainWindow(QMainWindow):
         cal = getattr(self, "calendar", None)
         if cal is not None:
             cal.mark_stale()
+        # Same reasoning for the Investment Dashboard: its allocation and
+        # performance charts also take their colours from the active theme.
+        dash = getattr(self, "investment_dashboard", None)
+        if dash is not None:
+            dash.mark_stale()
         # A date format is only "used throughout the application" if changing it
         # reaches windows already open. Displayed dates re-render through
         # fmt_date on the next repaint; date EDITORS hold their format, so every
@@ -10245,6 +10398,28 @@ class MainWindow(QMainWindow):
         self.calendar.refresh_if_stale()
         return self.calendar
 
+    def show_investment_dashboard(self):
+        """View ▸ Investment Dashboard: bring the dashboard page of the register
+        area forward (holdings, allocation and performance across every
+        investment account). Same contract as show_calendar: a register with a
+        half-typed row is asked about first, because the stack would otherwise
+        tear the open editor away, and the single page instance built in
+        _install_central is reused rather than rebuilt per invocation."""
+        page = self.investment_dashboard
+        current = self.stack.currentWidget()
+        if (current is not None and current is not page
+                and getattr(current, "has_open_editor", None) is not None
+                and current.has_open_editor()):
+            if not self._resolve_open_edit(current):
+                return current              # cancelled -- stay where we are
+        self.stack.setCurrentWidget(page)
+        # Explicitly, not just on showEvent: a page swap inside a window that is
+        # itself hidden (or minimised) delivers no show event, and coming back to
+        # a stale picture of the portfolio is exactly the bug this page would
+        # have.
+        page.refresh_if_stale()
+        return page
+
     def _hide_account(self, account_id):
         """Toolbar Hide Account -> confirm, hide, and drop it off the bar and the
         open-register stack. It stays in the Accounts… list to bring back."""
@@ -10474,15 +10649,41 @@ class MainWindow(QMainWindow):
         return combo
 
     def _open_report_window(self, spec):
-        """Open the reusable report window on ``spec``. Modeless, so the window
-        is kept alive in a list — without a retained reference it is
-        garbage-collected the moment this method returns, and a single attribute
-        would evict the previous report kind when a second one is opened."""
+        """Open the reusable report window on ``spec`` — one window per report
+        kind. Modeless, so the window is kept alive in a list — without a
+        retained reference it is garbage-collected the moment this method
+        returns, and a single attribute would evict the previous report kind
+        when a second one is opened.
+
+        A report with two ways in (Capital Gains and Taxes sits on the Reports
+        menu AND on the Investment Dashboard's corner launcher) must not stack a
+        second identical window on top of the first. An already-open window on
+        the same spec is raised instead, so the second click lands the user back
+        on the report they already have, with its date range and sorting intact,
+        rather than on a fresh copy hiding it. A window the user has CLOSED is
+        dropped from the list and reopened fresh: retention only matters while
+        it is on screen.
+        """
         from mammon.ui.report_window import ReportWindow
+        live, existing = [], None
+        for open_win in getattr(self, "_report_windows", []):
+            try:
+                if not open_win.isVisible():
+                    continue           # closed by the user; let it go
+            except RuntimeError:
+                continue               # underlying C++ object already destroyed
+            live.append(open_win)
+            if existing is None and getattr(open_win, "spec", None) is spec:
+                existing = open_win
+        self._report_windows = live
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return existing
         win = ReportWindow(self.conn, parent=self, spec=spec)
-        self._report_windows = getattr(self, "_report_windows", [])
         self._report_windows.append(win)
         win.show()
+        return win
 
     def _cash_flow_window(self):
         """Open the reusable report window on the Cash Flow report."""
@@ -10504,6 +10705,20 @@ class MainWindow(QMainWindow):
         from mammon.ui.report_window import BY_PAYEE_SPEC
         self._open_report_window(BY_PAYEE_SPEC)
 
+    def _custom_reports_window(self):
+        """Open the Taxes and Custom Reports window (SRD 5.9r).
+
+        Not a ``ReportWindow`` spec: the other entries on this menu render a
+        fixed aggregation, while this one EDITS a stored definition and then
+        evaluates it. It is retained in the same list for the same reason — a
+        modeless window with no reference is collected the moment this returns.
+        """
+        from mammon.ui.custom_report_window import CustomReportWindow
+        win = CustomReportWindow(self.conn, parent=self)
+        self._report_windows = getattr(self, "_report_windows", [])
+        self._report_windows.append(win)
+        win.show()
+
     def _tag_window(self):
         """Open the reusable report window on the By Tag report."""
         from mammon.ui.report_window import BY_TAG_SPEC
@@ -10518,6 +10733,17 @@ class MainWindow(QMainWindow):
         """Open the reusable report window on the Investment Performance report."""
         from mammon.ui.report_window import INVESTMENT_PERFORMANCE_SPEC
         self._open_report_window(INVESTMENT_PERFORMANCE_SPEC)
+
+    def _capital_gains_window(self):
+        """Open the reusable report window on the Capital Gains and Taxes report.
+
+        The Investment Dashboard's top-left corner launcher reaches the same
+        report through ``investment_dashboard._open_report``. This is the menu
+        way in, so the report is not reachable ONLY from a page the user has to
+        know to visit first -- the same dual wiring Investment Performance has.
+        """
+        from mammon.ui.report_window import CAPITAL_GAINS_SPEC
+        self._open_report_window(CAPITAL_GAINS_SPEC)
 
     def _spending_report_dialog(self):
         import datetime as _dt
@@ -10836,7 +11062,12 @@ class MainWindow(QMainWindow):
             self._find_dialog.refresh_results()
         # The calendar page lives as long as the window, so it has to be told:
         # any write moves the balances its month is drawn from. It recomputes
-        # only when on screen (see CalendarPanel.mark_stale).
+        # only when on screen (see CalendarPanel.mark_stale). The Investment
+        # Dashboard is the same kind of long-lived home page over the same
+        # balances, so it takes the same notice.
         cal = getattr(self, "calendar", None)
         if cal is not None:
             cal.mark_stale()
+        dash = getattr(self, "investment_dashboard", None)
+        if dash is not None:
+            dash.mark_stale()

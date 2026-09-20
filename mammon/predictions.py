@@ -385,6 +385,33 @@ def collapse_series(rows, amount_of=None) -> list:
     return out
 
 
+def _fits_semimonthly(ds, median) -> bool:
+    """Whether a run of dates is twice a month: its median gap must be nearer
+    semimonthly than any other interval, AND three quarters of the dates must
+    sit within tolerance of a grid walked back from the LAST date with the
+    calendar rule (``scheduled._semimonthly_back``) rather than by multiples of
+    15.22 days.
+
+    The flat grid is not good enough here, which is why this function exists. A
+    flat 15.22-day grid does hold one year of semimonthly dates -- it strays at
+    most about 2.7 days, just inside the 3-day tolerance -- but the error grows
+    with the run, reaching 3.22 days over three years of the 1st and the 16th,
+    at which point real dates start failing their own cadence. Widening the
+    tolerance instead would have loosened it for every cadence and let biweekly
+    runs drift into a semimonthly answer, so the calendar does the work for
+    this one label and the flat path keeps its numbers."""
+    tol = dict((t[0], t[2]) for t in scheduled._INTERVAL_TESTS)["semimonthly"]
+    nearest = min(scheduled._INTERVAL_TESTS, key=lambda t: abs(median - t[1]))
+    if nearest[0] != "semimonthly" or abs(median - nearest[1]) > tol:
+        return False
+    grid, line = [ds[-1]], ds[-1]
+    while line > ds[0]:
+        line = _dt.date.fromisoformat(scheduled._semimonthly_back(line.isoformat()))
+        grid.append(line)
+    fits = sum(1 for d in ds if min(abs((d - g).days) for g in grid) <= tol)
+    return fits * 4 >= len(ds) * 3
+
+
 def fit_period(dates) -> Optional[str]:
     """The recurrence a run of dates fits, or None. The median gap picks the
     candidate interval; then every date is measured against a grid of that
@@ -392,13 +419,28 @@ def fit_period(dates) -> Optional[str]:
     of them sit within the interval's tolerance of a grid line. Measuring on
     the grid rather than gap by gap forgives what real series do: a payday
     moved for a holiday, a rent paid on the fifth one month and the third the
-    next, a period with no posting at all."""
+    next, a period with no posting at all.
+
+    Semimonthly (the 15th and the last day, the 1st and the 16th) is the one
+    cadence whose grid is NOT flat, so it is tested FIRST and separately, by
+    ``_fits_semimonthly``; everything that is not semimonthly then falls
+    through to the flat path below, unchanged and with semimonthly removed
+    from the table it chooses from. That two-stage shape is deliberate: it
+    makes the change provably additive, because no run that the flat path used
+    to label can be diverted by the new row -- the twice-a-month paycheck used
+    to come back "biweekly", 26 projected paydays a year against the real 24,
+    and a real paycheck collapsed out of untidy postings can have a median gap
+    of 17 that leans semimonthly but sits on no calendar grid. It falls back
+    and is still biweekly."""
     if len(dates) < 2:
         return None
     ds = [_dt.date.fromisoformat(d) for d in dates]
     gaps = sorted((b - a).days for a, b in zip(ds, ds[1:]))
     median = gaps[len(gaps) // 2]
-    label, days, tol = min(scheduled._INTERVAL_TESTS, key=lambda t: abs(median - t[1]))
+    if _fits_semimonthly(ds, median):
+        return "semimonthly"
+    flat = [t for t in scheduled._INTERVAL_TESTS if t[0] != "semimonthly"]
+    label, days, tol = min(flat, key=lambda t: abs(median - t[1]))
     if abs(median - days) > tol:
         return None
     last = ds[-1]
