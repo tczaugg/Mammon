@@ -330,39 +330,89 @@ def _looks_like_rows(vals: list) -> bool:
     return False
 
 
+# Key names that hold a script's row array, searched at EVERY depth (see
+# _rows_from): the one thing that survives the generator reorganizing
+# output_data is that the rows still sit under a name like "transactions".
+_ROW_ARRAY_KEYS = ("records", "transactions", "rows", "items", "results",
+                   "result", "data", "output", "extractions")
+
+
+def _rows_in_list(vals, *, wrappers_only: bool = False) -> Optional[list]:
+    """Rows out of a LIST value: the dicts themselves when they ARE rows, else
+    whatever each one holds ONE LEVEL DOWN.
+
+    A list of dicts is one of two things, and only the shape tells them apart:
+    the rows, or a list of per-account WRAPPERS that carry the rows inside
+    (``{"accountName": "Checking", "transactions": [...]}``). Descending is what
+    makes the reader indifferent to which the script's author chose -- see
+    :func:`_rows_from`.
+
+    ``wrappers_only`` is the trust dial. On the named-key path (``transactions``
+    and friends) the key already vouches for the list, so dicts that merely fail
+    the shape test are still returned -- a script whose rows use vocabulary
+    :func:`_looks_like_rows` does not know must not be thrown away. On the
+    gather-any-list fallback there is no such vouching, so a list that is
+    neither rows nor a wrapper of rows is rejected: that is the
+    ``subAccountList`` lookup-table guard.
+    """
+    dicts = [v for v in vals if isinstance(v, dict)]
+    if not dicts:
+        return None
+    if _looks_like_rows(dicts):
+        return dicts
+    gathered = []
+    for d in dicts:
+        nested = _rows_from(d)
+        if nested:
+            gathered.extend(nested)
+    if gathered:
+        return gathered
+    return None if wrappers_only else dicts
+
+
 def _rows_from(out) -> Optional[list]:
     """Pull a flat list of row dicts out of a script's ``output_data`` value.
 
     API-style scripts return rows in a shape that varies by script: a bare list
     of row dicts, a dict wrapping them under a name
-    (``records``/``transactions``/an array name the demo declared), or a dict
+    (``records``/``transactions``/an array name the demo declared), a dict
     keyed per extraction whose values are row lists (the '2/2 extractions'
-    case). Returns a flat list of dict rows, or None."""
+    case), or a LIST of per-account wrapper objects each holding its own rows.
+
+    The shape is not stable even for one institution, because the script is
+    GENERATED: re-recording America First on 2026-09-19 turned
+    ``{"Checking": {"transactions": [...]}}`` into
+    ``{"accounts": [{"accountName": "Checking", "transactions": [...]}]}``, and
+    a reader that only recursed through dict VALUES skipped the list whole and
+    reported an empty run -- 8 transactions silently not imported. What survived
+    the rewrite, and what every such shape has in common, is the ``transactions``
+    KEY; so the named-key scan below runs at every depth, through dicts and
+    through the dicts inside lists, rather than only at the top. Returns a flat
+    list of dict rows, or None."""
     if isinstance(out, list):
-        rows = [r for r in out if isinstance(r, dict)]
-        return rows or None
+        return _rows_in_list(out)
     if not isinstance(out, dict):
         return None
-    for key in ("records", "transactions", "rows", "items", "results",
-                "result", "data", "output", "extractions"):
+    for key in _ROW_ARRAY_KEYS:
         rows = _rows_from(out.get(key))
         if rows:
             return rows
     # Fall back to every non-metadata value, so a script that named its array
     # (e.g. "shareSavings"), returned one list per extraction, or nested the
-    # rows under a wrapper dict still yields them. An array that does not hold
-    # transaction-SHAPED dicts is skipped rather than concatenated: a script
-    # that returns a lookup table beside its rows (America First's
-    # ``subAccountList``) would otherwise contribute blank review rows, and the
-    # key name it uses is per-bank so only the shape can be tested
-    # (:func:`_looks_like_rows`).
+    # rows under a wrapper dict/list still yields them. An array that holds
+    # neither transaction-SHAPED dicts nor wrappers around them is skipped
+    # rather than concatenated: a script that returns a lookup table beside its
+    # rows (America First's ``subAccountList``) would otherwise contribute blank
+    # review rows, and the key name it uses is per-bank so only the shape can be
+    # tested (:func:`_looks_like_rows`).
     gathered = []
     for key, val in out.items():
         if str(key).lower() in _NON_RECORD_KEYS:
             continue
         if isinstance(val, list):
-            if _looks_like_rows(val):
-                gathered.extend(r for r in val if isinstance(r, dict))
+            rows = _rows_in_list(val, wrappers_only=True)
+            if rows:
+                gathered.extend(rows)
         elif isinstance(val, dict):
             nested = _rows_from(val)
             if nested:

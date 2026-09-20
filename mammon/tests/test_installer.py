@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -191,6 +192,52 @@ def test_an_incomplete_payload_says_to_extract_the_zip(tmp_path):
     with pytest.raises(inst.InstallError, match="Extract the WHOLE ZIP"):
         inst.check_payload(payload)
     assert inst.check_payload(_payload(tmp_path / "ok"))["version"] == "9.9.9"
+
+
+def _source_checkout(root: Path) -> Path:
+    """What GitHub's green "Code -> Download ZIP" leaves on disk: the repo, whose
+    installer/ folder holds the seven scripts and none of the built payload."""
+    installer = root / "Mammon-main" / "installer"
+    installer.mkdir(parents=True)
+    for name in ("build.py", "install.py", "setup.bat", "uninstall.bat",
+                 "mammon-mcp.bat", "smoke_installed.py", "README.md"):
+        (installer / name).write_text(name)
+    for name in ("pyproject.toml", "requirements.txt"):
+        (installer.parent / name).write_text(name)
+    return installer
+
+
+def test_the_source_archive_is_not_reported_as_a_half_extracted_zip(tmp_path):
+    """Regression (a first-time installer, reported 2026-09-20): downloading the
+    repo instead of the Setup ZIP makes every required file missing at once,
+    which the old message blamed on a partial extraction -- so the advice was
+    "Extract All", which he had already done, and could never fix. Name the real
+    cause and point at Releases instead.
+    """
+    with pytest.raises(inst.InstallError) as exc:
+        inst.check_payload(_source_checkout(tmp_path))
+    msg = str(exc.value)
+    assert "SOURCE CODE" in msg
+    assert inst.RELEASES_URL in msg
+    assert "Extract the WHOLE ZIP" not in msg      # the advice that loops
+
+
+def test_a_real_partial_extraction_still_gets_the_extract_advice(tmp_path):
+    """The two diagnoses must not bleed: a payload with no build.py beside it and
+    no repo above it is a genuinely broken extraction, whatever is missing."""
+    payload = _payload(tmp_path / "payload")
+    shutil.rmtree(payload / "python")
+    with pytest.raises(inst.InstallError, match="Extract the WHOLE ZIP"):
+        inst.check_payload(payload)
+
+
+def test_a_complete_payload_is_never_called_a_source_checkout(tmp_path):
+    """build.py alone must not trip it -- only build.py AND the repo one level up,
+    which a built payload never has."""
+    payload = _payload(tmp_path / "ok")
+    (payload / "build.py").write_text("stray")
+    assert not inst.looks_like_source_checkout(payload)
+    assert inst.check_payload(payload)["version"] == "9.9.9"
 
 
 def test_the_marker_is_written_before_the_package_arrives(tmp_path, monkeypatch):

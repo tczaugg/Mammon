@@ -94,13 +94,54 @@ def default_start_menu() -> Path:
 # ---------------------------------------------------------------------------
 # Program files
 # ---------------------------------------------------------------------------
+#: Present ONLY in a source checkout, never in a built payload: build.py is the
+#: script that CREATES the payload, and the repo's packaging files sit one level
+#: up from installer/. See :func:`looks_like_source_checkout`.
+SOURCE_MARKER = "build.py"
+REPO_MARKERS = ("pyproject.toml", "requirements.txt")
+RELEASES_URL = "https://github.com/tczaugg/Mammon/releases/latest"
+
+
+def looks_like_source_checkout(payload: Path) -> bool:
+    """True when ``payload`` is the repo's own ``installer/`` folder rather than
+    an extracted Setup ZIP.
+
+    GitHub's green "Code -> Download ZIP" button is far more prominent than the
+    Releases page, so the first thing a new user downloads is usually the SOURCE
+    archive, which extracts to ``<repo>-main`` and carries the seven installer
+    SCRIPTS but none of the 170 MB payload they drive (it is gitignored -- built
+    by build.py and attached to the release). Every required file is then
+    missing at once, which reads exactly like a half-extracted ZIP, and the
+    "Extract All" advice sends that user round the same loop forever. Both
+    markers must agree, so a genuinely broken extraction is never mistaken for
+    this.
+    """
+    return ((payload / SOURCE_MARKER).exists()
+            and any((payload.parent / f).exists() for f in REPO_MARKERS))
+
+
 def check_payload(payload: Path) -> dict:
-    """Refuse an incomplete payload (typically: setup.bat run from inside the
-    ZIP viewer, which extracts that one file and nothing else)."""
+    """Refuse an incomplete payload -- either the source archive downloaded in
+    place of the Setup ZIP, or setup.bat run from inside the ZIP viewer, which
+    extracts that one file and nothing else. The two need DIFFERENT advice."""
     required = [payload / "python" / "python.exe", payload / "python" / "pythonw.exe",
                 payload / "site-packages", payload / "mammon" / "app.py",
                 payload / BUILD_INFO, *(payload / f for f in PROGRAM_FILES)]
     missing = [str(p) for p in required if not p.exists()]
+    if missing and looks_like_source_checkout(payload):
+        raise InstallError(
+            "This is the Mammon SOURCE CODE, not the installer.\n\n"
+            "It looks like you used the green \"Code\" button on GitHub and chose "
+            "\"Download ZIP\". That gives you the source (a folder named "
+            "Mammon-main), which does not contain Python or the program itself.\n\n"
+            "The installer is a separate download, about 170 MB, on the Releases "
+            f"page:\n\n    {RELEASES_URL}\n\n"
+            "Download Mammon-<version>-Setup.zip from there, right-click it and "
+            "choose Extract All, then run setup.bat from inside the Mammon_Setup "
+            "folder.\n\n"
+            "(If you meant to run from this source instead, you need Python 3.12 "
+            "yourself: pip install -r requirements.txt, then python -m mammon.app "
+            "from the folder above this one.)")
     if missing:
         raise InstallError(
             "The installer is incomplete. Extract the WHOLE ZIP to a folder "

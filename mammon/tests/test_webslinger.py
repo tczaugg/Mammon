@@ -540,3 +540,68 @@ def test_named_row_arrays_are_still_gathered():
     rows = webslinger._extract_records(payload)
     assert len(rows) == 2
     assert {r["statementDescription"] for r in rows} == {"DIVIDEND", "POS PURCHASE"}
+
+
+# The America First payload AFTER the script was regenerated on 2026-09-19:
+# per-account wrapper OBJECTS in a list, each holding its own "transactions",
+# where the previous recording keyed a dict by account name. Rows anonymized.
+_WRAPPED_IN_A_LIST = {"accounts": [{
+    "accountName": "Checking",
+    "subAccountId": 1111111,
+    "transactionCount": 2,
+    "transactions": [
+        {"transactionId": "T1", "postedDate": "2026-09-15T00:00:13.000-06:00",
+         "amount": "-52.55", "checkNumber": "", "isDebit": True,
+         "statementDescription": "AUTOMATIC WITHDRAWAL, ANON PAYEE WEB (S)"},
+        {"transactionId": "T2", "postedDate": "2026-09-11T00:00:03.000-06:00",
+         "amount": "3344.54", "checkNumber": "", "isDebit": False,
+         "statementDescription": "AUTOMATIC DEPOSIT, ANON EMPLOYER PAYROLL PPD"},
+    ]}]}
+
+
+def test_rows_wrapped_in_a_list_of_account_objects_are_found():
+    """Regression (the user): a Download reported nothing returned while the
+    saved run output held 8 transactions.
+
+    The script is GENERATED, so regenerating it reorganized output_data from
+    ``{"Checking": {"transactions": [...]}}`` to a LIST of per-account objects.
+    The reader recursed through dict values only, so the wrapper list -- whose
+    objects carry accountName/subAccountId/transactionCount and no row fields of
+    their own -- failed the row-shape test and was dropped whole. Mammon then
+    took the EXPORT branch, found no file in Downloads, and raised
+    DownloadFailedError. The rows were never written anywhere.
+    """
+    rows = webslinger._extract_records({"output_data": _WRAPPED_IN_A_LIST})
+    assert [r["transactionId"] for r in rows] == ["T1", "T2"]
+    # the wrapper's own fields must not leak in as a row
+    assert all("accountName" not in r for r in rows)
+
+
+def test_both_generated_shapes_of_one_script_yield_the_same_rows():
+    """The point of the fix: the reader keys on the ``transactions`` KEY, which
+    both recordings of this script emit, not on where the generator hung it."""
+    keyed_by_account_name = {"Checking": {
+        "transactions": _WRAPPED_IN_A_LIST["accounts"][0]["transactions"]}}
+    assert (webslinger._extract_records({"output_data": keyed_by_account_name})
+            == webslinger._extract_records({"output_data": _WRAPPED_IN_A_LIST}))
+
+
+def test_a_lookup_table_of_wrappers_holding_no_rows_is_still_rejected():
+    """Descending into wrapper objects must not resurrect the blank-row bug: the
+    subAccountList entries hold no nested row array, so they yield nothing
+    rather than becoming rows themselves."""
+    payload = {"output_data": {
+        "subAccountList": [{"id": 1234567, "shortName": "Household Checking"},
+                           {"id": 7654321, "shortName": "Checking"}],
+        "accounts": _WRAPPED_IN_A_LIST["accounts"]}}
+    rows = webslinger._extract_records(payload)
+    assert [r["transactionId"] for r in rows] == ["T1", "T2"]
+    assert all("shortName" not in r for r in rows)
+
+
+def test_rows_under_a_named_key_survive_an_unknown_vocabulary():
+    """The named key vouches for its list: rows whose field names _looks_like_rows
+    does not recognise are still returned, so tightening the shape test never
+    silently discards a script's data."""
+    odd = [{"timestamp": "2026-09-01", "value": "1.00"}]
+    assert webslinger._extract_records({"output_data": {"records": odd}}) == odd
