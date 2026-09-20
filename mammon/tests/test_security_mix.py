@@ -18,11 +18,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, investments, ledger, portfolio, rebalance, security_mix
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mix.db")
+    c = fresh_db(tmp_path / "mix.db")
     yield c
     c.close()
 

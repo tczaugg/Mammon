@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def qapp():
 def win(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "dashboard_menu.db")
+    conn = fresh_db(tmp_path / "dashboard_menu.db")
     sample_data(conn)
     w = MainWindow(conn)
     try:

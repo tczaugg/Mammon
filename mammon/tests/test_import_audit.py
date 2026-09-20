@@ -10,11 +10,12 @@ import pytest
 
 from mammon import db, importers, instruments, investments, ledger, securities
 from mammon.reports import import_audit
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "audit.db")
+    c = fresh_db(tmp_path / "audit.db")
     yield c
     c.close()
 

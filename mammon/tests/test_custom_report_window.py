@@ -55,6 +55,7 @@ from mammon.ui.custom_report_window import (
     drill_tree_rows,
     report_def_to_csv,
 )
+from mammon.tests import fresh_db
 
 
 START = "2025-01-01"
@@ -70,7 +71,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "custom_window.db")
+    c = fresh_db(tmp_path / "custom_window.db")
     yield c
     c.close()
 

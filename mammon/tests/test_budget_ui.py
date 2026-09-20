@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 from mammon import budgets, db, ledger
 from mammon.ui import budget_widget
 from mammon.ui.budget_widget import BudgetLinesModel, BudgetWidget
+from mammon.tests import fresh_db
 
 B = BudgetLinesModel.BUDGETED
 A = BudgetLinesModel.ACTUAL
@@ -29,7 +30,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "budget_ui.db")
+    c = fresh_db(tmp_path / "budget_ui.db")
     yield c
     c.close()
 

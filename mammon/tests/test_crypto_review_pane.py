@@ -30,6 +30,7 @@ import pytest
 
 from mammon import crypto, db, import_review, ledger
 from mammon.ui.widgets import CryptoRegisterWidget, MainWindow
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -49,7 +50,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_review.db")
+    c = fresh_db(tmp_path / "crypto_review.db")
     yield c
     c.close()
 

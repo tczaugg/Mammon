@@ -31,6 +31,7 @@ from mammon.ui.delegates import (PayeeCompleter, _accept_active_completion,
                                  payee_completions)
 from mammon.ui.models import RegisterModel, fmt_cents
 from mammon.ui.widgets import RegisterWidget, TransactionDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -40,7 +41,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "quickfill.db")
+    c = fresh_db(tmp_path / "quickfill.db")
     yield c
     c.close()
 

@@ -84,6 +84,7 @@ from mammon.ui.investment_center import (
     recent_activity,
 )
 from mammon.ui.models import fmt_cents, fmt_date, fmt_money
+from mammon.tests import fresh_db
 
 PRICE_DATE = "2026-03-31"
 
@@ -105,7 +106,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "investment_center.db")
+    c = fresh_db(tmp_path / "investment_center.db")
     yield c
     c.close()
 

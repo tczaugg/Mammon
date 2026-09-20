@@ -20,11 +20,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, ledger, undo
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "split.db")
+    c = fresh_db(tmp_path / "split.db")
     yield c
     c.close()
 

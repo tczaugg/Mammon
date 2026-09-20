@@ -21,6 +21,7 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, investments, ledger
+from mammon.tests import fresh_db
 
 STOCK = "ACME"
 CALL45 = "ACME 260417C00045000"
@@ -30,7 +31,7 @@ PUT35 = "ACME 260417P00035000"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "short.db")
+    c = fresh_db(tmp_path / "short.db")
     yield c
     c.close()
 

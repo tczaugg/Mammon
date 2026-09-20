@@ -7,11 +7,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, importers, ledger, loans, scheduled
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

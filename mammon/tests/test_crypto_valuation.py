@@ -31,6 +31,7 @@ from decimal import ROUND_HALF_UP, Decimal
 import pytest
 
 from mammon import crypto, db, investments, ledger
+from mammon.tests import fresh_db
 
 ETH_QTY = "27.176547"
 ETH_PRICE = 2000                 # dollars per ETH -> a deterministic coin value
@@ -44,7 +45,7 @@ def _coin_cents(qty: str, price_dollars) -> int:
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_valuation.db")
+    c = fresh_db(tmp_path / "crypto_valuation.db")
     yield c
     c.close()
 

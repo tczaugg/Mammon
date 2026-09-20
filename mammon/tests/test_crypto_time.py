@@ -15,6 +15,7 @@ import pytest
 from mammon import crypto, db, import_review, ledger
 from mammon.importers import coinbase_csv, crypto_core, crypto_csv
 from mammon.importers.record import stamp_time
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "coinbase_history.csv"
 WALLET = "0x1111111111111111111111111111111111111111"
@@ -27,7 +28,7 @@ MIDNIGHT = 1581724800                     # 2020-02-15 00:00:00 UTC
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "time.db")
+    c = fresh_db(tmp_path / "time.db")
     yield c
     c.close()
 

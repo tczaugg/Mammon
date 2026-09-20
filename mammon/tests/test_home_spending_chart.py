@@ -29,11 +29,12 @@ from mammon.reports.charts import (
     SpendingPie,
     spending_by_period,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

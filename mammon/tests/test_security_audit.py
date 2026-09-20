@@ -23,6 +23,7 @@ import pytest
 
 from mammon import db, instruments
 from mammon.reports import security_audit
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def conn(db_path):
-    c = db.init_db(db_path)
+    c = fresh_db(db_path)
     yield c
     c.close()
 

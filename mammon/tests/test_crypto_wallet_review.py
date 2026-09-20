@@ -43,6 +43,7 @@ from mammon.ui import import_review_widget as irw
 from mammon.ui.models import CryptoRegisterModel
 from mammon.ui.widgets import (CryptoHoldingsDialog, CryptoRegisterWidget,
                                MainWindow, NetWorthByAssetDialog)
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etherscan_eth_2020.csv"
 # The SAME export shape under Etherscan's current column names.
@@ -69,7 +70,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "wallet.db")
+    c = fresh_db(tmp_path / "wallet.db")
     yield c
     c.close()
 

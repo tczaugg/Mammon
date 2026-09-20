@@ -21,6 +21,7 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, instruments, investments, ledger, securities
+from mammon.tests import fresh_db
 
 # One synthetic issuer and two OSI contracts on it. ACME is not a real ticker.
 STOCK = "ACME"
@@ -33,7 +34,7 @@ AFTER_EXPIRY = "2026-02-02"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "options.db")
+    c = fresh_db(tmp_path / "options.db")
     yield c
     c.close()
 

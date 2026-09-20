@@ -23,11 +23,12 @@ import pytest
 
 from mammon import asset_values, db, investments, ledger
 from mammon.webslinger import FakeWebSlingerClient, RunResult
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "valuation.db")
+    c = fresh_db(tmp_path / "valuation.db")
     yield c
     c.close()
 

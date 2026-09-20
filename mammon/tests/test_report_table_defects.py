@@ -26,6 +26,7 @@ from mammon.ui.report_window import (
     account_balances_rows,
     itemize_tree_rows,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -179,7 +180,7 @@ def test_report_window_renders_renamed_headers(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.report_window import ReportWindow
 
-    conn = db.init_db(tmp_path / "hdr.db")
+    conn = fresh_db(tmp_path / "hdr.db")
     sample_data(conn)
     try:
         for spec, first in [(CASH_FLOW_SPEC, "Direction"),

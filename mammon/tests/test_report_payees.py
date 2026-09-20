@@ -7,11 +7,12 @@ import pytest
 
 from mammon import db, ledger
 from mammon.reports import payees
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "payees.db")
+    c = fresh_db(tmp_path / "payees.db")
     yield c
     c.close()
 

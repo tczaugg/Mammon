@@ -19,6 +19,7 @@ import datetime as _dt
 import pytest
 
 from mammon import db, ledger, predictions, projection, scheduled
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 PAYEE = "Talkline Mobile"          # invented: four family lines on one bill payee
@@ -27,7 +28,7 @@ ROTATION_START = "2026-05-01"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "cadence.db")
+    c = fresh_db(tmp_path / "cadence.db")
     yield c
     c.close()
 

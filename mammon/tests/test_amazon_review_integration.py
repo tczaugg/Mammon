@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, ledger, import_review
+from mammon.tests import fresh_db
 
 
 # --- synthetic invoice fixture (newer priceAccounting scrape schema) --------
@@ -58,7 +59,7 @@ def _write_invoice(tmp_path, orders, name="amazon_invoices.json"):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

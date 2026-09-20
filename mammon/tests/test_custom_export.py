@@ -11,6 +11,7 @@ import pytest
 
 from mammon import db, ledger
 from mammon.reports import custom, custom_export
+from mammon.tests import fresh_db
 
 START = "2025-01-01"
 END = "2025-12-31"
@@ -24,7 +25,7 @@ TOTAL = "TX:total"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "export.db")
+    c = fresh_db(tmp_path / "export.db")
     yield c
     c.close()
 

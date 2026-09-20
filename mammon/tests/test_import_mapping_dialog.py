@@ -20,6 +20,7 @@ import pytest
 
 from mammon import db, ledger
 from mammon.importers import tabular
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -31,7 +32,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "m.db")
+    c = fresh_db(tmp_path / "m.db")
     yield c
     c.close()
 
@@ -371,7 +372,7 @@ def test_idle_session_writes_no_autobackups(qapp, tmp_path, monkeypatch):
     from mammon import backup, db
     from mammon.ui.widgets import MainWindow
     p = tmp_path / "m.db"
-    c = db.init_db(p)
+    c = fresh_db(p)
     bdir = tmp_path / "backups"
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
     win = MainWindow(c, db_path=str(p))
@@ -392,7 +393,7 @@ def test_autobackup_fires_once_per_change_not_per_tick(qapp, tmp_path, monkeypat
     from mammon import backup, db
     from mammon.ui.widgets import MainWindow
     p = tmp_path / "m.db"
-    c = db.init_db(p)
+    c = fresh_db(p)
     win = MainWindow(c, db_path=str(p))
     calls = []
     monkeypatch.setattr(backup, "create_backup",

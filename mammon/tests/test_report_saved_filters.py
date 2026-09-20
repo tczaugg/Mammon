@@ -32,6 +32,7 @@ from mammon.ui.report_saved_filters import (
     save_filter_set,
     saved_filter_names,
 )
+from mammon.tests import fresh_db
 
 CATEGORIES = ["Groceries", "Rent", "Salary"]
 
@@ -51,7 +52,7 @@ def _isolated_settings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "sf.db")
+    c = fresh_db(tmp_path / "sf.db")
     yield c
     c.close()
 

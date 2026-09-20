@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 from mammon import budgets, category_rules, db, ledger, scheduled
 from mammon.ui import categories_dialog
 from mammon.ui.categories_dialog import CategoriesDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +34,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "catmgr.db")
+    c = fresh_db(tmp_path / "catmgr.db")
     yield c
     c.close()
 

@@ -13,11 +13,12 @@ import pytest
 
 from mammon import category_rules, category_tree, db, import_review, ledger, rename_tree
 from mammon.importers.record import NormalizedTxn
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -446,7 +447,7 @@ def test_transfer_row_keeps_transfer_payee_no_category_no_learning(conn, account
 # ---------------------------------------------------------------------------
 def test_learned_categories_survive_restart(tmp_path):
     path = tmp_path / "persist.db"
-    c1 = db.init_db(path)
+    c1 = fresh_db(path)
     acct = ledger.create_account(c1, "Checking", "checking")
     cid = ledger.resolve_category(c1, "Dining")
     # Save four Hulu rows: enough for the learned payee to be CONFIDENT (the
@@ -458,7 +459,7 @@ def test_learned_categories_survive_restart(tmp_path):
     assert category_tree.known_categories(c1, "Hulu")[0][0] == cid
     c1.close()
 
-    c2 = db.init_db(path)
+    c2 = fresh_db(path)
     # a fresh connection to the same file still predicts the learned category.
     m2 = import_review.map_row(_row("HULU 877-9999 SANTA MONICA", tid="H2"))
     payee, cat = import_review.predict_fields(c2, m2)

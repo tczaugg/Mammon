@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import QApplication, QDialog
 from mammon import db, ledger
 from mammon.ui import widgets
 from mammon.ui.models import RegisterModel
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -42,7 +43,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "new_split.db")
+    c = fresh_db(tmp_path / "new_split.db")
     yield c
     c.close()
 

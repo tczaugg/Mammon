@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QApplication
 
 from mammon import db, investments, ledger, portfolio, rebalance
 from mammon.ui.rebalance_dialog import RebalanceDialog
+from mammon.tests import fresh_db
 
 AS_OF = "2026-06-30"
 
@@ -25,7 +26,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rebal_ui.db")
+    c = fresh_db(tmp_path / "rebal_ui.db")
     yield c
     c.close()
 

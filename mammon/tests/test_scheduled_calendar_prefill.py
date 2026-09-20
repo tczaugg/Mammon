@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import QApplication
 
 from mammon import categorize, db, ledger
 from mammon.ui.scheduled_payments_dialog import ScheduledPaymentEditor
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +32,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "prefill.db")
+    c = fresh_db(tmp_path / "prefill.db")
     yield c
     c.close()
 

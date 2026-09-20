@@ -22,11 +22,12 @@ from mammon import db, fx, investments, ledger
 from mammon.reports import charts
 
 import pytest
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "nwc.db")
+    c = fresh_db(tmp_path / "nwc.db")
     yield c
     c.close()
 

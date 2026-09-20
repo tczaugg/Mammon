@@ -13,6 +13,7 @@ from mammon import db, ledger, loans, loans_schedule
 from mammon.ui.delegates import date_edit_iso
 from mammon.ui.loan_payment_dialog import EnterLoanPaymentDialog
 from mammon.ui.widgets import RegisterWidget
+from mammon.tests import fresh_db
 
 PAYMENT = 1268_99
 
@@ -25,7 +26,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "enter.db")
+    c = fresh_db(tmp_path / "enter.db")
     yield c
     c.close()
 

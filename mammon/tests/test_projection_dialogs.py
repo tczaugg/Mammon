@@ -15,6 +15,7 @@ from mammon.ui import prefs
 from mammon.ui.projection_dialogs import CalendarPanel, ProjectedBalancesDialog
 from mammon.ui.scheduled_payments_dialog import (ScheduledPaymentEditor,
                                                  ScheduledPaymentsDialog)
+from mammon.tests import fresh_db
 
 TODAY = "2026-01-08"
 
@@ -34,7 +35,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "dialogs.db")
+    c = fresh_db(tmp_path / "dialogs.db")
     yield c
     c.close()
 
@@ -237,7 +238,7 @@ def test_editor_round_trips_transfer_lead_and_auto_enter(qapp, conn, seeded):
 def test_main_window_pre_enters_due_payments_on_launch(qapp, tmp_path):
     from mammon.ui.widgets import MainWindow
     from mammon.webslinger import FakeWebSlingerClient
-    conn = db.init_db(tmp_path / "launch.db")
+    conn = fresh_db(tmp_path / "launch.db")
     chk = ledger.create_account(conn, "Checking", "checking", opening_balance=100_00)
     from PyQt5.QtCore import QDate
     today = QDate.currentDate().toString("yyyy-MM-dd")
@@ -253,7 +254,7 @@ def test_main_window_pre_enters_due_payments_on_launch(qapp, tmp_path):
     win.close()
     # With the preference off, launch enters nothing.
     prefs.set_auto_enter_on_launch(False)
-    conn2 = db.init_db(tmp_path / "launch2.db")
+    conn2 = fresh_db(tmp_path / "launch2.db")
     chk2 = ledger.create_account(conn2, "Checking", "checking", opening_balance=100_00)
     scheduled.add_scheduled(conn2, chk2, payee="Due Co", amount=-5_00, frequency="monthly",
                             next_date=today)

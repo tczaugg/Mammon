@@ -15,13 +15,14 @@ import pytest
 from mammon import (db, importers, ledger, loans, loans_schedule, mcp_tools,
                     projection, scheduled)
 from mammon.importers.record import NormalizedTxn
+from mammon.tests import fresh_db
 
 PAYMENT = 1268_99
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "funding.db")
+    c = fresh_db(tmp_path / "funding.db")
     yield c
     c.close()
 

@@ -25,11 +25,12 @@ from mammon.reports import (
 )
 
 from datetime import date
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "reports.db")
+    c = fresh_db(tmp_path / "reports.db")
     yield c
     c.close()
 

@@ -19,6 +19,7 @@ from mammon.ui.report_filters import (
     PERIOD_PRESETS, PERIOD_DEFAULT, NET_WORTH_PERIOD_DEFAULT, resolve_period,
     period_for_range,
 )
+from mammon.tests import fresh_db
 
 # The two families the dropdown unifies. Neither may be dropped from the option
 # set again -- this is the regression the union restores.
@@ -72,7 +73,7 @@ def test_resolve_every_option_yields_a_concrete_range(tmp_path):
     """resolve_period turns every dropdown key -- both families -- into an
     inclusive (start, end) ISO range, except 'custom' which defers to the gear
     dialog and returns None."""
-    conn = db.init_db(tmp_path / "rf.db")
+    conn = fresh_db(tmp_path / "rf.db")
     try:
         acct = ledger.create_account(conn, "Checking", "asset")
         ledger.add_transaction(conn, account_id=acct, date="2020-01-15",
@@ -97,7 +98,7 @@ def test_resolve_every_option_yields_a_concrete_range(tmp_path):
 def test_earliest_spans_the_whole_ledger(tmp_path):
     """'earliest' starts at the ledger's first transaction and reaches at least
     'today', so a freshly opened report covers everything the ledger holds."""
-    conn = db.init_db(tmp_path / "rf.db")
+    conn = fresh_db(tmp_path / "rf.db")
     try:
         acct = ledger.create_account(conn, "Checking", "asset")
         ledger.add_transaction(conn, account_id=acct, date="2001-03-04",
@@ -111,7 +112,7 @@ def test_earliest_spans_the_whole_ledger(tmp_path):
 
 
 def _seeded(tmp_path):
-    conn = db.init_db(tmp_path / "rf.db")
+    conn = fresh_db(tmp_path / "rf.db")
     acct = ledger.create_account(conn, "Checking", "asset")
     ledger.add_transaction(conn, account_id=acct, date="2020-01-15",
                            amount=10000, payee="Opening")
@@ -168,7 +169,7 @@ def test_period_for_range_falls_back_to_custom(tmp_path):
 def test_earliest_on_empty_ledger_falls_back(tmp_path):
     """With no transactions there are no bounds; 'earliest' falls back to a
     concrete recent window rather than crashing or returning None."""
-    conn = db.init_db(tmp_path / "rf.db")
+    conn = fresh_db(tmp_path / "rf.db")
     try:
         today = _dt.date(2024, 9, 3)
         rng = resolve_period("earliest", conn, today)

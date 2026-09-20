@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from mammon import db, ledger, loans, loans_schedule
+from mammon.tests import fresh_db
 
 # Acceptance tests run against a real ledger, and ONLY when one is named
 # explicitly via $MAMMON_ACCEPTANCE_DB. They deliberately do NOT fall back to
@@ -84,7 +85,7 @@ def _original_unmutated():
 def real_conn(tmp_path):
     copy = tmp_path / "mammon_copy.db"
     shutil.copy2(REAL_DB, copy)
-    c = db.init_db(copy)
+    c = fresh_db(copy)
     yield c
     c.close()
 

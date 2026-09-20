@@ -30,6 +30,7 @@ import pytest
 from mammon import db, ledger
 from mammon.reports import custom, report_defs
 from mammon.reports._lines import signed_lines
+from mammon.tests import fresh_db
 
 START = "2025-01-01"
 END = "2025-12-31"
@@ -37,7 +38,7 @@ END = "2025-12-31"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "custom.db")
+    c = fresh_db(tmp_path / "custom.db")
     yield c
     c.close()
 

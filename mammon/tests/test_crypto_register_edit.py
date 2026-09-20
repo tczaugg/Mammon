@@ -35,6 +35,7 @@ from PyQt5.QtCore import QDate, Qt
 from mammon import crypto, db
 from mammon.ui.models import CryptoRegisterModel
 from mammon.ui.widgets import CryptoTransactionDialog
+from mammon.tests import fresh_db
 
 COUNTERPARTY = "0x2222222222222222222222222222222222222222"
 RECIPIENT = "0x3333333333333333333333333333333333333333"
@@ -55,7 +56,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "edit.db")
+    c = fresh_db(tmp_path / "edit.db")
     yield c
     c.close()
 

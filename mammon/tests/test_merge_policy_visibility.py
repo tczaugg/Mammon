@@ -22,11 +22,12 @@ import pytest
 
 from mammon import db, import_review, ledger
 from mammon.import_review import build_review
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

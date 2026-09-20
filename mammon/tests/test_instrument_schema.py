@@ -9,6 +9,7 @@ classification the user never made about forty years of history.
 from __future__ import annotations
 
 from mammon import db
+from mammon.tests import fresh_db
 
 # The seven columns _V67 adds, in the order the migration adds them.
 NEW_COLUMNS = [
@@ -34,7 +35,7 @@ def _user_version(conn) -> int:
 def test_fresh_db_is_version_67_with_all_seven_columns(tmp_path):
     """A freshly initialized database is at the current version (67 or later)
     and carries the full column set."""
-    conn = db.init_db(tmp_path / "fresh.db")
+    conn = fresh_db(tmp_path / "fresh.db")
     try:
         assert db.SCHEMA_VERSION >= 67
         assert _user_version(conn) == db.SCHEMA_VERSION
@@ -57,7 +58,7 @@ def test_column_is_option_right_not_the_sqlite_keyword(tmp_path):
     """`RIGHT` is a SQLite keyword (right joins, 3.39+). Naming a column that
     parses today but is a latent failure in some untested statement context is
     exactly the kind of trap this migration was written to avoid."""
-    conn = db.init_db(tmp_path / "fresh.db")
+    conn = fresh_db(tmp_path / "fresh.db")
     try:
         cols = _columns(conn, "securities")
         assert "option_right" in cols
@@ -98,7 +99,7 @@ def test_v67_upgrades_a_v66_db_and_leaves_every_row_unclassified(tmp_path):
     assert "kind" not in cols_before          # the feature is genuinely absent
     conn.close()
 
-    conn = db.init_db(path)                   # in-place upgrade runs _V67 onward
+    conn = fresh_db(path)                   # in-place upgrade runs _V67 onward
     try:
         assert _user_version(conn) == db.SCHEMA_VERSION
         cols = _columns(conn, "securities")
@@ -128,7 +129,7 @@ def test_init_db_is_idempotent_at_67(tmp_path):
     """Running init_db twice is a no-op the second time: same version, same
     columns, same rows, and no duplicate-column error from re-running _V67."""
     path = tmp_path / "twice.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     conn.execute(
         "INSERT INTO securities (symbol, name, sec_type) "
         "VALUES ('AAPL', 'Apple Inc', 'STOCK')")
@@ -136,7 +137,7 @@ def test_init_db_is_idempotent_at_67(tmp_path):
     first_cols = _columns(conn, "securities")
     conn.close()
 
-    conn = db.init_db(path)                   # second run, same file
+    conn = fresh_db(path)                   # second run, same file
     try:
         assert _user_version(conn) == db.SCHEMA_VERSION >= 67
         assert _columns(conn, "securities") == first_cols

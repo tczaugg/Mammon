@@ -59,6 +59,7 @@ from mammon.ui.report_window import (
     TRANSACTIONS_SPEC,
     ReportWindow,
 )
+from mammon.tests import fresh_db
 
 JAN = ("2026-01-01", "2026-01-31")
 
@@ -88,7 +89,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "picker.db")
+    c = fresh_db(tmp_path / "picker.db")
     yield c
     c.close()
 

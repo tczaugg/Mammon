@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, ledger, loans
+from mammon.tests import fresh_db
 
 # A synthetic 30-year, $300,000 fixed-rate mortgage at 6% with a $200/mo escrow.
 PRINCIPAL = 300_000_00
@@ -24,7 +25,7 @@ PAYMENT = PI_PAYMENT + ESCROW
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "loans.db")
+    c = fresh_db(tmp_path / "loans.db")
     yield c
     c.close()
 

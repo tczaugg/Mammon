@@ -27,11 +27,12 @@ import pytest
 
 from mammon import db, ledger, reports
 from mammon.ui.charts import SlicesPieCanvas, group_small_slices
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pie_rollup.db")
+    c = fresh_db(tmp_path / "pie_rollup.db")
     yield c
     c.close()
 

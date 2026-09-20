@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from mammon import db, investments, portfolio, securities  # noqa: E402
+from mammon.tests import fresh_db
 
 # The OSI symbol followed by its human rendering, exactly the shape a QIF
 # security block's N field carries; the S field states the root.
@@ -40,7 +41,7 @@ ROOT = "XYZ"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "guards.db")
+    c = fresh_db(tmp_path / "guards.db")
     yield c
     c.close()
 

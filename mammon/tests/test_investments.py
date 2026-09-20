@@ -17,11 +17,12 @@ from mammon.investments import (
     WebSlingerQuoteSource,
     YFinanceQuoteSource,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "inv.db")
+    c = fresh_db(tmp_path / "inv.db")
     yield c
     c.close()
 

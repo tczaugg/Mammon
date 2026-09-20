@@ -31,6 +31,7 @@ import pytest
 
 from mammon import crypto, db, fx, investments, ledger
 from mammon.importers import crypto_core
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etherscan_eth_2020.csv"
 
@@ -48,7 +49,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

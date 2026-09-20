@@ -12,6 +12,7 @@ the row's Payee. Addresses are synthetic ANON placeholders (never a real address
 from decimal import Decimal
 
 from mammon import crypto, db
+from mammon.tests import fresh_db
 
 
 def _q(value):
@@ -20,7 +21,7 @@ def _q(value):
 
 
 def test_wallet_two_token_lifecycle(tmp_path):
-    conn = db.init_db(str(tmp_path / "crypto.db"))
+    conn = fresh_db(str(tmp_path / "crypto.db"))
 
     # A crypto-account is a single address / paper wallet holding ANY coins/tokens.
     wallet = crypto.create_account(

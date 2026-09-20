@@ -21,11 +21,12 @@ import pytest
 
 from mammon import db, ledger
 from mammon.reports import tags as tag_report
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "tags.db")
+    c = fresh_db(tmp_path / "tags.db")
     yield c
     c.close()
 
@@ -250,7 +251,7 @@ def test_migration_carries_the_legacy_free_text_tag_forward(tmp_path):
     c.commit()
     c.close()
 
-    c = db.init_db(path)   # applies the tags migration
+    c = fresh_db(path)   # applies the tags migration
     try:
         assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         names = [r["name"] for r in c.execute("SELECT name FROM tags").fetchall()]
@@ -308,7 +309,7 @@ def test_a_split_leg_is_counted_under_its_own_tag(tmp_path):
     from mammon.importers import import_file
     from mammon.reports.tags import spending_by_tag
 
-    conn = db.init_db(str(tmp_path / "t.db"))
+    conn = fresh_db(str(tmp_path / "t.db"))
     path = tmp_path / "x.QIF"
     path.write_text(
         "!Type:Bank\nD2/15'18\nT-250.00\nPBig Order\n"
@@ -330,7 +331,7 @@ def test_a_row_tag_and_a_leg_tag_both_apply(tmp_path):
     from mammon import db, ledger
     from mammon.reports.tags import spending_by_tag
 
-    conn = db.init_db(str(tmp_path / "t.db"))
+    conn = fresh_db(str(tmp_path / "t.db"))
     aid = ledger.create_account(conn, "Checking", "checking")
     cat = ledger.resolve_category(conn, "Business:Research")
     txn = ledger.add_transaction(conn, aid, "2018-02-15", -250_00, payee="Big Order")

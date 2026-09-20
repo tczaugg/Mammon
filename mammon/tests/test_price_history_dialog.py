@@ -26,6 +26,7 @@ from mammon import crypto, db, investments, ledger
 from mammon.ui.price_history_dialog import (
     MANUAL_SOURCE, PriceHistoryDialog, price_symbol_for,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -37,7 +38,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "prices.db")
+    c = fresh_db(tmp_path / "prices.db")
     yield c
     c.close()
 

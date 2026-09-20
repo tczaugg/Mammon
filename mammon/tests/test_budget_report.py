@@ -14,11 +14,12 @@ import pytest
 
 from mammon import budgets, db, ledger
 from mammon.reports import budget as budget_report
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "budget_report.db")
+    c = fresh_db(tmp_path / "budget_report.db")
     yield c
     c.close()
 

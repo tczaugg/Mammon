@@ -17,6 +17,7 @@ from mammon.ui.loan_payment_dialog import EnterLoanPaymentDialog
 from mammon.ui.loan_wizard import LoanSetupWizard
 from mammon.ui.scheduled_payments_dialog import SuggestRecurringDialog
 from mammon.ui.widgets import RegisterWidget
+from mammon.tests import fresh_db
 
 PAYMENT = 1268_99
 
@@ -29,7 +30,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pending.db")
+    c = fresh_db(tmp_path / "pending.db")
     yield c
     c.close()
 

@@ -21,6 +21,7 @@ from mammon import db, investments, ledger, portfolio
 from mammon.ui.report_window import (CAPITAL_GAINS_COLUMNS, CAPITAL_GAINS_SPEC,
                                      IF_SOLD_NOW_MAX_CHARS, ReportWindow,
                                      capital_gains_footnote, capital_gains_rows)
+from mammon.tests import fresh_db
 
 # A fixed "today" so the holding-period arithmetic is not a moving target.
 AS_OF = "2026-06-30"
@@ -39,7 +40,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "capital_gains_window.db")
+    c = fresh_db(tmp_path / "capital_gains_window.db")
     yield c
     c.close()
 
@@ -291,7 +292,7 @@ def main_win(qapp, tmp_path):
     between a menu action and the report window, which a stub would have passed."""
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    c = db.init_db(tmp_path / "capital_gains_menu.db")
+    c = fresh_db(tmp_path / "capital_gains_menu.db")
     sample_data(c)
     w = MainWindow(c)
     try:

@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from mammon import db, ledger
 from mammon.ui.tags_dialog import TagsDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +28,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "tagmgr.db")
+    c = fresh_db(tmp_path / "tagmgr.db")
     yield c
     c.close()
 

@@ -27,6 +27,7 @@ from mammon.ui.asset_value_dialog import (
     AssetValueEditor, AssetValueHistoryDialog, MANUAL_SOURCE,
 )
 from mammon.ui.widgets import RegisterWidget
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -40,7 +41,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "values.db")
+    c = fresh_db(tmp_path / "values.db")
     yield c
     c.close()
 

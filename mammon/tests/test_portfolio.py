@@ -7,11 +7,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, instruments, investments, ledger, portfolio, securities
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "portfolio.db")
+    c = fresh_db(tmp_path / "portfolio.db")
     yield c
     c.close()
 

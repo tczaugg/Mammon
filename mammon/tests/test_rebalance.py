@@ -17,11 +17,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import asset_values, db, investments, ledger, portfolio, rebalance
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rebalance.db")
+    c = fresh_db(tmp_path / "rebalance.db")
     yield c
     c.close()
 
@@ -188,7 +189,7 @@ def test_drift_needs_a_target_and_survives_an_empty_sleeve(conn, world):
     with pytest.raises(ValueError, match="no allocation target"):
         rebalance.drift(conn, as_of=AS_OF)
 
-    empty = db.init_db(":memory:")
+    empty = fresh_db(":memory:")
     ledger.create_account(empty, "Brokerage", "investment", opening_balance=0)
     rebalance.create_target(empty, "T", lines={"domestic_stock": 100}, active=True)
     r = rebalance.drift(empty, as_of=AS_OF)
@@ -239,7 +240,7 @@ def test_target_from_current_forces_the_rounding_remainder_to_land(conn):
     assert rebalance.target_total(conn, tid) == Decimal("100")
 
     with pytest.raises(ValueError, match="nothing in the sleeve"):
-        rebalance.target_from_current(db.init_db(":memory:"), "X")
+        rebalance.target_from_current(fresh_db(":memory:"), "X")
 
 
 def test_rebalance_never_writes_a_transaction(conn, world):

@@ -32,6 +32,7 @@ import pytest
 
 from mammon import db, ledger, paths
 from mammon.reports import custom, report_defs
+from mammon.tests import fresh_db
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 DEF_2025 = FIXTURES / "example_formx_2025.json"
@@ -40,7 +41,7 @@ DEF_2026 = FIXTURES / "example_formx_2026.json"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "report_defs.db")
+    c = fresh_db(tmp_path / "report_defs.db")
     yield c
     c.close()
 

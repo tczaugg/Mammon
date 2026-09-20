@@ -16,6 +16,7 @@ from mammon.reports.capital_gains import (
     DEFAULT_ORDINARY_INCOME_RATE,
     capital_gains,
 )
+from mammon.tests import fresh_db
 
 AS_OF = "2026-06-30"
 LONG = Decimal("0.15")
@@ -28,7 +29,7 @@ def _days_before(n: int) -> str:
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "capgains.db")
+    c = fresh_db(tmp_path / "capgains.db")
     yield c
     c.close()
 

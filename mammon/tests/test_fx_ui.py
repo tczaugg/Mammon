@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 from mammon import db, fx, ledger
 from mammon.ui.fx_rates_dialog import FxRateEditor, FxRatesDialog
 from mammon.ui.models import AccountsModel
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -41,7 +42,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "fx_ui.db")
+    c = fresh_db(tmp_path / "fx_ui.db")
     yield c
     c.close()
 

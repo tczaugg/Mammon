@@ -46,6 +46,7 @@ from mammon.ui.widgets import (HoldingsDialog, InvestmentTransactionDialog,
                                _INV_ACTION_CHOICES)
 
 from PyQt5.QtCore import Qt
+from mammon.tests import fresh_db
 
 
 # --------------------------------------------------------------------------
@@ -80,7 +81,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "options_ui.db")
+    c = fresh_db(tmp_path / "options_ui.db")
     yield c
     c.close()
 

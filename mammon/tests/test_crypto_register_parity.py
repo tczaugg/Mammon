@@ -45,6 +45,7 @@ from mammon.ui.delegates import (DateDelegate, FocusSelectDelegate,
 from mammon.ui.models import CryptoRegisterModel, RegisterModel
 from mammon.ui.widgets import (CryptoRegisterWidget, CryptoTransactionDialog,
                                RegisterWidget)
+from mammon.tests import fresh_db
 
 WALLET_ADDR = "0x1111111111111111111111111111111111111111"
 COUNTERPARTY = "0x2222222222222222222222222222222222222222"
@@ -67,7 +68,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "parity.db")
+    c = fresh_db(tmp_path / "parity.db")
     yield c
     c.close()
 

@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import QApplication
 from mammon import db, ledger, loans, loans_schedule, projection, scheduled
 from mammon.ui import prefs
 from mammon.ui.projection_dialogs import CalendarPanel
+from mammon.tests import fresh_db
 
 TODAY = "2026-03-01"
 START, END = "2026-03-01", "2026-03-31"
@@ -31,7 +32,7 @@ START, END = "2026-03-01", "2026-03-31"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "internal.db")
+    c = fresh_db(tmp_path / "internal.db")
     yield c
     c.close()
 

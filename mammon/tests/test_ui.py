@@ -21,6 +21,7 @@ from mammon.ui.models import (
 )
 
 from PyQt5.QtCore import QCoreApplication, Qt
+from mammon.tests import fresh_db
 
 
 def _set_date(edit, iso):
@@ -70,7 +71,7 @@ def dbfile(tmp_path):
 
 @pytest.fixture
 def conn(dbfile):
-    c = db.init_db(dbfile)
+    c = fresh_db(dbfile)
     yield c
     c.close()
 
@@ -910,7 +911,7 @@ def test_ledger_update_account_and_date_bounds(conn, accounts):
 def test_main_window_menus_present(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "menus.db")
+    conn = fresh_db(tmp_path / "menus.db")
     sample_data(conn)
     win = MainWindow(conn)
     titles = {a.text().replace("&", "") for a in win.menuBar().actions()}
@@ -1023,7 +1024,7 @@ def test_search_matches_investment_security_amount_memo(qapp, conn):
 def test_search_dialog_finds_and_opens(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow, SearchDialog
-    conn = db.init_db(tmp_path / "find.db")
+    conn = fresh_db(tmp_path / "find.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -1051,7 +1052,7 @@ def test_search_dialog_finds_and_opens(qapp, tmp_path):
 def test_ensure_seed_only_on_demo(tmp_path):
     # A plain open must NOT fabricate the sample "test set"; only --demo seeds.
     from mammon import app as appmod
-    c = db.init_db(tmp_path / "plain.db")
+    c = fresh_db(tmp_path / "plain.db")
     appmod._ensure_seed(c, demo=False)
     assert ledger.list_accounts(c) == []
     appmod._ensure_seed(c, demo=True)
@@ -1063,13 +1064,13 @@ def test_main_window_open_database_switches(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
     a_path = tmp_path / "a.db"
-    a = db.init_db(a_path)
+    a = fresh_db(a_path)
     sample_data(a)
     win = MainWindow(a, db_path=str(a_path))
     assert win.accounts.model.rowCount() >= 3
     # a second, different database with just one account
     b_path = tmp_path / "b.db"
-    b = db.init_db(b_path)
+    b = fresh_db(b_path)
     ledger.create_account(b, "Solo", "checking", opening_balance=500_00)
     b.close()
     win.open_database(str(b_path))
@@ -1083,7 +1084,7 @@ def test_main_window_new_database_creates_empty(qapp, tmp_path, monkeypatch):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
     a_path = tmp_path / "a.db"
-    a = db.init_db(a_path)
+    a = fresh_db(a_path)
     sample_data(a)
     win = MainWindow(a, db_path=str(a_path))
     assert win.accounts.model.rowCount() >= 3        # sample data present
@@ -1111,7 +1112,7 @@ def test_main_window_opens_register(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "win.db")
+    conn = fresh_db(tmp_path / "win.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -1130,7 +1131,7 @@ def test_the_import_report_lists_what_the_import_could_not_settle(qapp, tmp_path
     from mammon.ui import widgets
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "report.db")
+    conn = fresh_db(tmp_path / "report.db")
     acct = ledger.create_account(conn, "Brokerage", "investment", opening_balance=0)
     investments.record_investment(conn, acct, "2025-01-07", "ShrsOut",
                                   symbol="BOND INDEX(ANON)", quantity="0.5")
@@ -2145,7 +2146,7 @@ def test_main_window_view_menu_toggles_registers(qapp, tmp_path):
     from mammon.ui import prefs
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "view.db")
+    conn = fresh_db(tmp_path / "view.db")
     sample_data(conn)
     win = MainWindow(conn)
     titles = {a.text().replace("&", "") for a in win.menuBar().actions()}
@@ -2454,7 +2455,7 @@ def test_main_window_applies_display_prefs_live(qapp, tmp_path):
     from mammon.ui import prefs, style
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "prefs.db")
+    conn = fresh_db(tmp_path / "prefs.db")
     sample_data(conn)
     win = MainWindow(conn)
     accts = ledger.list_accounts(conn)
@@ -2697,7 +2698,7 @@ def test_main_window_applies_dark_theme_live(qapp, tmp_path):
     from mammon.ui import style
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "dark.db")
+    conn = fresh_db(tmp_path / "dark.db")
     sample_data(conn)
     win = MainWindow(conn)
     accts = ledger.list_accounts(conn)
@@ -3008,7 +3009,7 @@ def test_find_dialog_refreshes_when_an_edit_drops_a_match(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "findlive.db")
+    conn = fresh_db(tmp_path / "findlive.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -3169,7 +3170,7 @@ def test_investment_register_xout_and_miscexp(qapp, conn):
 def test_open_register_branches_on_account_type(qapp, tmp_path):
     from mammon.ui.widgets import (InvestmentRegisterWidget, MainWindow,
                                   RegisterWidget)
-    conn = db.init_db(tmp_path / "invbranch.db")
+    conn = fresh_db(tmp_path / "invbranch.db")
     chk = ledger.create_account(conn, "Checking", "checking", opening_balance=100_00)
     inv = _seed_investment_account(conn)
     win = MainWindow(conn)
@@ -3199,7 +3200,7 @@ def test_investment_widget_display_prefs_and_stack_api(qapp, tmp_path):
     # View-menu one/two-line flip must not raise on an open investment register.
     from mammon.ui.widgets import InvestmentRegisterWidget, MainWindow
 
-    conn = db.init_db(tmp_path / "invapi.db")
+    conn = fresh_db(tmp_path / "invapi.db")
     inv = _seed_investment_account(conn)
     win = MainWindow(conn)
     reg = win.open_register(inv)
@@ -3317,7 +3318,7 @@ def test_holdings_button_opens_dialog(qapp, tmp_path, monkeypatch):
     from mammon.ui import widgets
     from mammon.ui.widgets import InvestmentRegisterWidget
 
-    conn = db.init_db(tmp_path / "holdbtn.db")
+    conn = fresh_db(tmp_path / "holdbtn.db")
     inv = _seed_holdings_account(conn)
     reg = InvestmentRegisterWidget(conn, inv)
 
@@ -3448,7 +3449,7 @@ def test_loan_setup_launches_from_register_toolbar_not_settings(qapp, tmp_path,
     from mammon.ui.widgets import MainWindow
     from mammon.ui.models import RegisterModel
 
-    conn = db.init_db(tmp_path / "loanbtn.db")
+    conn = fresh_db(tmp_path / "loanbtn.db")
     # A fully-configured loan (liability + loan_params) and a plain cash account.
     principal, term = 200_000_00, 360
     pi = loans.standard_payment(principal, "5.0", term)
@@ -4451,7 +4452,7 @@ def test_loan_setup_moved_out_of_settings_menu(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "loanmenu.db")
+    conn = fresh_db(tmp_path / "loanmenu.db")
     sample_data(conn)
     win = MainWindow(conn)
     settings = next(m.menu() for m in win.menuBar().actions()
@@ -4884,7 +4885,7 @@ def test_main_window_toolbar_wiring_and_hide_flow(qapp, tmp_path, monkeypatch):
     from PyQt5.QtWidgets import QDialog, QMessageBox
     from mammon.app import sample_data
     from mammon.ui.widgets import AccountDetailsDialog, MainWindow
-    conn = db.init_db(tmp_path / "toolbar.db")
+    conn = fresh_db(tmp_path / "toolbar.db")
     sample_data(conn)
     win = MainWindow(conn)
     acct = next(a for a in ledger.list_accounts(conn) if a["type"] != "investment")
@@ -4916,7 +4917,7 @@ def test_backup_now_action_writes_a_manual_snapshot(qapp, tmp_path, monkeypatch)
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 
@@ -4952,7 +4953,7 @@ def test_autobackup_timer_ticks_and_rotates(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 
@@ -4980,7 +4981,7 @@ def test_autobackup_timer_ticks_and_rotates(qapp, tmp_path, monkeypatch):
 def test_no_autobackup_without_db_path(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "nopath.db")
+    conn = fresh_db(tmp_path / "nopath.db")
     sample_data(conn)
     win = MainWindow(conn)                      # no db_path -> nothing to name
     assert win._autobackup_timer is None
@@ -5013,7 +5014,7 @@ def test_autobackup_startup_purges_stale_beyond_retention(qapp, tmp_path, monkey
              for i in range(backup.AUTO_RETENTION_FLOOR + 1)]
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))   # __init__ -> _start_autobackup -> purge
 
@@ -6555,7 +6556,7 @@ def test_autobackup_after_the_first_is_an_incremental_delta(qapp, tmp_path,
     bdir = tmp_path / "backups"
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 

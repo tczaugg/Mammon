@@ -22,6 +22,7 @@ import pytest
 from mammon import db
 
 from PyQt5.QtCore import QCoreApplication
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -44,7 +45,7 @@ def _isolate_qsettings(tmp_path):
 def main_win(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "reports_menu.db")
+    conn = fresh_db(tmp_path / "reports_menu.db")
     sample_data(conn)
     win = MainWindow(conn)
     try:

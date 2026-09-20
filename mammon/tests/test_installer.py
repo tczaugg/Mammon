@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from mammon import app, db, ledger
+from mammon.tests import fresh_db
 
 REPO = Path(__file__).resolve().parents[2]
 INSTALLER = REPO / "installer"
@@ -39,7 +40,7 @@ inst = _load("install")
 
 def _ledger(path: Path, marker: str = "Checking") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     ledger.create_account(conn, marker, "checking")
     conn.commit()
     conn.close()

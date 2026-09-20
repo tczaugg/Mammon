@@ -35,6 +35,7 @@ from mammon.ui.report_window import (
     tree_rows_to_csv,
     tree_rows_to_html,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -47,7 +48,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "itemize.db")
+    c = fresh_db(tmp_path / "itemize.db")
     yield c
     c.close()
 

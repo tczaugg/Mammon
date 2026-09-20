@@ -24,13 +24,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, investments, ledger
+from mammon.tests import fresh_db
 
 SYM = "ZZTS"  # synthetic ticker, matches no real security
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "short.db")
+    c = fresh_db(tmp_path / "short.db")
     yield c
     c.close()
 

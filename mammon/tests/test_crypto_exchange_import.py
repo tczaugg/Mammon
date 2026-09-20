@@ -40,6 +40,7 @@ from mammon.importers.coinbase_csv import looks_like_coinbase, parse_coinbase
 from mammon.ui import import_review_widget as irw
 from mammon.ui.models import CryptoRegisterModel
 from mammon.ui.widgets import CryptoRegisterWidget, MainWindow
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "coinbase_history.csv"
 ETHERSCAN = Path(__file__).parent / "fixtures" / "etherscan_eth_2020.csv"
@@ -62,7 +63,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "exchange.db")
+    c = fresh_db(tmp_path / "exchange.db")
     yield c
     c.close()
 

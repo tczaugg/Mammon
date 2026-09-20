@@ -26,6 +26,7 @@ import pytest
 from mammon import db, investments, ledger
 from mammon.reports.investment_performance import investment_performance as run_report
 from mammon.ui.report_filters import resolve_period
+from mammon.tests import fresh_db
 
 # A fixed "today" so the rolling-window starts are deterministic regardless of the
 # real clock. Every price is placed on a June anniversary so the "as of the
@@ -37,7 +38,7 @@ END = TODAY.strftime("%Y-%m-%d")
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "perf_period.db")
+    c = fresh_db(tmp_path / "perf_period.db")
     yield c
     c.close()
 

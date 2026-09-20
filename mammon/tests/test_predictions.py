@@ -16,6 +16,7 @@ from mammon import db, ledger, loans, predictions, projection, scheduled
 from mammon.ui import projection_dialogs, style
 from mammon.ui.projection_dialogs import (CalendarPanel, ProjectedBalancesDialog,
                                           spending_accounts)
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 
@@ -27,7 +28,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pred.db")
+    c = fresh_db(tmp_path / "pred.db")
     yield c
     c.close()
 

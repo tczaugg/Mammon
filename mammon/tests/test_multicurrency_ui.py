@@ -30,11 +30,12 @@ from mammon.ui.models import (
     AccountsModel, RegisterModel, currency_symbol, fmt_amount_ccy, fmt_cents,
     fmt_money,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mc_ui.db")
+    c = fresh_db(tmp_path / "mc_ui.db")
     yield c
     c.close()
 

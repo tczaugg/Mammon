@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from mammon import budgets, db, ledger
+from mammon.tests import fresh_db
 
 
 def test_budgets_is_importable_first_no_circular_import():
@@ -36,7 +37,7 @@ def test_budgets_is_importable_first_no_circular_import():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "budgets.db")
+    c = fresh_db(tmp_path / "budgets.db")
     yield c
     c.close()
 
@@ -61,7 +62,7 @@ def test_schema_version_tracks_migrations():
 
 def test_init_db_idempotent_fresh_and_existing(tmp_path):
     path = tmp_path / "idem.db"
-    c1 = db.init_db(path)
+    c1 = fresh_db(path)
     assert c1.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     # budget tables exist on a fresh DB
     names = {r["name"] for r in c1.execute(
@@ -70,7 +71,7 @@ def test_init_db_idempotent_fresh_and_existing(tmp_path):
     c1.close()
 
     # Re-opening an existing, already-migrated DB is a no-op that still works.
-    c2 = db.init_db(path)
+    c2 = fresh_db(path)
     assert c2.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     names2 = {r["name"] for r in c2.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

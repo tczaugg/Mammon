@@ -20,6 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from mammon import crypto, db, forecast, investments, ledger, portfolio   # noqa: E402
 from mammon.ui import investment_dashboard as dash         # noqa: E402
+from mammon.tests import fresh_db
 
 AS_OF = "2026-06-30"
 OPEN_DATE = "2024-01-01"
@@ -35,7 +36,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "investment_dashboard.db")
+    c = fresh_db(tmp_path / "investment_dashboard.db")
     yield c
     c.close()
 

@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import QApplication, QCheckBox
 
 from mammon import db, investments, ledger, portfolio, rebalance
 from mammon.ui.rebalance_dialog import RebalanceDialog
+from mammon.tests import fresh_db
 
 AS_OF = "2026-06-30"
 HUNDRED = Decimal("100")
@@ -132,20 +133,20 @@ def test_a_negative_or_oversized_entry_is_clamped_into_range():
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "locks.db")
+    c = fresh_db(tmp_path / "locks.db")
     yield c
     c.close()
 
 
 def test_lock_state_round_trips_through_the_database(tmp_path):
     path = tmp_path / "roundtrip.db"
-    c = db.init_db(path)
+    c = fresh_db(path)
     tid = rebalance.create_target(c, "Mix", lines=dict(MIX), active=True)
     rebalance.set_locked(c, tid, "cash", True)
     assert rebalance.locked_classes(c, tid) == {"cash"}
     c.close()
 
-    c2 = db.init_db(path)
+    c2 = fresh_db(path)
     assert rebalance.locked_classes(c2, tid) == {"cash"}
     assert rebalance.is_locked(c2, tid, "cash")
     assert not rebalance.is_locked(c2, tid, "bond")

@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import QApplication
 from mammon import db, ledger
 from mammon.ui.models import RegisterFilter, RegisterModel
 from mammon.ui.widgets import RegisterWidget
+from mammon.tests import fresh_db
 
 R = RegisterModel
 
@@ -53,7 +54,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "sortfilter.db")
+    c = fresh_db(tmp_path / "sortfilter.db")
     yield c
     c.close()
 

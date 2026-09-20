@@ -34,6 +34,7 @@ from mammon import db, investments, ledger
 from mammon.ui.securities_dialog import (
     SecurityKindDialog, K_INCLUDE, K_KIND, K_SYMBOL, K_TERMS, UNCLASSIFIED,
 )
+from mammon.tests import fresh_db
 
 CALL = "XYZ 260117C00150000 XYZ 17JAN26 150 C"
 PUT = "XYZ 260117P00120000 XYZ 17JAN26 120 P"
@@ -47,7 +48,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "kindreview.db")
+    c = fresh_db(tmp_path / "kindreview.db")
     yield c
     c.close()
 

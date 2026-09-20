@@ -26,6 +26,7 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 from mammon import db, investments, ledger, securities
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -36,7 +37,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "ranges.db")
+    c = fresh_db(tmp_path / "ranges.db")
     yield c
     c.close()
 

@@ -19,11 +19,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import asset_values, db, ledger, portfolio
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "assets.db")
+    c = fresh_db(tmp_path / "assets.db")
     yield c
     c.close()
 

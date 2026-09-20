@@ -13,11 +13,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, fx, ledger
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "fx.db")
+    c = fresh_db(tmp_path / "fx.db")
     yield c
     c.close()
 
@@ -57,11 +58,11 @@ def test_accounts_have_currency_column(conn):
 
 def test_init_db_idempotent(tmp_path):
     p = tmp_path / "idem.db"
-    c1 = db.init_db(p)
+    c1 = fresh_db(p)
     v1 = c1.execute("PRAGMA user_version").fetchone()[0]
     c1.close()
     # re-opening applies no further migrations and does not raise
-    c2 = db.init_db(p)
+    c2 = fresh_db(p)
     v2 = c2.execute("PRAGMA user_version").fetchone()[0]
     c2.close()
     assert v1 == v2 == db.SCHEMA_VERSION

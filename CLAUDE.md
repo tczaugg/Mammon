@@ -162,6 +162,13 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
 - Module docstrings carry the *rationale* - why a design was chosen and what
   bug the current shape prevents. They are load-bearing; when you change
   behavior, update the reasoning rather than deleting it.
+- **Tests open a database with `fresh_db`, not `db.init_db`.** `from
+  mammon.tests import fresh_db` - it copies a per-process, already-migrated
+  template instead of replaying all 75 migrations per test, which took the
+  suite from 332s to 55s. It falls back to the real `init_db` for an in-memory
+  or encrypted database and for a file that already has content (the idempotent
+  upgrade path), so the six tests whose SUBJECT is the schema, backups or
+  encryption still call `db.init_db` directly.
 - Every behavioral fix lands with a regression test in `mammon/tests/`. Test
   files mirror module names - so run `test_smoke.py` plus `test_<module>.py` for
   what you changed, and NOT the whole suite (that is a pre-push step).
