@@ -1530,6 +1530,18 @@ class CentreLineWidget(QWidget):
             lab = QLabel(part, self)
             lab.setAlignment(Qt.AlignCenter)
             lay.addWidget(lab)
+            # show() explicitly, for the mirror of the reason the old labels are
+            # hide()n above. A child built for a parent that is ALREADY visible
+            # stays hidden until the event loop gets round to showing it, and a
+            # hidden widget contributes nothing to its layout's sizeHint. Every
+            # caller of set_line reads that hint SYNCHRONOUSLY -- _sync_centre_gap
+            # reserves the strip from it and RingArea.centre_rect sizes the
+            # overlay from it -- so without this the line measured 4px, its
+            # layout margins alone, and was placed as a 4px sliver. It stayed
+            # one: the hint is right again by the time the event loop runs, but
+            # nothing re-places the overlay then, so the text vanished on the
+            # first wedge click and never came back (reported).
+            lab.show()
             self._labels.append(lab)
         lay.addStretch(1)
 

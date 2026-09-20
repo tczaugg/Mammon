@@ -426,6 +426,63 @@ def test_filtering_to_a_security_recomputes_the_centre_line(page, conn):
     assert line.subject == "ZZAA"
 
 
+def test_set_line_leaves_a_usable_size_hint_immediately(page, qapp):
+    """The root cause of the vanishing centre line.
+
+    A QLabel built for a parent that is ALREADY visible stays hidden until the
+    event loop shows it, and a hidden widget adds nothing to its layout's
+    sizeHint. Every caller of set_line reads that hint SYNCHRONOUSLY, so the
+    rebuilt line measured 4px -- its layout margins alone -- and got placed as a
+    sliver. The hint has to be right before set_line returns, not one event-loop
+    pass later.
+    """
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    settled = page.centre.sizeHint().height()
+    page.centre.set_line(dash.centre_line(page.conn, page.as_of))
+    assert [lab.isHidden() for lab in page.centre._labels] == [False] * 4
+    assert page.centre.sizeHint().height() == settled
+    page.hide()
+
+
+def test_the_centre_line_survives_switching_scope_and_back(page, qapp, seeded):
+    """Reported: the centre line "disappears in the process of switching from
+    the total to the value for one of the accounts or securities and does not
+    recover when reverting to the total portfolio".
+
+    It was never hidden and its labels always held the right text -- which is
+    why the existing tests, all of which read the DATA, stayed green. What
+    collapsed was its geometry: the overlay and the strip reserved for it in the
+    hole were both sized from a sizeHint taken while the new labels were still
+    hidden, so both became 4px and nothing ever put them back.
+    """
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    full = page.centre.height()
+    assert full > 4, "the line should not start out collapsed either"
+
+    def scoped_height(select):
+        select()
+        qapp.processEvents()
+        return page.centre.height(), page.centre_gap.height()
+
+    for select in (lambda: page.select_slice(seeded["ira"]),
+                   page.clear_filter,
+                   lambda: (page.set_mode(dash.MODE_SECURITIES),
+                            page.select_slice("ZZAA")),
+                   page.clear_filter):
+        height, gap = scoped_height(select)
+        assert height == full, f"centre line collapsed to {height}px"
+        # The strip reserved in the hole has to track it, or the top plot runs
+        # under the text.
+        assert gap == full
+    assert page.centre.isVisible()
+    assert page.centre.label_texts()[0].startswith("Total ")
+    page.hide()
+
+
 # --- the inflow arrows ------------------------------------------------------
 def test_four_inflows_in_the_year_earn_an_arrow_with_the_yearly_total(conn, seeded):
     arrows = dash.inflow_arrows(conn, AS_OF)
