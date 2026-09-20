@@ -277,6 +277,18 @@ CONNECTOR_WIDTH = 2
 #: Labels sit beside the line, a size down: they annotate, and the controls they
 #: point at are what should be read first.
 CONNECTOR_FONT_SCALE = 0.85
+
+#: Clear air between the Accounts/Securities switch and the top plot's title,
+#: as a multiple of the switch's own height (reported: "moved higher so there is
+#: significant space between them and the title of the top plot"). It was
+#: BAND_SPACING, the page's 4px general gutter, which read as the two being one
+#: stacked block.
+#:
+#: Expressed in rows rather than pixels so it keeps its proportion when the
+#: page's font changes -- the same reasoning as CENTER_RAISE_LINES. It is a
+#: REQUEST: how far the switch can actually rise is bounded by the inner circle
+#: narrowing above it (see :meth:`RingArea.mode_row_rect`).
+MODE_ROW_TITLE_GAP_ROWS = 1.5
 #: Smallest corner overlay worth reserving, in px.
 #: Reported: "shrink the size of the 4 corner tiles so that they look more like
 #: buttons than something that is actually trying to convey information."
@@ -1034,7 +1046,21 @@ class RingArea(QWidget):
         hx, hy, hw, hh = self.hole_rect()
         top = self.selector_rects().get("top")
         above = top[1] if top else hy
-        return (hx + (hw - mw) // 2, max(0, above - BAND_SPACING - mh), mw, mh)
+        y = above - int(round(MODE_ROW_TITLE_GAP_ROWS * mh)) - mh
+        # ...but no higher than the inner circle stays wide enough to hold it.
+        # The circle narrows as it rises, so a row placed by the gap alone would
+        # eventually have its top corners out past the inner edge and onto the
+        # annulus, which is painted in front of it -- the corners would simply
+        # disappear under the ring. Solving r_inner^2 = dy^2 + (mw/2)^2 for the
+        # highest y whose half-width still covers the row:
+        cy = self.height() / 2.0
+        r_inner = self.outer_radius() * RING_INNER_RADIUS
+        room = r_inner * r_inner - (mw / 2.0) ** 2
+        if room > 0:
+            y = max(y, int(math.ceil(cy - math.sqrt(room))))
+        else:
+            y = max(y, 0)          # wider than the circle anywhere; keep it low
+        return (hx + (hw - mw) // 2, max(0, min(y, above - mh)), mw, mh)
 
     def set_mode_row(self, widget) -> None:
         """Adopt the mode switch as a raised overlay, like the gear."""

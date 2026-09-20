@@ -1564,6 +1564,39 @@ def test_the_band_stacks_arrows_then_what_if_then_thermometer(page, qapp):
     page.hide()
 
 
+def test_the_mode_switch_clears_the_top_plots_title(page, qapp):
+    """Reported: "moved higher so there is significant space between them and
+    the title of the top plot". It sat on BAND_SPACING's 4px, which read as the
+    switch and the title being one stacked block.
+
+    How far it can rise is bounded, so this asserts a real separation rather
+    than a literal: the inner circle narrows as it goes up, and a row placed by
+    the requested gap alone would put its top corners out under the annulus,
+    which is painted in front of it.
+    """
+    import math
+    for size in ((1200, 800), (1000, 700), (1600, 1000)):
+        page.resize(*size)
+        page.show()
+        for _ in range(4):
+            qapp.processEvents()
+        area = page.ring_area
+        row = page.mode_row.geometry()
+        title_y = area.selector_rects()["top"][1]
+        gap = title_y - row.bottom()
+        assert gap >= 4 * dash.BAND_SPACING, f"{size}: only {gap}px of air"
+        assert row.bottom() < title_y, f"{size}: the switch overlaps the title"
+        assert row.top() >= 0
+
+        # Still inside the inner circle: both top corners covered.
+        cy = area.height() / 2.0
+        r_inner = area.outer_radius() * dash.RING_INNER_RADIUS
+        half = math.sqrt(max(0.0, r_inner ** 2 - (cy - row.top()) ** 2))
+        assert half >= row.width() / 2 - 1, (
+            f"{size}: the switch's corners are out under the ring")
+    page.hide()
+
+
 def test_what_if_draws_labelled_connectors_to_what_it_turns_on(page, qapp):
     """Reported: "when the What-If button is pressed draw line(arrows) from the
     button to the arrow and the thermometer and label them 'change
