@@ -213,7 +213,7 @@ from PyQt5.QtWidgets import (
 # through portfolio.account_valuation, which dispatches on the account's kind
 # (a crypto wallet is not valued by the brokerage engine). Importing the
 # brokerage engine directly is how the accounts ring lost crypto wallets.
-from mammon import forecast, ledger, portfolio
+from mammon import forecast, ledger, portfolio, security_mix
 from mammon.ui import charts, prefs, style
 from mammon.ui.models import fmt_date
 
@@ -1722,6 +1722,12 @@ def center_line(conn, as_of: Optional[str] = None, *, account_ids=None,
         alloc = portfolio.allocation(conn, account_ids=ids, as_of=end,
                                      scope="investments")
         value = next((s.value for s in alloc.by_class if s.key == asset_class), 0)
+        # Still value-only. The class now HAS a history (see class_series), but
+        # a gain is not a difference of endpoints -- it is that difference less
+        # the money put in, and money is put into HOLDINGS. Attributing a
+        # purchase to the classes its security happens to be made of would
+        # invent flows the user never made, and a rate solved on invented flows
+        # is worse than no rate.
         return CenterLine(total=value, subject=subject, value_only=True)
     if symbol == CASH_KEY:
         return CenterLine(total=_scope_cash(conn, ids, end), subject=subject,
@@ -2107,13 +2113,78 @@ def value_series(conn, years: Optional[int] = DEFAULT_HISTORY_YEARS, *,
     return _trim_leading_zeros(out)
 
 
-def current_mix(conn, account_ids=None, as_of: Optional[str] = None) -> dict:
+def class_series(conn, years: Optional[int] = DEFAULT_HISTORY_YEARS, *,
+                 asset_class: str, as_of: Optional[str] = None,
+                 account_ids=None, points: int = HISTORY_POINTS) -> list:
+    """``[(iso, cents)]`` -- ONE asset class's market value across the period.
+
+    This is the user's V = H @ C, where H's columns are each security's value
+    history and C's rows are that security's class weights, so V's columns are
+    the classes' histories. It is computed by asking
+    ``portfolio.allocation`` for each sample date rather than by building the
+    two matrices here, which is the same arithmetic done by the ONE
+    implementation that already splits a holding across its classes. A second
+    implementation would be a second thing to keep in step with mixtures,
+    account mixtures, the money-market sweep and the option exclusion -- and the
+    first time it drifted, the plot would disagree with the ring above it.
+
+    C IS HELD AT TODAY'S WEIGHTS. ``security_mix`` stores one mixture per
+    security with no date, so this is "what my current classification says the
+    past looked like", not what the funds actually held then. That is the honest
+    reading of the data available; a dated mixture would change it and nothing
+    else here.
+
+    Same date grid and same leading-zero trim as :func:`value_series`, so a
+    class curve and the portfolio curve can be read on one pair of axes.
+    """
+    end = as_of or _today()
+    ids = list(_account_ids(conn) if account_ids is None else account_ids)
+    span = (history_span(conn, ids, None, end) if years is None
+            else max(1, int(years)))
+    last = _dt.date.fromisoformat(end)
+    first = _dt.date.fromisoformat(years_before(end, span))
+    days = (last - first).days
+    n = max(2, int(points))
+    out = []
+    for i in range(n):
+        day = first + _dt.timedelta(days=int(round(days * i / (n - 1))))
+        iso = day.isoformat()
+        alloc = portfolio.allocation(conn, account_ids=ids, as_of=iso,
+                                     scope="investments")
+        value = next((s.value for s in alloc.by_class if s.key == asset_class), 0)
+        out.append((iso, int(value)))
+    return _trim_leading_zeros(out)
+
+
+def current_mix(conn, account_ids=None, as_of: Optional[str] = None, *,
+                symbol: Optional[str] = None,
+                asset_class: Optional[str] = None) -> dict:
     """Today's actual asset-class weights for a scope, summing to 1.
 
     Straight off ``portfolio.allocation().by_class`` -- the dashboard does not
     classify anything itself. An empty or unpriced scope is all cash, which is
-    ladder level 0 and the honest answer for "no risk taken yet"."""
+    ladder level 0 and the honest answer for "no risk taken yet".
+
+    ``symbol`` narrows to ONE security, whose mix is its own: its stated mixture,
+    or its single class, or unclassified. Reported: selecting a security wedge
+    left the thermometer where the whole portfolio's mix had put it, because the
+    scope was expressed as account ids and a security is not one -- so a bond
+    fund and an equity fund in the same account measured identically. A security
+    HAS a mix; there is no reason to answer with its account's.
+
+    ``asset_class`` narrows to a class, which is all of itself by definition.
+    """
     end = as_of or _today()
+    if asset_class:
+        return forecast.normalize_weights({asset_class: 1.0})
+    if symbol:
+        mix = security_mix.get_mixture(conn, symbol)
+        if mix:
+            return forecast.normalize_weights(
+                {cls: float(pct) for cls, pct in mix.items()})
+        row = portfolio.get_security(conn, symbol)
+        cls = (row["asset_class"] if row is not None else None) or "unclassified"
+        return forecast.normalize_weights({cls: 1.0})
     ids = list(_account_ids(conn) if account_ids is None else account_ids)
     alloc = portfolio.allocation(conn, account_ids=ids, as_of=end)
     weights = {s.key: float(s.value) for s in alloc.by_class if s.value > 0}
@@ -2122,11 +2193,15 @@ def current_mix(conn, account_ids=None, as_of: Optional[str] = None) -> dict:
     return forecast.normalize_weights(weights)
 
 
-def current_risk(conn, account_ids=None, as_of: Optional[str] = None) -> float:
+def current_risk(conn, account_ids=None, as_of: Optional[str] = None, *,
+                 symbol: Optional[str] = None,
+                 asset_class: Optional[str] = None) -> float:
     """Where the thermometer's needle sits by default: the ladder level whose
     volatility matches the scope's actual mix (design 4.5's inverse map, which
     lives in :func:`forecast.risk_for_mix` and is clamped to the ladder)."""
-    return forecast.risk_for_mix(current_mix(conn, account_ids, as_of))
+    return forecast.risk_for_mix(
+        current_mix(conn, account_ids, as_of, symbol=symbol,
+                    asset_class=asset_class))
 
 
 def mix_caption(weights) -> str:
@@ -4118,6 +4193,12 @@ class InvestmentDashboardPage(QWidget):
             return None if symbol == CASH_KEY else symbol
         return None
 
+    def _scope_class(self) -> Optional[str]:
+        """The asset class the page is scoped to, or None."""
+        if self._filter is not None and self._filter[0] == "class":
+            return str(self._filter[1])
+        return None
+
     def _wedge_color(self) -> Optional[str]:
         """The selected wedge's color, so the value line reads as that wedge.
         ``None`` with no filter: the chart then uses the theme's own blue."""
@@ -4137,9 +4218,16 @@ class InvestmentDashboardPage(QWidget):
         self._refresh_projection()
 
     def _refresh_history(self) -> None:
-        series = value_series(self.conn, self.history_chart.years(),
-                              as_of=self.as_of, account_ids=self._scope_ids(),
-                              symbol=self._scope_symbol())
+        asset_class = self._scope_class()
+        if asset_class:
+            series = class_series(self.conn, self.history_chart.years(),
+                                  asset_class=asset_class, as_of=self.as_of,
+                                  account_ids=self._scope_ids())
+        else:
+            series = value_series(self.conn, self.history_chart.years(),
+                                  as_of=self.as_of,
+                                  account_ids=self._scope_ids(),
+                                  symbol=self._scope_symbol())
         self.history_chart.set_series(series, self._wedge_color())
 
     def _refresh_measured(self) -> None:
@@ -4153,7 +4241,9 @@ class InvestmentDashboardPage(QWidget):
         questions. Only the NEEDLE is left alone while What If is on: there the
         slider belongs to the user, and a refresh underneath must not snatch it
         back."""
-        self._measured_risk = current_risk(self.conn, self._scope_ids(), self.as_of)
+        self._measured_risk = current_risk(
+            self.conn, self._scope_ids(), self.as_of,
+            symbol=self._scope_symbol(), asset_class=self._scope_class())
         if self._what_if:
             return
         self.thermometer.set_risk(self._measured_risk)

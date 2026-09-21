@@ -18,7 +18,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from mammon import crypto, db, forecast, investments, ledger, portfolio   # noqa: E402
+from mammon import (crypto, db, forecast, investments, ledger, portfolio,   # noqa: E402
+                     security_mix)
 from mammon.ui import investment_dashboard as dash         # noqa: E402
 from mammon.tests import fresh_db
 
@@ -448,16 +449,26 @@ def test_clicking_a_class_states_its_value_and_nothing_else(page, classified,
     assert line.total == next(s.value for s in alloc.by_class if s.key == "bond")
 
 
-def test_a_class_scope_leaves_the_plots_on_the_portfolio(page, classified, qapp):
-    """value_series can only value a HOLDING. A class would price at zero and
-    draw a flat line on the floor -- a picture of a scope worth nothing, which
-    is a lie about one that simply cannot be charted this way."""
+def test_a_class_scope_plots_that_class_history(page, classified, qapp):
+    """A class IS chartable, via class_series -- it just is not chartable by
+    value_series, which can only value a holding. It briefly fell back to the
+    portfolio's curve for that reason; now it plots its own."""
     page.set_mode(dash.MODE_CLASSES)
     qapp.processEvents()
     page.select_slice("bond")
     qapp.processEvents()
     assert page._scope_symbol() is None
-    assert page.history_chart.points(), "the plot must not be emptied"
+    assert page._scope_class() == "bond"
+    plotted = page.history_chart.points()
+    assert plotted, "the plot must not be emptied"
+    expected = dash.class_series(page.conn, page.history_chart.years(),
+                                 asset_class="bond", as_of=AS_OF,
+                                 account_ids=page._scope_ids())
+    assert plotted == expected
+    # ...and it is NOT the portfolio's curve, which is what it used to show.
+    whole = dash.value_series(page.conn, page.history_chart.years(), as_of=AS_OF,
+                              account_ids=page._scope_ids())
+    assert plotted[-1][1] < whole[-1][1]
 
 
 def test_the_cash_wedge_likewise_does_not_empty_the_plots(page, seeded, qapp):
@@ -468,6 +479,91 @@ def test_the_cash_wedge_likewise_does_not_empty_the_plots(page, seeded, qapp):
     qapp.processEvents()
     assert page._scope_symbol() is None
     assert page.history_chart.points()
+
+
+def test_the_classes_histories_sum_to_the_portfolios(conn, classified):
+    """The identity behind V = H @ C: C's rows are one security's class weights
+    and they sum to 1, so summing V's columns gives back H's row sums. If a
+    class curve is ever computed some other way, this is what catches it."""
+    ids = dash._account_ids(conn)
+    whole = dash.value_series(conn, 3, as_of=AS_OF, account_ids=ids)
+    keys = [k for k, _l, _c in dash.ring_slices(conn, dash.MODE_CLASSES, AS_OF,
+                                                account_ids=ids)]
+    per_class = {k: dict(dash.class_series(conn, 3, asset_class=k, as_of=AS_OF,
+                                           account_ids=ids))
+                 for k in keys}
+    for iso, total in whole:
+        summed = sum(series.get(iso, 0) for series in per_class.values())
+        assert summed == total, iso
+
+
+def test_a_class_history_shares_the_portfolio_curves_date_grid(conn, classified):
+    """Two curves meant for one pair of axes have to be sampled alike."""
+    ids = dash._account_ids(conn)
+    whole = [d for d, _c in dash.value_series(conn, 3, as_of=AS_OF,
+                                              account_ids=ids)]
+    bond = [d for d, _c in dash.class_series(conn, 3, asset_class="bond",
+                                             as_of=AS_OF, account_ids=ids)]
+    assert bond == whole
+
+
+def test_a_class_with_nothing_in_it_plots_flat_rather_than_failing(conn,
+                                                                   classified):
+    ids = dash._account_ids(conn)
+    series = dash.class_series(conn, 3, asset_class="real_estate", as_of=AS_OF,
+                               account_ids=ids)
+    assert all(c == 0 for _d, c in series)
+
+
+# --- the thermometer follows the selection (reported) -----------------------
+def test_selecting_a_security_moves_the_thermometer(page, classified, qapp):
+    """Reported: "when I'm on Securities and I click a ring segment, the
+    thermometer widget doesn't update".
+
+    The scope was expressed as ACCOUNT IDS and a security is not one, so
+    current_mix measured the whole portfolio however the ring was filtered --
+    a bond fund and an equity fund in the same account read identically. A
+    security HAS a mix; there was no reason to answer with its account's.
+    """
+    page.set_mode(dash.MODE_SECURITIES)
+    qapp.processEvents()
+    page.clear_filter()
+    qapp.processEvents()
+    portfolio_risk = page.thermometer.risk()
+
+    page.select_slice("ZZBB")                     # the bond fund
+    qapp.processEvents()
+    bond_risk = page.thermometer.risk()
+    page.select_slice("ZZAA")                     # the equity fund
+    qapp.processEvents()
+    equity_risk = page.thermometer.risk()
+
+    assert bond_risk != portfolio_risk
+    assert equity_risk > bond_risk, "equity must read riskier than bonds"
+    # Back out to the whole portfolio and the needle returns.
+    page.clear_filter()
+    qapp.processEvents()
+    assert page.thermometer.risk() == portfolio_risk
+
+
+def test_a_securitys_measured_mix_is_its_own(conn, classified):
+    """Its stated mixture if it has one, else its single class."""
+    assert dash.current_mix(conn, symbol="ZZBB")["bond"] == pytest.approx(1.0)
+    security_mix.set_mixture(conn, "ZZBB", {"bond": 70, "domestic_stock": 30})
+    mixed = dash.current_mix(conn, symbol="ZZBB")
+    assert mixed["bond"] == pytest.approx(0.70)
+    assert mixed["domestic_stock"] == pytest.approx(0.30)
+
+
+def test_selecting_an_asset_class_puts_the_needle_on_that_class(page, classified,
+                                                                qapp):
+    """A class is all of itself, so the needle reads that class's own risk."""
+    page.set_mode(dash.MODE_CLASSES)
+    qapp.processEvents()
+    page.select_slice("cash")
+    qapp.processEvents()
+    assert page.thermometer.risk() == pytest.approx(
+        forecast.risk_for_mix({"cash": 1.0}), abs=0.01)
 
 
 # --- the center line --------------------------------------------------------

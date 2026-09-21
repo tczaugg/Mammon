@@ -3104,6 +3104,12 @@ was previously nowhere in the app to add the price it was complaining about.
   "dividends not reinvested" (`portfolio.cash_dividends` decides, from the same
   `_CASH_DIVIDENDS` set the flow classification uses, so the two cannot drift).
   A whole-portfolio total is never asterisked: its cash is already in it.
+- **The thermometer follows the SELECTION, not just the account scope.** It
+  reads `current_mix`, whose scope used to be expressed only as account ids --
+  so a security selection measured the whole portfolio and a bond fund and an
+  equity fund in the same account put the needle in the same place (reported).
+  A security's mix is its own (its stated mixture, else its single class), and
+  an asset class is all of itself.
 - **The ring has a THIRD mode: by asset class** (reported, 2026-09-21).
   `allocation().by_class` is the same composition the Asset Allocation report
   draws as a bar, so the slices need no arithmetic here -- and the palette is
@@ -3114,13 +3120,29 @@ was previously nowhere in the app to add the price it was complaining about.
   "Unallocated", not `unclassified`: in a picture of the portfolio the word has
   to say something is MISSING rather than name a category.
 - **A class scope states a VALUE and nothing else**, like the cash wedge. A
-  class is a property OF holdings, not one of them, and performance is measured
-  on holdings and their flows -- a gain or an annualized rate per class would be
-  invented. Neither scope reaches the plots either: `value_series` can only
-  value a holding, so both would price at zero and draw a flat line on the
-  floor, a picture of a scope worth nothing rather than one that cannot be
-  charted this way. The plots stay on the account scope and the center block
-  states what was selected.
+  class is a property OF holdings, not one of them, and a gain is not a
+  difference of endpoints -- it is that difference less the money put in, and
+  money is put into HOLDINGS. Attributing a purchase to the classes its security
+  happens to be made of would invent flows the user never made, and a rate
+  solved on invented flows is worse than no rate.
+- **A class DOES have a history, and the plot draws it** (`class_series`,
+  2026-09-21). The user's formulation: `V = H @ C`, where H's columns are each
+  security's value history and C's rows are that security's class weights, so
+  V's columns are the classes' histories. It is computed by asking
+  `portfolio.allocation` for each sample date rather than by assembling the two
+  matrices, because that is the same arithmetic done by the ONE implementation
+  that already splits a holding -- a second one would be a second thing to keep
+  in step with mixtures, account mixtures, the sweep and the option exclusion,
+  and the first time it drifted the plot would disagree with the ring above it.
+  A test asserts the classes' curves sum to the portfolio's at every sample,
+  which is the identity C's rows summing to 1 guarantees. **C is held at
+  TODAY's weights**: `security_mix` stores one mixture per security with no
+  date, so this is what the current classification says the past looked like,
+  not what the funds actually held then.
+- **The CASH wedge still does not reach the plots**: its key is a sentinel, so
+  `value_series` would price it at zero and draw a flat line on the floor -- a
+  picture of a scope worth nothing rather than one that cannot be charted that
+  way.
 - **The mode switch NARROWS before it sinks.** Its distance above the top plot's
   title is capped by the inner circle, which narrows as it rises; a third button
   made the row half again as wide and sinking it to fit collapsed the reported

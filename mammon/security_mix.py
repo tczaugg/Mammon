@@ -434,6 +434,16 @@ def describe(mixture: dict) -> str:
     if not mixture:
         return ""
     parts = sorted(mixture.items(), key=lambda kv: (-kv[1], kv[0]))
-    return " / ".join(
-        f"{pct.normalize() if pct == pct.to_integral_value() else pct}% "
-        f"{portfolio.ASSET_CLASS_LABELS.get(cls, cls)}" for cls, pct in parts)
+    return " / ".join(f"{_trim(pct)}% {portfolio.ASSET_CLASS_LABELS.get(cls, cls)}"
+                      for cls, pct in parts)
+
+
+def _trim(pct: Decimal) -> str:
+    """A percentage with its trailing zeros gone and no exponent.
+
+    ``Decimal.normalize()`` alone strips zeros on BOTH sides of the point, so a
+    whole 100.00 became ``1E+2`` and the Mix column read "1E+2% Bonds"
+    (reported). The ``f`` presentation type forces fixed-point notation, which
+    is what turns that back into "100" while still shortening 58.50 to 58.5.
+    """
+    return f"{pct.normalize():f}"
