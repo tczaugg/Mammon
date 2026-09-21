@@ -84,8 +84,9 @@ def test_impossible_targets_are_refused(conn):
     for bad in (-1, 101, "abc"):
         with pytest.raises(ValueError):
             rebalance.set_line(conn, tid, "bond", bad)
+    rebalance.set_line(conn, tid, "crypto", 10)              # an asset class now
     with pytest.raises(ValueError):
-        rebalance.set_line(conn, tid, "crypto", 10)          # not an asset class
+        rebalance.set_line(conn, tid, "tulips", 10)          # not an asset class
     with pytest.raises(ValueError):
         rebalance.create_target(conn, "  ")                  # needs a name
     with pytest.raises(ValueError):

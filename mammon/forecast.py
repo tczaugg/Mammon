@@ -60,20 +60,17 @@ from mammon import portfolio
 # ``portfolio.allocation`` already produces.
 ASSET_CLASSES = portfolio.ASSET_CLASSES
 
-#: The one class this module knows that ``portfolio`` does not yet store.
 #: Crypto is not an equity and it is emphatically not cash, and folding it into
-#: "other" (12% volatility) understates it by a factor of six -- so the
-#: assumptions table carries it, and a weight dict may name it, ahead of the
-#: day ``portfolio.ASSET_CLASSES`` gains the column. Until then nothing
-#: upstream EMITS this key: ``portfolio.allocation`` buckets a crypto holding
-#: by ``securities.asset_class`` / ``accounts.asset_class`` like any other, so
-#: wiring crypto accounts to it is a change in ``portfolio``, not here.
+#: "other" (12% volatility) understates it by a factor of six. This module
+#: carried the class alone for a while, ahead of the day
+#: ``portfolio.ASSET_CLASSES`` gained the column; that day came on 2026-09-21,
+#: so the name is kept only because several call sites spell it.
 CRYPTO_CLASS = "crypto"
 
-#: What a weight dict handed to this module may legally name: the stored
-#: classes plus crypto. Never substitute this for ``ASSET_CLASSES`` when
-#: talking to ``portfolio`` -- that tuple is the schema's, this one is ours.
-PROJECTION_CLASSES: tuple[str, ...] = tuple(ASSET_CLASSES) + (CRYPTO_CLASS,)
+#: What a weight dict handed to this module may legally name. Now exactly the
+#: stored classes: upstream can finally EMIT every key the assumptions table
+#: prices, so the two vocabularies are one.
+PROJECTION_CLASSES: tuple[str, ...] = tuple(ASSET_CLASSES)
 
 # The class every unrecognized or unclassified weight is folded into. 4.2's
 # "other" is deliberately mediocre, so an unclassified holding is never
@@ -253,14 +250,19 @@ def _ladder_weights(equity: float) -> dict[str, float]:
     rest of the assumptions. The weights sum to 1 for every e in [0, 1].
     """
     e = float(equity)
-    return {
+    # Built FROM ASSET_CLASSES, not as a literal of the four the rule names:
+    # mix_for_risk interpolates rung dicts key by key over ASSET_CLASSES, so a
+    # dict missing a class raises KeyError the moment one is added -- which is
+    # exactly what adding `crypto` did. The ladder itself is unchanged; the
+    # classes the rule does not use are explicitly zero.
+    out = {cls: 0.0 for cls in ASSET_CLASSES}
+    out.update({
         "domestic_stock": 0.6 * e,
         "intl_stock": 0.4 * e,
         "bond": (1.0 - e) * e,
         "cash": (1.0 - e) ** 2,
-        "real_estate": 0.0,
-        "other": 0.0,
-    }
+    })
+    return out
 
 
 MAX_RISK_LEVEL = 10

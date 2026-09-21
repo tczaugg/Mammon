@@ -113,8 +113,13 @@ def test_allocation_groups_by_asset_class_security_and_account(conn, world):
     portfolio.set_security(conn, "AAPL", name="Apple", sec_type="stock",
                            asset_class="domestic_stock")
     portfolio.set_security(conn, "BND", sec_type="etf", asset_class="bond")
+    # crypto became an assignable class on 2026-09-21; a genuinely unknown one
+    # is still refused, which is what this assertion is for.
+    portfolio.set_security(conn, "BND", asset_class="crypto")
+    assert portfolio.get_security(conn, "BND")["asset_class"] == "crypto"
+    portfolio.set_security(conn, "BND", asset_class="bond")       # put it back
     with pytest.raises(ValueError):
-        portfolio.set_security(conn, "BND", asset_class="crypto")
+        portfolio.set_security(conn, "BND", asset_class="tulips")
     assert portfolio.get_security(conn, "AAPL")["name"] == "Apple"
     portfolio.set_security(conn, "AAPL", name="")             # clears just the name
     assert portfolio.get_security(conn, "AAPL")["asset_class"] == "domestic_stock"
@@ -169,8 +174,10 @@ def test_allocation_scope_reaches_cash_accounts_and_property_but_never_debt(conn
     assert portfolio.account_asset_class(ledger.get_account(conn, house)) == "real_estate"
     portfolio.set_account_asset_class(conn, house, None)          # back to unsaid
     assert portfolio.account_asset_class(ledger.get_account(conn, house)) == "unclassified"
+    portfolio.set_account_asset_class(conn, house, "crypto")      # assignable now
+    portfolio.set_account_asset_class(conn, house, "real_estate")  # put it back
     with pytest.raises(ValueError):
-        portfolio.set_account_asset_class(conn, house, "crypto")
+        portfolio.set_account_asset_class(conn, house, "tulips")
     with pytest.raises(ValueError):
         portfolio.allocation(conn, scope="nonsense")
     # Naming a liability outright still does not allocate it.

@@ -2160,6 +2160,31 @@ CREATE TABLE IF NOT EXISTS report_item_refs (
 """
 
 
+# An ACCOUNT's own asset mixture: the exact analogue of security_mixtures.
+#
+# accounts.asset_class could hold only ONE class, so "this sleeve is a
+# conservative 30/70" was unsayable -- the user had to pick one class and be
+# wrong about the rest, or leave it unclassified. An account holding no
+# securities at all (a stable-value sleeve, a managed account reported as a
+# single balance) had no way to say anything. A security has been able to say
+# it since security_mixtures; an account could not.
+#
+# Same shape on purpose: the normalize/split_value code in mammon.security_mix
+# serves both, so the two cannot drift apart.
+_V76 = """
+CREATE TABLE account_mixtures (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    asset_class TEXT NOT NULL,
+    pct         TEXT NOT NULL,             -- Decimal text, percent of the balance
+    source      TEXT,
+    as_of       TEXT,
+    UNIQUE(account_id, asset_class)
+);
+CREATE INDEX idx_account_mixtures_account ON account_mixtures(account_id);
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -2236,6 +2261,7 @@ MIGRATIONS: list[str] = [
     _V73,
     _V74,
     _V75,
+    _V76,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

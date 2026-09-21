@@ -225,6 +225,62 @@ def clear_mixture(conn, symbol: str) -> bool:
     return cur.rowcount > 0
 
 
+# ---------------------------------------------------------------------------
+# the same idea for an ACCOUNT (SRD 5.8g)
+# ---------------------------------------------------------------------------
+# An account's balance could only ever be one class, so a conservative sleeve or
+# a managed account reported as a single balance had to pick one and be wrong
+# about the rest. These are the account-shaped twins of the four functions
+# above, over `account_mixtures`, and they deliberately share normalize() and
+# split_value() with them so a mixture means the same thing either side.
+def set_account_mixture(conn, account_id: int, weights: dict,
+                        source: Optional[str] = None,
+                        as_of: Optional[str] = None) -> None:
+    """Record (or, with an empty mapping, clear) an account's class mixture."""
+    aid = int(account_id)
+    clean = normalize(weights)
+    for cls in clean:
+        if cls not in portfolio.ASSET_CLASSES:
+            raise ValueError(f"unknown asset class {cls!r}; one of "
+                             f"{portfolio.ASSET_CLASSES}")
+    conn.execute("DELETE FROM account_mixtures WHERE account_id=?", (aid,))
+    stamp = as_of or _today()
+    for cls, pct in sorted(clean.items(), key=lambda kv: (-kv[1], kv[0])):
+        conn.execute(
+            "INSERT INTO account_mixtures(account_id, asset_class, pct, source, as_of) "
+            "VALUES (?,?,?,?,?)", (aid, cls, str(pct), source, stamp))
+    conn.commit()
+
+
+def get_account_mixture(conn, account_id: int) -> dict:
+    """``{asset_class: Decimal pct}`` for the account, ``{}`` when it has none.
+
+    No ``unclassified`` settling, unlike a security's: that slice exists because
+    a data provider cannot split equity by domicile, and nobody fetches an
+    account's composition from a provider. An account mixture is stated by the
+    user or it does not exist."""
+    return {r["asset_class"]: _D(r["pct"]) for r in conn.execute(
+        "SELECT asset_class, pct FROM account_mixtures WHERE account_id=? "
+        "ORDER BY asset_class", (int(account_id),)).fetchall()}
+
+
+def clear_account_mixture(conn, account_id: int) -> bool:
+    cur = conn.execute("DELETE FROM account_mixtures WHERE account_id=?",
+                       (int(account_id),))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def all_account_mixtures(conn) -> dict:
+    """``{account_id: {asset_class: Decimal pct}}`` for every account that has
+    one -- one query, for the allocation's per-account loop."""
+    out: dict = {}
+    for row in conn.execute(
+            "SELECT account_id, asset_class, pct FROM account_mixtures"):
+        out.setdefault(int(row["account_id"]), {})[row["asset_class"]] = _D(row["pct"])
+    return out
+
+
 def all_mixtures(conn) -> dict:
     """``{symbol: {asset_class: Decimal pct}}`` for every security that has one.
     One query, because the allocation asks for all of them at once. Each equity

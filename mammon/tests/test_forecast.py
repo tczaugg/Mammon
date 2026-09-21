@@ -332,7 +332,12 @@ def test_crypto_is_its_own_class_and_is_wilder_than_equity():
     assert w["crypto"] == pytest.approx(0.5)
     assert w["other"] == pytest.approx(0.0)
     assert forecast.CRYPTO_CLASS in forecast.PROJECTION_CLASSES
-    assert forecast.CRYPTO_CLASS not in portfolio.ASSET_CLASSES  # portfolio's tuple is untouched
+    # portfolio.ASSET_CLASSES gained the column on 2026-09-21, which is what
+    # forecast.py's own comment had been waiting for: the two vocabularies are
+    # one, so a crypto holding can finally be EMITTED as crypto rather than
+    # bucketed by whatever single class its security happened to carry.
+    assert forecast.CRYPTO_CLASS in portfolio.ASSET_CLASSES
+    assert forecast.PROJECTION_CLASSES == tuple(portfolio.ASSET_CLASSES)
 
     # sigma of half cash / half crypto: the two are uncorrelated, so
     #   var = .25(.75^2) + .25(.011^2) = .140625 + .000030250 = .14065525
@@ -393,7 +398,7 @@ def test_adding_crypto_left_every_existing_assumption_alone():
         row = forecast.DEFAULT_ASSUMPTIONS[cls]
         assert (row.mean_return, row.volatility) == pytest.approx((mu, sigma)), cls
     assert set(forecast.DEFAULT_ASSUMPTIONS) == set(pinned) | {"crypto"}
-    assert set(portfolio.ASSET_CLASSES) == set(pinned)
+    assert set(portfolio.ASSET_CLASSES) == set(pinned) | {"crypto"}
 
     for (a, b), rho in {
         ("domestic_stock", "intl_stock"): 0.85,

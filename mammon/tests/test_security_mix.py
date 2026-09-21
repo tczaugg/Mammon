@@ -157,6 +157,16 @@ def test_split_value_is_exact_to_the_cent():
 # ---------------------------------------------------------------------------
 # storage
 # ---------------------------------------------------------------------------
+def test_a_fund_may_hold_crypto(conn):
+    """crypto joined ASSET_CLASSES on 2026-09-21. A spot-crypto ETF could not
+    describe itself before: the class existed only in the projection, so a
+    mixture naming it was refused."""
+    security_mix.set_mixture(conn, "ZZBTC", {"crypto": 100})
+    assert security_mix.get_mixture(conn, "ZZBTC") == {"crypto": Decimal("100.00")}
+    security_mix.set_mixture(conn, "ZZMIX", {"crypto": 20, "domestic_stock": 80})
+    assert security_mix.get_mixture(conn, "ZZMIX")["crypto"] == Decimal("20.00")
+
+
 def test_mixtures_round_trip_and_clear(conn, world):
     security_mix.set_mixture(conn, "VTHRX",
                              {"domestic_stock": 58.43, "bond": 39.8, "cash": 1.66,
@@ -178,7 +188,7 @@ def test_mixtures_round_trip_and_clear(conn, world):
     assert security_mix.mixture_meta(conn, "VTHRX") is None
 
     with pytest.raises(ValueError):
-        security_mix.set_mixture(conn, "VTHRX", {"crypto": 100})
+        security_mix.set_mixture(conn, "VTHRX", {"tulips": 100})
     with pytest.raises(ValueError):
         security_mix.set_mixture(conn, "  ", {"bond": 100})
 

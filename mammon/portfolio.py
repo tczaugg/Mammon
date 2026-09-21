@@ -30,7 +30,17 @@ from typing import Iterable, Optional
 from mammon import asset_values, crypto, investments, ledger, security_mix
 from mammon.investments import RealizedGain, _D, _HUNDRED, _cents
 
-ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "real_estate", "other")
+#: The classes a holding, a security mixture or an account may be assigned to.
+#:
+#: ``crypto`` joined them on 2026-09-21. It had lived only in
+#: ``forecast.PROJECTION_CLASSES`` -- the projection knew it was four times as
+#: volatile as equity while nothing upstream could EMIT it, so a spot-crypto
+#: ETF or a wallet could not be described as crypto in an allocation at all.
+#: forecast.py's own comment anticipated this ("ahead of the day
+#: portfolio.ASSET_CLASSES gains the column"), and PROJECTION_CLASSES is now
+#: exactly this tuple.
+ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "crypto",
+                 "real_estate", "other")
 # The one asset class that cannot be TRADED to its own weight: cash is raised by
 # selling securities and spent by buying them, so a rebalancer must never propose
 # "selling" it (see rebalance.ClassDrift.action). Named so that rule has a single
@@ -38,7 +48,8 @@ ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "real_estate", 
 CASH_CLASS = "cash"
 ASSET_CLASS_LABELS = {
     "domestic_stock": "Domestic stock", "intl_stock": "International stock",
-    "bond": "Bonds", "cash": "Cash", "real_estate": "Real estate", "other": "Other",
+    "bond": "Bonds", "cash": "Cash", "crypto": "Crypto",
+    "real_estate": "Real estate", "other": "Other",
     "unclassified": "Unclassified",
 }
 SECURITY_TYPES = ("stock", "fund", "etf", "bond", "option", "cd", "other")
@@ -868,6 +879,11 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     # apportions by largest remainder so the parts sum to the position rather
     # than losing a cent per holding.
     mixtures = security_mix.all_mixtures(conn)
+    # An account may state its own mixture, which governs whatever balance the
+    # account contributes ITSELF: a non-investment account's whole value, and an
+    # investment account's idle CASH. It never touches the securities inside --
+    # those say what they are for themselves.
+    acct_mixtures = security_mix.all_account_mixtures(conn)
     by_class: dict = {}
     by_sec: dict = {}
     by_acct: dict = {}
@@ -891,10 +907,18 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
             value = asset_values.market_value(conn, aid, as_of)
             if value is None:
                 value = ledger.account_balance(conn, aid, as_of)
-            cls = account_asset_class(acct)
-            acct_classes[aid] = cls
+            amix = acct_mixtures.get(aid)
+            if amix:
+                # Stated outright, so it wins over the single class exactly as a
+                # security's mixture wins over its own.
+                acct_classes[aid] = security_mix.describe(amix)
+                for cls, part in security_mix.split_value(value, amix).items():
+                    by_class[cls] = by_class.get(cls, 0) + part
+            else:
+                cls = account_asset_class(acct)
+                acct_classes[aid] = cls
+                by_class[cls] = by_class.get(cls, 0) + value
             by_acct[aid] = (name, value)
-            by_class[cls] = by_class.get(cls, 0) + value
             total += value
             continue
         # One valuation per KIND of account, the same one the accounts list and
@@ -918,7 +942,23 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
         by_acct[aid] = (name, acct_total)
         total += acct_total
         if v.cash:
-            by_class["cash"] = by_class.get("cash", 0) + v.cash
+            # Idle cash is cash UNLESS the account says otherwise. A sleeve
+            # reported as one balance, or a stable-value fund that reaches the
+            # ledger as cash, could not say so before: the class of an
+            # investment account was never consulted at all, so its balance was
+            # cash whatever the user set (reported).
+            amix = acct_mixtures.get(aid)
+            if amix:
+                for cls, part in security_mix.split_value(int(v.cash), amix).items():
+                    by_class[cls] = by_class.get(cls, 0) + part
+            else:
+                own = account_asset_class(acct) if acct is not None else "cash"
+                if (acct["asset_class"] if acct is not None
+                        and "asset_class" in acct.keys() else None):
+                    # An explicit choice on an investment account is honored now.
+                    by_class[own] = by_class.get(own, 0) + v.cash
+                else:
+                    by_class["cash"] = by_class.get("cash", 0) + v.cash
             if not v.holdings:
                 cash_only.append((name, int(v.cash)))
         for h in v.holdings:

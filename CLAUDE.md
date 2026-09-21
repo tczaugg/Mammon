@@ -127,7 +127,7 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
   text.
 - **Never edit an existing migration.** `db.py` holds an ordered `MIGRATIONS`
   list; index *i* upgrades the DB from version *i* to *i+1*, tracked in
-  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 75).
+  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 76).
   Append a new `_Vn` and add it to the list - real databases have already
   applied the existing ones. `init_db()` is idempotent and safe on new and
   existing files. (That number is pinned by
