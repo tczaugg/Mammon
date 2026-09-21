@@ -581,6 +581,51 @@ def holding_performances(conn, account_id: int, end: str, *,
     return out
 
 
+def cash_dividends(conn, account_ids, symbol: Optional[str] = None,
+                   end: Optional[str] = None, start: Optional[str] = None) -> int:
+    """Cents of income PAID OUT AS CASH, i.e. not reinvested.
+
+    :attr:`Performance.income` deliberately counts every dividend action, cash
+    and reinvested alike, because both are income earned. This answers the
+    narrower question the Investment Dashboard has to ask about a single
+    security: how much of what it earned LEFT it, and so is not in its market
+    value today. A reinvested dividend bought shares and is inside that value;
+    a cash one went to the account's cash and is not.
+
+    ``_CASH_DIVIDENDS`` is the authority on which is which -- the dividend
+    actions minus the five reinvest ones -- so this cannot drift from the flow
+    classification in :func:`security_performance`.
+
+    ``start`` defaults to the beginning of time: the question is asked about a
+    point-in-time VALUE, and every cash dividend ever paid is missing from it,
+    not merely this period's.
+    """
+    ids = [int(a) for a in account_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    sql = (f"SELECT action, amount, symbol FROM investment_transactions "
+           f"WHERE account_id IN ({placeholders})")
+    params = list(ids)
+    if end:
+        sql += " AND date <= ?"
+        params.append(end)
+    if start:
+        sql += " AND date >= ?"
+        params.append(start)
+    want = investments.resolve_symbol(conn, symbol) if symbol else None
+    total = 0
+    for row in conn.execute(sql, params):
+        if _action(row) not in _CASH_DIVIDENDS:
+            continue
+        if want is not None:
+            have = (row["symbol"] or "").strip()
+            if investments.resolve_symbol(conn, have) != want:
+                continue
+        total += abs(int(row["amount"] or 0))
+    return total
+
+
 def external_flows(conn, account_id: int, start: str, end: str) -> list:
     """Money that crossed the account's boundary in ``[start, end]`` as
     ``[(date, signed cents into the account)]``: ledger transfer legs (a cash

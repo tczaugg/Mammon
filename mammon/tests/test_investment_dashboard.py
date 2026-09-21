@@ -232,12 +232,15 @@ def test_accounts_mode_draws_one_wedge_per_investment_account(page, seeded):
     assert len(set(colors.values())) == 2
 
 
-def test_securities_mode_draws_one_wedge_per_security(page):
+def test_securities_mode_draws_one_wedge_per_security_plus_cash(page):
+    """Reported: "add the cash wedge when displaying securities". Without it the
+    two rings totalled different money and the cash simply vanished -- which is
+    exactly where an un-reinvested dividend goes."""
     page.set_mode(dash.MODE_SECURITIES)
-    assert set(page.ring.keys()) == {"ZZAA", "ZZBB", "ZZCC"}
-    assert page.ring.wedge_count() == 3
+    assert set(page.ring.keys()) == {"ZZAA", "ZZBB", "ZZCC", dash.CASH_KEY}
+    assert page.ring.wedge_count() == 4
     colors = page.ring.wedge_colors()
-    assert len(set(colors.values())) == 3
+    assert len(set(colors.values())) == 4
 
 
 def test_no_small_slice_is_folded_into_an_other_wedge(qapp):
@@ -587,6 +590,208 @@ def test_the_center_line_survives_switching_scope_and_back(page, qapp, seeded):
     assert page.center.isVisible()
     assert page.center.label_texts()[0].startswith("Total ")
     page.hide()
+
+
+# --- reinvested vs cash dividends (reported) ---------------------------------
+@pytest.fixture
+def two_dividend_styles(conn):
+    """Two identical positions paying identical dividends by different routes.
+
+    $10,000 each, $300 a year for five years, both worth $150/share at AS_OF.
+    ZZCASHD banks its dividends; ZZREIND buys shares with them. Everything the
+    dashboard says about the pair should differ ONLY where that difference is
+    real.
+    """
+    acct = ledger.create_account(conn, "Dividend Brokerage", "investment",
+                                 opening_balance=50_000_00, opening_date="2020-01-01")
+
+    def buy(sym):
+        investments.record_investment(
+            conn, acct, "2021-01-04", "Buy", symbol=sym, quantity=Decimal("100"),
+            price=Decimal("100.00"), amount=10_000_00)
+
+    buy("ZZCASHD")
+    buy("ZZREIND")
+    for year in range(2021, 2026):
+        investments.record_investment(conn, acct, f"{year}-12-15", "Div",
+                                      symbol="ZZCASHD", amount=300_00)
+        investments.record_investment(conn, acct, f"{year}-12-15", "ReinvDiv",
+                                      symbol="ZZREIND", quantity=Decimal("2"),
+                                      price=Decimal("150.00"), amount=300_00)
+    investments.rebuild_holdings(conn, acct)
+    for sym in ("ZZCASHD", "ZZREIND"):
+        for i, year in enumerate(range(2021, 2027)):
+            px = Decimal("100.00") + Decimal(i) * Decimal("10.00")
+            investments.record_price(conn, sym, f"{year}-01-02", px)
+            investments.record_price(conn, sym, f"{year}-06-30", px + Decimal("5.00"))
+        investments.record_price(conn, sym, AS_OF, Decimal("150.00"))
+    return {"account": acct, "cash_payer": "ZZCASHD", "reinvestor": "ZZREIND"}
+
+
+def test_the_securities_ring_totals_the_same_money_as_the_accounts_ring(
+        conn, two_dividend_styles):
+    """The cash wedge is what makes the two agree. Before it the securities ring
+    summed to the priced holdings alone while the center block showed the
+    account total in both modes, and the difference -- the cash, where every
+    un-reinvested dividend lands -- was on screen nowhere."""
+    ids = [two_dividend_styles["account"]]
+    accounts = dash.ring_slices(conn, dash.MODE_ACCOUNTS, AS_OF, account_ids=ids)
+    securities = dash.ring_slices(conn, dash.MODE_SECURITIES, AS_OF, account_ids=ids)
+    assert sum(c for _k, _l, c in securities) == sum(c for _k, _l, c in accounts)
+
+    cash = [s for s in securities if s[0] == dash.CASH_KEY]
+    assert len(cash) == 1, "exactly one cash wedge"
+    assert cash[0][1] == dash.CASH_LABEL
+    assert cash[0] == securities[-1], "cash reads as the remainder, so it goes last"
+
+
+def test_an_account_swept_to_zero_draws_no_cash_wedge(conn, seeded):
+    """A wedge for nothing is a lie about the allocation."""
+    ids = [seeded["ira"]]
+    cash = dash.center_line(conn, AS_OF, account_ids=ids, symbol=dash.CASH_KEY).total
+    slices = dash.ring_slices(conn, dash.MODE_SECURITIES, AS_OF, account_ids=ids)
+    has_wedge = any(k == dash.CASH_KEY for k, _l, _c in slices)
+    assert has_wedge == (cash > 0)
+
+
+def test_clicking_the_cash_wedge_states_a_value_and_nothing_else(
+        conn, two_dividend_styles):
+    """Cash has a value. It has no gain, no dividends and no rate of return, and
+    inventing columns of zeros for it would say otherwise."""
+    ids = [two_dividend_styles["account"]]
+    line = dash.center_line(conn, AS_OF, account_ids=ids, symbol=dash.CASH_KEY,
+                            subject=dash.CASH_LABEL)
+    assert line.cash_only is True
+    assert line.headings() == ["Total"]
+    assert line.footnote() == ""
+
+
+def test_a_total_includes_both_kinds_of_dividend(conn, two_dividend_styles):
+    """Reported: "when displaying the total for either breakout, both reinvested
+    dividends and cash dividends should be included in the dividend number"."""
+    ids = [two_dividend_styles["account"]]
+    line = dash.center_line(conn, AS_OF, account_ids=ids)
+    # One of each was paid in the trailing year, $300 apiece.
+    assert line.dividends == 600_00
+    assert dict(zip(line.headings(), line.values()))["1-yr dividends"] == "$600.00"
+    assert line.uninvested_dividends == 0, "no asterisk on a whole-portfolio total"
+    assert line.footnote() == ""
+
+
+def test_a_cash_payers_value_is_asterisked_and_a_reinvestors_is_not(
+        conn, two_dividend_styles):
+    """Reported: "the gain for a security that paid dividends in cash would not
+    include those dividends in the total ... so we need an asterisk on the value
+    that says 'dividends not reinvested' when that is the case"."""
+    ids = [two_dividend_styles["account"]]
+    payer = dash.center_line(conn, AS_OF, account_ids=ids,
+                             symbol=two_dividend_styles["cash_payer"],
+                             subject=two_dividend_styles["cash_payer"])
+    reinvestor = dash.center_line(conn, AS_OF, account_ids=ids,
+                                  symbol=two_dividend_styles["reinvestor"],
+                                  subject=two_dividend_styles["reinvestor"])
+
+    assert payer.uninvested_dividends == 1_500_00      # five years of $300
+    assert payer.values()[0].endswith("*")
+    assert payer.footnote() == "* " + dash.UNINVESTED_NOTE
+
+    assert reinvestor.uninvested_dividends == 0
+    assert not reinvestor.values()[0].endswith("*")
+    assert reinvestor.footnote() == ""
+
+    # The asterisk marks a REAL difference: the reinvestor's dividends bought
+    # shares and are in its value; the payer's are in the account's cash.
+    assert reinvestor.total == 16_500_00               # 110 shares
+    assert payer.total == 15_000_00                    # 100 shares
+
+
+def test_the_return_percentages_include_dividends_paid_in_cash(
+        conn, two_dividend_styles):
+    """Reported: "but the return percentages should include the dividends paid
+    over each period."
+
+    They do, and by the same arithmetic for both routes: security_performance
+    treats a cash dividend as money BACK, so it lands in the gain exactly as a
+    reinvested one lands in the ending value. The two positions earned the same
+    $6,500; only the timing differs, which is what a money-weighted rate is
+    supposed to notice.
+    """
+    acct = two_dividend_styles["account"]
+    payer = portfolio.security_performance(
+        conn, acct, two_dividend_styles["cash_payer"], "2021-01-01", AS_OF)
+    reinvestor = portfolio.security_performance(
+        conn, acct, two_dividend_styles["reinvestor"], "2021-01-01", AS_OF)
+
+    assert payer.gain == reinvestor.gain == 6_500_00
+    assert payer.money_out == 1_500_00, "the cash dividends came back out"
+    assert reinvestor.money_out == 0, "the reinvested ones never left"
+    assert payer.income == reinvestor.income == 1_500_00
+
+    # Every horizon has a rate, and the cash payer's is the higher of the two --
+    # money returned sooner earns more per dollar-year, not less.
+    ids = [acct]
+    for symbol in (two_dividend_styles["cash_payer"],
+                   two_dividend_styles["reinvestor"]):
+        line = dash.center_line(conn, AS_OF, account_ids=ids, symbol=symbol,
+                                subject=symbol)
+        assert set(line.annualized) == set(dash.ANNUALIZED_YEARS)
+    for years in dash.ANNUALIZED_YEARS:
+        a = dash.center_line(conn, AS_OF, account_ids=ids,
+                             symbol=two_dividend_styles["cash_payer"]).annualized[years]
+        b = dash.center_line(conn, AS_OF, account_ids=ids,
+                             symbol=two_dividend_styles["reinvestor"]).annualized[years]
+        assert a > b, f"{years}y: cash payer {a} should beat reinvestor {b}"
+
+
+def test_a_cash_dividend_is_counted_as_cash_and_a_reinvested_one_is_not(
+        conn, two_dividend_styles):
+    """portfolio.cash_dividends is what the asterisk is decided on, so it has to
+    split them the way security_performance's flows do."""
+    ids = [two_dividend_styles["account"]]
+    assert portfolio.cash_dividends(
+        conn, ids, two_dividend_styles["cash_payer"], AS_OF) == 1_500_00
+    assert portfolio.cash_dividends(
+        conn, ids, two_dividend_styles["reinvestor"], AS_OF) == 0
+    # Un-symboled: the whole scope's cash income.
+    assert portfolio.cash_dividends(conn, ids, None, AS_OF) == 1_500_00
+    # Windowed, for a caller that wants one period.
+    assert portfolio.cash_dividends(
+        conn, ids, two_dividend_styles["cash_payer"], AS_OF,
+        start="2025-01-01") == 300_00
+
+
+def test_the_asterisk_carries_its_explanation_on_the_widget(
+        conn, two_dividend_styles, qapp):
+    """An asterisk with nothing to explain it is worse than none."""
+    page = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    try:
+        page.set_mode(dash.MODE_SECURITIES)
+        page.select_slice(two_dividend_styles["cash_payer"])
+        qapp.processEvents()
+        assert page.center.value_texts()[0].endswith("*")
+        assert page.center._values[0].toolTip() == dash.UNINVESTED_NOTE
+        page.select_slice(two_dividend_styles["reinvestor"])
+        qapp.processEvents()
+        assert not page.center.value_texts()[0].endswith("*")
+        assert page.center._values[0].toolTip() == ""
+    finally:
+        page.deleteLater()
+
+
+def test_the_cash_wedges_caption_is_not_the_sentinel(conn, two_dividend_styles,
+                                                     qapp):
+    """The key is "__cash__" so it cannot collide with a ticker; the user must
+    never see that string."""
+    page = dash.InvestmentDashboardPage(conn, as_of=AS_OF)
+    try:
+        page.set_mode(dash.MODE_SECURITIES)
+        page.select_slice(dash.CASH_KEY)
+        qapp.processEvents()
+        assert page.filter_subject() == dash.CASH_LABEL
+        assert dash.CASH_KEY not in page.history_header.title()
+        assert dash.CASH_KEY not in page.center_text()
+    finally:
+        page.deleteLater()
 
 
 # --- the inflow arrows ------------------------------------------------------
@@ -2544,12 +2749,13 @@ def test_the_gear_narrows_the_ring_the_plots_and_the_arrows(page, seeded):
 
     # A security only the excluded account holds leaves the ring with it.
     page.set_mode(dash.MODE_SECURITIES)
-    assert set(page.ring.keys()) == {"ZZAA", "ZZBB"}
+    # Cash rides along in securities mode now, and the gear narrows it too.
+    assert set(page.ring.keys()) - {dash.CASH_KEY} == {"ZZAA", "ZZBB"}
 
     page.customize_dialog.filters.mark_accounts()
     page.customize_dialog.applied.emit()
     assert page.account_scope() is None
-    assert set(page.ring.keys()) == {"ZZAA", "ZZBB", "ZZCC"}
+    assert set(page.ring.keys()) - {dash.CASH_KEY} == {"ZZAA", "ZZBB", "ZZCC"}
 
 
 # --- a crypto wallet is an investment-like account, and the ring must show it -
@@ -2605,7 +2811,7 @@ def test_crypto_coin_keeps_its_wedge_in_securities_mode(conn, wallet):
     ids = [wallet["brokerage"], wallet["ira"], wallet["wallet"]]
     keys = {key for key, _label, _value in
             dash.ring_slices(conn, dash.MODE_SECURITIES, AS_OF, account_ids=ids)}
-    assert keys == {"ZZAA", "ZZBB", "ZZCC", "ZZETH"}
+    assert keys - {dash.CASH_KEY} == {"ZZAA", "ZZBB", "ZZCC", "ZZETH"}
 
 
 def test_an_empty_crypto_account_draws_no_wedge(conn, wallet):

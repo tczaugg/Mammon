@@ -3030,6 +3030,30 @@ was previously nowhere in the app to add the price it was complaining about.
   that wants a table is a CORNER LAUNCHER that opens the window already owning
   that table. It adds no money arithmetic of its own: every figure is composed
   from `investments`, `portfolio` and `forecast`.
+- **The securities ring carries a CASH wedge, and a single security's value
+  does not.** `allocation.by_security` is built from priced holdings, so the
+  securities ring once summed to less money than the accounts ring while the
+  center block showed the account-based total in both -- the difference, cash,
+  appeared on screen nowhere. It is a wedge now, last in the ring so it reads as
+  the remainder, and drawn only when there is some. Selecting it scopes the page
+  to cash, which has a value and deliberately nothing else: no gain, no
+  dividends and no rate, because inventing columns of zeros would claim
+  otherwise. Its key is a sentinel rather than the string `CASH`, since a real
+  security may be that ticker.
+- **A dividend paid in CASH is in the rates but not in the value, and the value
+  says so.** Both kinds are income and both count in a scope's dividend figure
+  and in every return percentage: `security_performance` treats a cash dividend
+  as money BACK, so it lands in the gain exactly as a reinvested one lands in
+  the ending value -- two positions earning the same $300 a year show the same
+  gain by either route, differing only in rate, because money returned sooner
+  earns more per dollar-year. What differs is the VALUE. A reinvested dividend
+  bought shares and is inside the position; a cash one went to the account's
+  cash, and there is no honest way to attribute that cash back to the security
+  that paid it, least of all once the position is sold. So a single security's
+  Total is asterisked when it has paid dividends in cash, the asterisk reading
+  "dividends not reinvested" (`portfolio.cash_dividends` decides, from the same
+  `_CASH_DIVIDENDS` set the flow classification uses, so the two cannot drift).
+  A whole-portfolio total is never asterisked: its cash is already in it.
 - **One gear sets the page's account scope, and it is the application's
   EXISTING customization widget.** A gear at the top of the ring area, just left
   of the Performance Report corner (reported), opens the report bar's

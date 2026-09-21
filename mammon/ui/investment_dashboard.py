@@ -289,6 +289,25 @@ CONNECTOR_FONT_SCALE = 0.85
 #: REQUEST: how far the switch can actually rise is bounded by the inner circle
 #: narrowing above it (see :meth:`RingArea.mode_row_rect`).
 MODE_ROW_TITLE_GAP_ROWS = 1.5
+
+#: The securities ring's cash slice. Reported: "add the cash wedge when
+#: displaying securities."
+#:
+#: Without it the two rings totalled different money -- accounts summed to the
+#: portfolio, securities summed to the priced holdings alone -- while the center
+#: block showed the account-based total in both. Cash simply vanished, which is
+#: exactly where an un-reinvested dividend goes.
+#:
+#: The key is a SENTINEL, not the string "CASH", because a real security may be
+#: ticker CASH and the ring keys securities by symbol.
+CASH_KEY = "__cash__"
+CASH_LABEL = "Cash"
+#: What the asterisk on a single security's value means (reported: "we need an
+#: asterisk on the value that says 'dividends not reinvested' when that is the
+#: case"). Its dividends were paid out rather than buying shares, so they are
+#: not in the market value shown -- though they ARE in the return percentages,
+#: which is the distinction the note exists to draw.
+UNINVESTED_NOTE = "dividends not reinvested"
 #: Smallest corner overlay worth reserving, in px.
 #: Reported: "shrink the size of the 4 corner tiles so that they look more like
 #: buttons than something that is actually trying to convey information."
@@ -1557,6 +1576,14 @@ class CenterLine:
     dividends: int = 0                          # cents, trailing year
     annualized: dict = field(default_factory=dict)   # {years: Decimal percent}
     subject: str = "All investments"
+    #: Cents this subject paid out as CASH rather than reinvesting. Non-zero
+    #: only for a single security, and only then is the Total asterisked: the
+    #: money is real and earned, but it is in the account's cash, not in the
+    #: security's market value.
+    uninvested_dividends: int = 0
+    #: The cash slice's own scope. It has a value and nothing else -- cash has
+    #: no gain, no dividends and no rate of return to state.
+    cash_only: bool = False
 
     def columns(self) -> list:
         """``[(heading, value), ...]`` -- one column of the center block.
@@ -1569,7 +1596,13 @@ class CenterLine:
         An absent horizon contributes no column at all, which is how a scope
         without enough history renders as nothing rather than as a dash or a
         zero."""
-        out = [("Total", fmt_money(self.total))]
+        total = fmt_money(self.total)
+        if self.uninvested_dividends:
+            total += "*"
+        out = [("Total", total)]
+        if self.cash_only:
+            # Cash has a value and nothing else to say about it.
+            return out
         if self.year_gain is not None:
             out.append(("1-yr gain", fmt_signed(self.year_gain)))
         out.append(("1-yr dividends", fmt_money(self.dividends)))
@@ -1580,6 +1613,10 @@ class CenterLine:
                 # dollar gain already has a column of its own next to it.
                 out.append((f"{years}-yr return", fmt_pct(pct)))
         return out
+
+    def footnote(self) -> str:
+        """What the asterisk on the Total means, or "" when there is none."""
+        return f"* {UNINVESTED_NOTE}" if self.uninvested_dividends else ""
 
     def headings(self) -> list:
         return [head for head, _ in self.columns()]
@@ -1592,6 +1629,12 @@ class CenterLine:
 
     def text(self) -> str:
         return "   |   ".join(self.parts())
+
+
+def _scope_cash(conn, ids, end: str) -> int:
+    """Cents of cash across the scope, which is the securities ring's own
+    wedge and the difference between its wedges and the accounts ring's."""
+    return sum(portfolio.account_valuation(conn, int(a), end).cash for a in ids)
 
 
 def _account_ids(conn) -> list:
@@ -1636,7 +1679,16 @@ def center_line(conn, as_of: Optional[str] = None, *, account_ids=None,
     enough history for :attr:`portfolio.Performance.annual_return` to exist."""
     end = as_of or _today()
     ids = list(_account_ids(conn) if account_ids is None else account_ids)
+    if symbol == CASH_KEY:
+        return CenterLine(total=_scope_cash(conn, ids, end), subject=subject,
+                          cash_only=True)
     line = CenterLine(total=_value_at(conn, ids, symbol, end), subject=subject)
+    if symbol:
+        # A single security's value is its HOLDINGS, so any dividend it paid in
+        # cash is missing from it -- while still counted in every rate below,
+        # because security_performance treats a cash dividend as money back.
+        # The asterisk is that difference, said out loud.
+        line.uninvested_dividends = portfolio.cash_dividends(conn, ids, symbol, end)
     for years in horizons:
         perf = _performance(conn, ids, symbol, years_before(end, years), end)
         if perf is None:
@@ -1784,6 +1836,10 @@ class CenterLineWidget(QWidget):
             bottom.setAlignment(Qt.AlignCenter)
             bottom.setFont(value_font)
             bottom.setStyleSheet("color: %s;" % accent)
+            if value.endswith("*"):
+                # An asterisk with nothing to explain it is worse than none.
+                bottom.setToolTip(UNINVESTED_NOTE)
+                top.setToolTip(UNINVESTED_NOTE)
             lay.addWidget(top, 0, i)
             lay.addWidget(bottom, 1, i)
             # show() explicitly, for the mirror of the reason the old labels are
@@ -3220,7 +3276,13 @@ def ring_slices(conn, mode: str, as_of: Optional[str] = None, *,
                         total))
         return out
     alloc = portfolio.allocation(conn, account_ids=ids, as_of=end)
-    return [(s.key, s.label, s.value) for s in alloc.by_security if s.value > 0]
+    out = [(s.key, s.label, s.value) for s in alloc.by_security if s.value > 0]
+    # Cash last, so it reads as the remainder rather than as a holding, and only
+    # when there is some: an account swept to zero should not draw a wedge.
+    cash = _scope_cash(conn, ids, end)
+    if cash > 0:
+        out.append((CASH_KEY, CASH_LABEL, cash))
+    return out
 
 
 class InvestmentDashboardPage(QWidget):
@@ -3821,7 +3883,8 @@ class InvestmentDashboardPage(QWidget):
             row = self.conn.execute("SELECT name FROM accounts WHERE id=?",
                                     (key,)).fetchone()
             return row["name"] if row else str(key)
-        return str(key)
+        # The cash wedge's key is a sentinel, never a ticker; show its label.
+        return CASH_LABEL if key == CASH_KEY else str(key)
 
     def _on_slice_clicked(self, key) -> None:
         if key is None:
