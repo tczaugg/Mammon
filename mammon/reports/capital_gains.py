@@ -143,6 +143,16 @@ class LotTaxRow:
     tax_at_short_rate: Optional[int] = None
     extra_tax_if_sold_now: Optional[int] = None
     annotation: str = ""
+    #: How many open lots this row stands for. 1 for a real lot; more for a
+    #: COMBINED long-term row (see :func:`combine_long_term`). ``acquired`` is
+    #: then the oldest of them and ``acquired_last`` the newest, so the row can
+    #: state the span it covers rather than a date that belongs to one lot.
+    lot_count: int = 1
+    acquired_last: Optional[str] = None
+
+    @property
+    def is_combined(self) -> bool:
+        return self.lot_count > 1
 
     @property
     def is_gain(self) -> bool:
@@ -292,11 +302,17 @@ def capital_gains(conn, as_of: Optional[str] = None, *,
                   prices: Optional[dict] = None,
                   long_term_rate: Decimal = DEFAULT_LONG_TERM_RATE,
                   short_term_rate: Decimal = DEFAULT_ORDINARY_INCOME_RATE,
+                  group_long_term: bool = True,
                   ) -> CapitalGainsReport:
     """Unrealized capital gains per OPEN TAX LOT across the investment accounts
     (or the subset in ``account_ids``), with each lot's long/short status, the
     date a short lot turns long-term, the days remaining, and the extra tax that
     selling it today at ordinary rates would cost. Pure read.
+
+    ``group_long_term`` (default on) collapses the long-term lots of one
+    security in one account, and of one SIGN, into a single row -- see
+    :func:`combine_long_term` for why the sign is not collapsed with them. Pass
+    False for a row per lot, which is what a specific-identification sale needs.
 
     ``as_of`` (ISO, default today) both caps the valuation price and fixes the
     date the holding period is measured to -- it does NOT rewind the share counts;
@@ -376,6 +392,8 @@ def capital_gains(conn, as_of: Optional[str] = None, *,
                 row.annotation = _annotate(row, long_rate, short_rate)
                 rows.append(row)
 
+    if group_long_term:
+        rows = combine_long_term(rows)
     rows.sort(key=lambda r: (r.symbol, r.acquired or "", r.account_name, -r.cost_basis))
     report = CapitalGainsReport(
         as_of=on, account_ids=None if wanted is None else sorted(wanted),
@@ -400,6 +418,93 @@ def capital_gains(conn, as_of: Optional[str] = None, *,
                 report.total_short_term_loss += g
             report.total_extra_tax_if_sold_now += r.extra_tax_if_sold_now or 0
     return report
+
+
+def combine_long_term(lots: list) -> list:
+    """Collapse LONG-term lots into one row per account, security and SIGN.
+
+    Reported: every lot gets a row, "that is fine for short-term capital gains,
+    as the time to become long-term could vary. But all the lots that are
+    long-term already should be combined." The columns that earn a short lot its
+    own line are dead on a long one: ``long_term_on`` is in the past,
+    ``days_to_long`` is 0, there is no crossover deadline to price, and every
+    long lot taxes at the same rate. Reinvested dividends make this acute -- a
+    real position in this ledger carries 92 open lots, 88 of them long, which is
+    88 rows saying one thing.
+
+    SIGN IS NOT COLLAPSED, and that is the point of the grouping being per-sign
+    rather than per-position. Summing a long lot at a loss into one at a gain
+    nets them, and the harvestable loss -- the thing a December tax report
+    exists to surface -- disappears into a figure that is true about the
+    position and useless for deciding what to sell.
+
+    Short-term lots pass through untouched: their crossover dates differ, which
+    is exactly the information a row each is carrying. So do ``unknown`` ones --
+    a lot whose acquisition date was never recorded is a question, not a long
+    holding, and folding it in here would answer it by assertion.
+
+    Totals are unchanged by construction: this sums the same cents into fewer
+    rows, and a combined row's ``lot_count`` says how many it speaks for.
+    """
+    groups: dict = {}
+    out: list = []
+    for row in lots:
+        if row.term != "long":
+            out.append(row)
+            continue
+        sign = 0 if row.unrealized is None else (1 if row.unrealized > 0 else
+                                                 (-1 if row.unrealized < 0 else 0))
+        key = (row.account_id, row.symbol, sign)
+        if key not in groups:
+            groups[key] = [row, []]
+            out.append(("group", key))
+        groups[key][1].append(row)
+    combined = {key: _merge_long(members) for key, (_first, members)
+                in groups.items()}
+    return [combined[item[1]] if isinstance(item, tuple) and item[0] == "group"
+            else item for item in out]
+
+
+def _merge_long(members: list) -> LotTaxRow:
+    """One row standing for several long-term lots of the same sign."""
+    if len(members) == 1:
+        return members[0]
+    first = members[0]
+    acquired = sorted(m.acquired for m in members if m.acquired)
+    unrealized = None
+    if all(m.unrealized is not None for m in members):
+        unrealized = sum(m.unrealized for m in members)
+    tax_long = None
+    if all(m.tax_at_long_rate is not None for m in members):
+        tax_long = sum(m.tax_at_long_rate for m in members)
+    quantity = sum((m.quantity for m in members), Decimal(0))
+    market_value = sum(m.market_value for m in members)
+    # The price is the position's, not any one lot's: a blended per-share figure
+    # would be a number nobody paid. Left as the shared price when every lot
+    # agrees (they all read the same as-of price) and None otherwise.
+    prices = {m.price for m in members}
+    return LotTaxRow(
+        account_id=first.account_id, account_name=first.account_name,
+        symbol=first.symbol, security_name=first.security_name,
+        acquired=acquired[0] if acquired else None,
+        quantity=quantity,
+        cost_basis=sum(m.cost_basis for m in members),
+        price=prices.pop() if len(prices) == 1 else None,
+        market_value=market_value,
+        unrealized=unrealized,
+        term="long",
+        # Every lot is already long, so the latest crossover is the honest one
+        # to state and the countdown is zero either way.
+        long_term_on=max((m.long_term_on for m in members if m.long_term_on),
+                         default=None),
+        days_to_long=0,
+        tax_at_long_rate=tax_long,
+        tax_at_short_rate=None,
+        extra_tax_if_sold_now=0,
+        annotation=first.annotation,
+        lot_count=len(members),
+        acquired_last=acquired[-1] if acquired else None,
+    )
 
 
 def _security_name(conn, symbol: str) -> Optional[str]:

@@ -4835,6 +4835,26 @@ and budgets.
 Code: `mammon/reports/` (pure functions returning plain data),
 `mammon/ui/report_filters.py`, `mammon/ui/widgets.py`.
 
+- **Long-term lots COMBINE; short-term ones do not** (`combine_long_term`,
+  2026-09-21). Reported: "all the lots that are long-term already should be
+  combined ... that is fine for short-term capital gains, as the time to become
+  long-term could vary." The columns that earn a short lot its own row are dead
+  on a long one -- `long_term_on` is past, `days_to_long` is 0, there is no
+  deadline to price, and every long lot taxes at the same rate. Reinvested
+  dividends make it acute: each reinvestment opens a lot, and a real position in
+  the user's ledger carries 92 open lots, 88 of them long.
+- **The grouping is per account, security AND SIGN.** Summing a long lot at a
+  loss into one at a gain nets them, and the harvestable loss -- the thing a
+  December report exists to surface -- disappears into a figure that is true
+  about the position and useless for deciding what to sell. `unknown`-term lots
+  are never folded in either: a lot whose acquisition date was never recorded is
+  a question, not a long holding. Totals are unchanged by construction, which is
+  asserted, because this report has to tie to the Holdings window.
+- **A combined row states its SPAN**, oldest to newest acquisition plus the lot
+  count ("2019-03-04 - 2021-11-12 (88 lots)"). The oldest lot's date alone would
+  read as a single acquisition and misdate the rest; blank would look like the
+  unknown-term line, which means something else. `group_long_term=False` gives a
+  row per lot, which is what a specific-identification sale needs.
 ### 5.9 Reporting
 - Priority: a spending report itemized by category over a selectable time
   period (month/quarter/year/custom).

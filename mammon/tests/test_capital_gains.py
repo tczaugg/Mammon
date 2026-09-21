@@ -14,7 +14,9 @@ from mammon import db, investments, ledger
 from mammon.reports.capital_gains import (
     DEFAULT_LONG_TERM_RATE,
     DEFAULT_ORDINARY_INCOME_RATE,
+    LotTaxRow,
     capital_gains,
+    combine_long_term,
 )
 from mammon.tests import fresh_db
 
@@ -559,3 +561,154 @@ def test_taxable_and_unset_accounts_are_unchanged(conn, account):
     assert report.total_short_term_gain == 1000_00
     assert report.excluded_accounts == []
     assert report.exclusion_note is None
+
+# ---------------------------------------------------------------------------
+# combining the long-term lots (reported)
+# ---------------------------------------------------------------------------
+def _reinvesting(conn, *, quarters: int = 12, symbol: str = "ZZREIT"):
+    """An account that has reinvested a dividend every quarter for years.
+
+    The reported shape: "if we had been reinvesting dividends, each of those
+    would have become a lot ... dozens of small lots, all now long term except
+    the last year's worth". A real position in the user's own ledger carries 92
+    open lots, 88 of them long.
+    """
+    acct = ledger.create_account(conn, "ZZ Taxable Reinvest", "investment",
+                                 opening_balance=100_000_00,
+                                 opening_date="2015-01-01")
+    # Anchored to the REPORT date, not a fixed year: the last reinvestment
+    # lands a quarter before it, so the tail really is short-term and the fixture
+    # cannot quietly become all-long as AS_OF moves.
+    last = _dt.date.fromisoformat(AS_OF) - _dt.timedelta(days=91)
+    start = last - _dt.timedelta(days=91 * (quarters - 1))
+    for i in range(quarters):
+        day = start + _dt.timedelta(days=91 * i)
+        investments.record_investment(
+            conn, acct, day.isoformat(), "ReinvDiv", symbol=symbol,
+            quantity=Decimal("10"), price=Decimal("20.00"), amount=200_00)
+    investments.rebuild_holdings(conn, acct)
+    investments.record_price(conn, symbol, AS_OF, Decimal("30.00"))
+    return acct
+
+
+def test_every_reinvestment_is_its_own_lot(conn):
+    """The premise. A reinvested dividend is a purchase, so it opens a lot --
+    which is why a long-held reinvesting position accumulates dozens."""
+    acct = _reinvesting(conn, quarters=12)
+    lots = investments.open_lots(conn, acct)["ZZREIT"]
+    assert len(lots) == 12
+    assert all(lot.acquired for lot in lots)
+
+
+def test_long_term_lots_combine_and_short_term_ones_do_not(conn):
+    """Reported: "all the lots that are long-term already should be combined",
+    while short-term lots keep a row each because their crossover dates differ.
+    """
+    acct = _reinvesting(conn, quarters=12)
+    flat = capital_gains(conn, AS_OF, account_ids=[acct],
+                            group_long_term=False)
+    grouped = capital_gains(conn, AS_OF, account_ids=[acct])
+
+    flat_long = [r for r in flat.lots if r.term == "long"]
+    flat_short = [r for r in flat.lots if r.term == "short"]
+    assert len(flat_long) > 1, "the fixture must have several long lots"
+    assert flat_short, "and a short tail"
+
+    grouped_long = [r for r in grouped.lots if r.term == "long"]
+    grouped_short = [r for r in grouped.lots if r.term == "short"]
+    assert len(grouped_long) == 1, "one combined long row"
+    assert grouped_long[0].lot_count == len(flat_long)
+    assert grouped_long[0].is_combined
+    # The short tail is untouched: those dates are the information.
+    assert len(grouped_short) == len(flat_short)
+    assert all(r.lot_count == 1 for r in grouped_short)
+
+
+def test_combining_changes_no_total(conn):
+    """It sums the same cents into fewer rows. This report is documented as
+    having to tie to the Holdings window, so nothing may move."""
+    acct = _reinvesting(conn, quarters=16)
+    flat = capital_gains(conn, AS_OF, account_ids=[acct],
+                            group_long_term=False)
+    grouped = capital_gains(conn, AS_OF, account_ids=[acct])
+    for field in ("total_cost_basis", "total_market_value",
+                  "total_long_term_gain", "total_long_term_loss",
+                  "total_short_term_gain", "total_short_term_loss",
+                  "total_unknown_term", "total_extra_tax_if_sold_now",
+                  "total_unrealized"):
+        assert getattr(flat, field) == getattr(grouped, field), field
+    assert (sum(r.quantity for r in grouped.lots)
+            == sum(r.quantity for r in flat.lots))
+
+
+def test_a_combined_row_carries_the_span_it_covers(conn):
+    """Its `acquired` is the oldest of the lots and `acquired_last` the newest,
+    so the row can say what it stands for instead of wearing one lot's date."""
+    acct = _reinvesting(conn, quarters=12)
+    grouped = capital_gains(conn, AS_OF, account_ids=[acct])
+    row = next(r for r in grouped.lots if r.is_combined)
+    flat = capital_gains(conn, AS_OF, account_ids=[acct],
+                            group_long_term=False)
+    longs = [r for r in flat.lots if r.term == "long"]
+    assert row.acquired == min(r.acquired for r in longs)
+    assert row.acquired_last == max(r.acquired for r in longs)
+    assert row.acquired < row.acquired_last
+    assert row.days_to_long == 0
+    assert row.extra_tax_if_sold_now == 0
+
+
+def test_long_gains_and_long_losses_are_never_summed_together(conn):
+    """The one thing summing destroys. A long lot at a loss netted against one
+    at a gain hides the harvestable loss -- in the report whose job in December
+    is to find it."""
+    acct = ledger.create_account(conn, "ZZ Mixed", "investment",
+                                 opening_balance=100_000_00,
+                                 opening_date="2015-01-01")
+    # Two long lots of one security: one bought high, one bought low.
+    for price in ("50.00", "10.00"):
+        investments.record_investment(
+            conn, acct, "2020-06-01", "Buy", symbol="ZZMIXED",
+            quantity=Decimal("100"), price=Decimal(price),
+            amount=int(Decimal(price) * 100 * 100))
+    investments.rebuild_holdings(conn, acct)
+    investments.record_price(conn, "ZZMIXED", AS_OF, Decimal("30.00"))
+
+    grouped = capital_gains(conn, AS_OF, account_ids=[acct])
+    rows = [r for r in grouped.lots if r.symbol == "ZZMIXED"]
+    assert len(rows) == 2, "a gain row and a loss row, never one netted row"
+    assert any(r.is_gain for r in rows)
+    assert any(r.is_loss for r in rows)
+    # The loss is still visible at its full size, which is the whole point.
+    assert min(r.unrealized for r in rows) == -20_00 * 100
+
+
+def test_lots_of_unknown_term_are_never_folded_into_the_long_ones(conn):
+    """A lot whose acquisition date was never recorded is a question, not a long
+    holding; combining would answer it by assertion."""
+    rows = [
+        LotTaxRow(account_id=1, account_name="A", symbol="ZZX",
+                     security_name=None, acquired=None, quantity=Decimal("5"),
+                     cost_basis=100, price=None, market_value=200,
+                     unrealized=100, term="unknown", long_term_on=None,
+                     days_to_long=None),
+        LotTaxRow(account_id=1, account_name="A", symbol="ZZX",
+                     security_name=None, acquired="2018-01-01",
+                     quantity=Decimal("5"), cost_basis=100, price=None,
+                     market_value=200, unrealized=100, term="long",
+                     long_term_on="2019-01-02", days_to_long=0),
+    ]
+    out = combine_long_term(rows)
+    assert len(out) == 2
+    assert {r.term for r in out} == {"unknown", "long"}
+    assert all(r.lot_count == 1 for r in out)
+
+
+def test_a_single_long_lot_is_left_exactly_as_it_was(conn):
+    """Nothing to combine, nothing changed -- including the object itself, so a
+    one-lot position cannot start rendering as a group of one."""
+    acct = _reinvesting(conn, quarters=1)
+    flat = capital_gains(conn, AS_OF, account_ids=[acct],
+                            group_long_term=False)
+    grouped = capital_gains(conn, AS_OF, account_ids=[acct])
+    assert len(grouped.lots) == len(flat.lots)
+    assert all(not r.is_combined for r in grouped.lots)

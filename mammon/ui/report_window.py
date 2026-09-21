@@ -444,6 +444,25 @@ def _whole_dollars(cents: int) -> str:
     return f"{int(d):,}"
 
 
+def _acquired_cell(r, fmt_date) -> str:
+    """The Acquired cell for one line.
+
+    A COMBINED long-term row speaks for several lots, so it states the SPAN it
+    covers and how many -- "2019-03-04 - 2021-11-12 (88 lots)". Showing the
+    oldest lot's date alone would read as a single acquisition and quietly
+    misdate 87 others; leaving it blank would look like the unknown-term case,
+    which means something else entirely.
+    """
+    if not r.acquired:
+        return ""
+    first = fmt_date(r.acquired)
+    if not getattr(r, "is_combined", False):
+        return first
+    last = r.acquired_last
+    span = first if not last or last == r.acquired else f"{first} - {fmt_date(last)}"
+    return f"{span} ({r.lot_count} lots)"
+
+
 def _if_sold_now_cell(r) -> str:
     """The "If Sold Now" verdict for one lot, in a few characters.
 
@@ -552,8 +571,7 @@ def capital_gains_rows(report: "reports.CapitalGainsReport", *,
         # screen, which is the second defect the user reported.
         rows.append(ReportRow(
             r.account_name, r.symbol, r.unrealized or 0,
-            cells=[r.account_name, ticker,
-                   fmt_date(r.acquired) if r.acquired else "",
+            cells=[r.account_name, ticker, _acquired_cell(r, fmt_date),
                    _TERM_TEXT.get(r.term, r.term), becomes, _if_sold_now_cell(r),
                    _fmt_qty(r.quantity), fmt_cents(r.cost_basis),
                    fmt_cents(r.market_value),

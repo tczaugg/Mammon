@@ -359,3 +359,39 @@ def test_both_entry_points_open_the_same_report_spec():
     rec = _Recorder()
     InvestmentDashboardPage.open_capital_gains(rec)
     assert rec.opened is CAPITAL_GAINS_SPEC
+
+def test_a_combined_row_states_its_span_and_lot_count():
+    """Showing the oldest lot's date alone would read as a single acquisition
+    and quietly misdate the rest; blank would look like the unknown-term case,
+    which means something else."""
+    from mammon.ui.models import fmt_date
+    from mammon.ui.report_window import _acquired_cell
+    from decimal import Decimal
+    from mammon.reports.capital_gains import LotTaxRow
+
+    def row(**kw):
+        base = dict(account_id=1, account_name="A", symbol="ZZX",
+                    security_name=None, acquired="2019-03-04",
+                    quantity=Decimal("10"), cost_basis=100, price=None,
+                    market_value=200, unrealized=100, term="long",
+                    long_term_on="2020-03-05", days_to_long=0)
+        base.update(kw)
+        return LotTaxRow(**base)
+
+    plain = _acquired_cell(row(), fmt_date)
+    assert plain == fmt_date("2019-03-04")
+    assert "lots" not in plain
+
+    combined = _acquired_cell(
+        row(lot_count=88, acquired_last="2021-11-12"), fmt_date)
+    assert fmt_date("2019-03-04") in combined
+    assert fmt_date("2021-11-12") in combined
+    assert "(88 lots)" in combined
+
+    # Several lots acquired on ONE day still say how many, without a fake span.
+    same_day = _acquired_cell(
+        row(lot_count=4, acquired_last="2019-03-04"), fmt_date)
+    assert same_day == f"{fmt_date('2019-03-04')} (4 lots)"
+
+    # No date at all stays blank -- that is the unknown-term line.
+    assert _acquired_cell(row(acquired=None), fmt_date) == ""
