@@ -378,6 +378,98 @@ def test_an_unknown_ring_mode_is_refused(page):
         page.set_mode("sectors")
 
 
+# --- the ring by asset class (reported) -------------------------------------
+@pytest.fixture
+def classified(conn, seeded):
+    """The seeded world with its securities given classes, so by_class has
+    something to say."""
+    portfolio.set_security(conn, "ZZAA", asset_class="domestic_stock")
+    portfolio.set_security(conn, "ZZBB", asset_class="bond")
+    portfolio.set_security(conn, "ZZCC", asset_class="intl_stock")
+    return seeded
+
+
+def test_asset_class_is_a_third_ring_mode(page, classified, qapp):
+    """Reported: "add an Asset Class button next to Account and Securities"."""
+    assert dash.MODE_CLASSES in dash.RING_MODES
+    assert set(page.mode_buttons) == set(dash.RING_MODES)
+    page.set_mode(dash.MODE_CLASSES)
+    assert page.mode() == dash.MODE_CLASSES
+    assert page.mode_buttons[dash.MODE_CLASSES].isChecked()
+    assert not page.mode_buttons[dash.MODE_ACCOUNTS].isChecked()
+
+
+def test_the_class_ring_totals_the_same_money_as_the_other_two(conn, classified):
+    """Three pictures of one portfolio. by_class already counts cash and splits
+    every mixture, so this mode needs no cash wedge of its own."""
+    totals = {}
+    for mode in dash.RING_MODES:
+        slices = dash.ring_slices(conn, mode, AS_OF)
+        totals[mode] = sum(c for _k, _l, c in slices)
+    assert len(set(totals.values())) == 1, totals
+
+
+def test_the_class_rings_colors_are_the_reports_colors(page, classified, qapp):
+    """Reported: "we already have that in the top bar of the asset allocation
+    report". Two pictures of one fact that disagreed about color would be worse
+    than one picture."""
+    from mammon.ui.asset_allocation import class_colors, unclassified_color
+    page.set_mode(dash.MODE_CLASSES)
+    qapp.processEvents()
+    palette = class_colors()
+    for key in page.ring.keys():
+        want = unclassified_color() if key == "unclassified" else palette[key]
+        assert page.ring.color_for(key) == want, key
+
+
+def test_an_unallocated_slice_is_named_as_a_gap_not_by_its_key(conn, seeded):
+    """In a ring the user reads as a picture of their portfolio, the word has to
+    say something is MISSING, not name a category."""
+    labels = {k: lab for k, lab, _c in
+              dash.ring_slices(conn, dash.MODE_CLASSES, AS_OF)}
+    assert labels.get("unclassified") == dash.UNALLOCATED_LABEL
+
+
+def test_clicking_a_class_states_its_value_and_nothing_else(page, classified,
+                                                            qapp):
+    """A class is a property OF holdings, not one of them: performance is
+    measured on holdings and their flows, so a gain or a rate here would be
+    invented. Same rule as the cash wedge."""
+    page.set_mode(dash.MODE_CLASSES)
+    qapp.processEvents()
+    page.select_slice("bond")
+    qapp.processEvents()
+    assert page._filter == ("class", "bond")
+    assert page.filter_subject() == "Bonds"
+    line = page.center.line()
+    assert line.value_only is True
+    assert line.headings() == ["Total"]
+    alloc = portfolio.allocation(page.conn, as_of=AS_OF, scope="investments")
+    assert line.total == next(s.value for s in alloc.by_class if s.key == "bond")
+
+
+def test_a_class_scope_leaves_the_plots_on_the_portfolio(page, classified, qapp):
+    """value_series can only value a HOLDING. A class would price at zero and
+    draw a flat line on the floor -- a picture of a scope worth nothing, which
+    is a lie about one that simply cannot be charted this way."""
+    page.set_mode(dash.MODE_CLASSES)
+    qapp.processEvents()
+    page.select_slice("bond")
+    qapp.processEvents()
+    assert page._scope_symbol() is None
+    assert page.history_chart.points(), "the plot must not be emptied"
+
+
+def test_the_cash_wedge_likewise_does_not_empty_the_plots(page, seeded, qapp):
+    """Its key is a sentinel, so value_series would price it at zero too."""
+    page.set_mode(dash.MODE_SECURITIES)
+    qapp.processEvents()
+    page.select_slice(dash.CASH_KEY)
+    qapp.processEvents()
+    assert page._scope_symbol() is None
+    assert page.history_chart.points()
+
+
 # --- the center line --------------------------------------------------------
 def test_the_center_line_states_total_gain_dividends_and_annualized(page, conn):
     line = page.center.line()
@@ -661,7 +753,7 @@ def test_clicking_the_cash_wedge_states_a_value_and_nothing_else(
     ids = [two_dividend_styles["account"]]
     line = dash.center_line(conn, AS_OF, account_ids=ids, symbol=dash.CASH_KEY,
                             subject=dash.CASH_LABEL)
-    assert line.cash_only is True
+    assert line.value_only is True
     assert line.headings() == ["Total"]
     assert line.footnote() == ""
 

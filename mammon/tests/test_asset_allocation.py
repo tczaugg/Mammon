@@ -119,6 +119,62 @@ def test_an_empty_bar_says_nothing_rather_than_dividing_by_zero(qapp):
     assert bar.describe() == ""
 
 
+# --- the legend -------------------------------------------------------------
+def test_the_legend_says_what_the_colors_mean(conn, world, qapp):
+    """Reported: "Composition needs a legend so we know what the colors mean".
+    One legend serves every bar on the page, which is the other half of why the
+    colors are shared."""
+    win = _window(conn)
+    try:
+        assert win.legend.classes() == win.total_bar.order()
+        entries = dict(win.legend._entries())
+        colors = aa.class_colors()
+        assert entries["Domestic stock"] == colors["domestic_stock"]
+        assert entries["Cash"] == colors["cash"]
+    finally:
+        win.deleteLater()
+
+
+def test_the_legend_lists_only_what_is_held(conn, world, qapp):
+    """A legend naming classes nobody holds is one the eye learns to skip."""
+    win = _window(conn)
+    try:
+        held = set(win.total_bar.order())
+        assert set(win.legend.classes()) == held
+        assert "real_estate" not in win.legend.classes()
+    finally:
+        win.deleteLater()
+
+
+def test_the_legend_names_the_gap_rather_than_the_key(conn, world, qapp):
+    """`unclassified` is the ABSENCE of an answer; in a legend it has to read as
+    one, and in the theme's gray rather than a class color."""
+    win = _window(conn)
+    try:
+        entries = dict(win.legend._entries())
+        assert "Unallocated" in entries
+        assert entries["Unallocated"] == aa.unclassified_color()
+        assert "unclassified" not in entries
+    finally:
+        win.deleteLater()
+
+
+def test_the_legend_wraps_instead_of_clipping_its_tail(conn, world, qapp):
+    """Qt has no flow layout, and a single row silently clips rather than
+    saying so. A narrow window must get more rows, not fewer entries."""
+    security_mix.set_mixture(conn, "ZZFUND", {"intl_stock": 60, "crypto": 40})
+    win = _window(conn)
+    try:
+        legend = win.legend
+        wide = len(legend._layout(4000))
+        narrow_rows = {y for _x, y, _l, _c in legend._layout(200)}
+        assert len(legend._layout(200)) == wide, "no entry may be dropped"
+        assert len(narrow_rows) > 1, "a narrow legend must wrap"
+        assert legend.sizeHint().height() >= aa.LEGEND_ROW_HEIGHT * len(narrow_rows)
+    finally:
+        win.deleteLater()
+
+
 # --- the tree ---------------------------------------------------------------
 def test_accounts_are_rows_and_their_holdings_are_children(conn, world, qapp):
     win = _window(conn)

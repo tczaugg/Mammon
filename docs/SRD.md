@@ -2347,6 +2347,11 @@ note.**
   answer it. Segments are ordered by `ASSET_CLASSES`, never by size, so bonds
   are in the same place in every bar; the color map is one definition
   (`class_colors`) so a class cannot change color between accounts.
+- **A legend, because the bars share one color map.** One legend serves every
+  bar on the page (reported), listing only the classes actually held -- a legend
+  naming classes nobody holds is one the eye learns to skip. It wraps by hand:
+  Qt has no flow layout, and a single row silently clips its tail at a narrow
+  window rather than saying so.
 - **INVESTMENTS ONLY.** Property, vehicles and other owned assets are out of
   scope (reported): the dashboard's ring already excludes them, `forecast` has
   no (mu, sigma) for them so they can never join a projection, and here they
@@ -3099,6 +3104,28 @@ was previously nowhere in the app to add the price it was complaining about.
   "dividends not reinvested" (`portfolio.cash_dividends` decides, from the same
   `_CASH_DIVIDENDS` set the flow classification uses, so the two cannot drift).
   A whole-portfolio total is never asterisked: its cash is already in it.
+- **The ring has a THIRD mode: by asset class** (reported, 2026-09-21).
+  `allocation().by_class` is the same composition the Asset Allocation report
+  draws as a bar, so the slices need no arithmetic here -- and the palette is
+  that report's `class_colors`, so bonds are the same hue in the ring as in the
+  report. Two pictures of one fact that disagreed about color would be worse
+  than one picture. This mode needs no cash wedge of its own: `by_class` already
+  counts cash and splits every mixture. An unallocated slice is labelled
+  "Unallocated", not `unclassified`: in a picture of the portfolio the word has
+  to say something is MISSING rather than name a category.
+- **A class scope states a VALUE and nothing else**, like the cash wedge. A
+  class is a property OF holdings, not one of them, and performance is measured
+  on holdings and their flows -- a gain or an annualized rate per class would be
+  invented. Neither scope reaches the plots either: `value_series` can only
+  value a holding, so both would price at zero and draw a flat line on the
+  floor, a picture of a scope worth nothing rather than one that cannot be
+  charted this way. The plots stay on the account scope and the center block
+  states what was selected.
+- **The mode switch NARROWS before it sinks.** Its distance above the top plot's
+  title is capped by the inner circle, which narrows as it rises; a third button
+  made the row half again as wide and sinking it to fit collapsed the reported
+  gap from 39px to 1. It now gives up width down to `MODE_ROW_MIN_WIDTH` to keep
+  the height, and only sinks when even a minimal row will not fit.
 - **One gear sets the page's account scope, and it is the application's
   EXISTING customization widget.** A gear at the top of the ring area, just left
   of the Performance Report corner (reported), opens the report bar's

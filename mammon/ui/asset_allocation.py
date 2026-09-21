@@ -39,8 +39,8 @@ from decimal import Decimal
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QRectF, pyqtSignal
-from PyQt5.QtGui import (QBrush, QColor, QFont, QIcon, QPainter, QPen,
-                         QPixmap, QPolygonF)
+from PyQt5.QtGui import (QBrush, QColor, QFont, QFontMetrics, QIcon, QPainter,
+                         QPen, QPixmap, QPolygonF)
 from PyQt5.QtCore import QPointF
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -81,6 +81,13 @@ BAR_MIN_SEPARATOR = 3
 #: The warning mark. A filled triangle, drawn rather than an emoji or an image:
 #: it has to take the theme's color and scale with the row's font.
 TRIANGLE_SIZE = 12
+
+#: The legend's swatch, the gap to its label, the gap to the next entry, and
+#: the height of one wrapped row.
+LEGEND_SWATCH = 11
+LEGEND_TEXT_GAP = 5
+LEGEND_ITEM_GAP = 18
+LEGEND_ROW_HEIGHT = 20
 
 
 def class_colors(pal=None) -> dict:
@@ -232,6 +239,90 @@ class ClassBar(QWidget):
         p.end()
 
 
+class ClassLegend(QWidget):
+    """What the colors in the Composition bars mean (reported).
+
+    Every bar on the page shares one class-to-color map, so ONE legend explains
+    all of them -- which is the other half of why the colors are shared. It
+    shows only the classes actually present, because a legend listing classes
+    nobody holds is a legend the eye learns to skip.
+
+    Swatch and label per class, laid out in a row that wraps by hand: Qt has no
+    flow layout, and a single row silently clips its tail at a narrow window
+    rather than telling anyone.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._classes: list = []
+        self._rows = 1
+        self.setMinimumHeight(LEGEND_ROW_HEIGHT)
+
+    def set_classes(self, classes) -> None:
+        """``classes`` in draw order; ``unclassified`` may be among them."""
+        self._classes = [c for c in classes]
+        self.updateGeometry()
+        self.update()
+
+    def classes(self) -> list:
+        return list(self._classes)
+
+    def _entries(self) -> list:
+        """``[(label, color)]`` -- what is actually drawn."""
+        colors = class_colors()
+        gray = unclassified_color()
+        out = []
+        for cls in self._classes:
+            if cls == UNCLASSIFIED:
+                out.append(("Unallocated", gray))
+            else:
+                out.append((portfolio.ASSET_CLASS_LABELS.get(cls, cls),
+                            colors.get(cls, gray)))
+        return out
+
+    def _layout(self, width: int) -> list:
+        """``[(x, y, label, color)]`` for the current width, wrapping as needed."""
+        metrics = QFontMetrics(self.font())
+        placed, x, y = [], 0, 0
+        for label, color in self._entries():
+            item_w = (LEGEND_SWATCH + LEGEND_TEXT_GAP
+                      + metrics.horizontalAdvance(label) + LEGEND_ITEM_GAP)
+            if x and x + item_w > max(1, width):
+                x, y = 0, y + LEGEND_ROW_HEIGHT
+            placed.append((x, y, label, color))
+            x += item_w
+        self._rows = (y // LEGEND_ROW_HEIGHT) + 1
+        return placed
+
+    def sizeHint(self):
+        from PyQt5.QtCore import QSize
+        self._layout(max(1, self.width()))
+        return QSize(1, self._rows * LEGEND_ROW_HEIGHT)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # A wrap changes the height this needs, and nothing else would ask.
+        self.updateGeometry()
+
+    def paintEvent(self, event):        # noqa: N802 (Qt's name)
+        if not self._classes:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pal = charts._active_palette()
+        metrics = QFontMetrics(self.font())
+        for x, y, label, color in self._layout(self.width()):
+            top = y + (LEGEND_ROW_HEIGHT - LEGEND_SWATCH) / 2.0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(color)))
+            p.drawRoundedRect(QRectF(x, top, LEGEND_SWATCH, LEGEND_SWATCH), 2, 2)
+            p.setPen(QPen(QColor(pal["text"])))
+            p.drawText(int(x + LEGEND_SWATCH + LEGEND_TEXT_GAP),
+                       int(y + (LEGEND_ROW_HEIGHT + metrics.ascent()) / 2.0 - 1),
+                       label)
+        p.end()
+
+
 class MixEditor(QDialog):
     """Type a security's or an account's class mixture by hand.
 
@@ -320,6 +411,8 @@ class AssetAllocationWindow(QDialog):
 
         self.total_bar = ClassBar(parent=self)
         outer.addWidget(self.total_bar)
+        self.legend = ClassLegend(self)
+        outer.addWidget(self.legend)
 
         self.tree = QTreeWidget(self)
         self.tree.setColumnCount(len(HEADERS))
@@ -499,6 +592,9 @@ class AssetAllocationWindow(QDialog):
             item.setExpanded(True)
 
         self.total_bar.set_weights(grand)
+        # The legend explains every bar on the page, so it lists what the TOTAL
+        # holds -- the union of the accounts', in the same order they draw in.
+        self.legend.set_classes(self.total_bar.order())
         unallocated = grand.get(UNCLASSIFIED, 0)
         text = f"Investments {_money(total_value)}"
         if unallocated:

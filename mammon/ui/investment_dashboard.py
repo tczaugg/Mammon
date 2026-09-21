@@ -290,6 +290,10 @@ CONNECTOR_FONT_SCALE = 0.85
 #: narrowing above it (see :meth:`RingArea.mode_row_rect`).
 MODE_ROW_TITLE_GAP_ROWS = 1.5
 
+#: How narrow the mode switch may be squeezed to keep that gap. Below this the
+#: three labels stop being readable, and the row sinks instead.
+MODE_ROW_MIN_WIDTH = 240
+
 #: The securities ring's cash slice. Reported: "add the cash wedge when
 #: displaying securities."
 #:
@@ -368,7 +372,18 @@ THERMOMETER_MIN_HEIGHT = 45
 
 MODE_ACCOUNTS = "accounts"
 MODE_SECURITIES = "securities"
-RING_MODES = (MODE_ACCOUNTS, MODE_SECURITIES)
+#: The ring by ASSET CLASS (reported), which is the composition the Asset
+#: Allocation report already draws as a bar. Same numbers, same colors: the
+#: slices are ``allocation().by_class`` and the palette is
+#: ``ui.asset_allocation.class_colors``, so bonds are the same hue in the ring
+#: as in the report. Two pictures of one fact that disagreed about color would
+#: be worse than one picture.
+MODE_CLASSES = "classes"
+RING_MODES = (MODE_ACCOUNTS, MODE_SECURITIES, MODE_CLASSES)
+#: The label an unallocated slice wears. Not "unclassified": in a ring the user
+#: is reading as a picture of their portfolio, the word has to say that
+#: something is MISSING, not name a category.
+UNALLOCATED_LABEL = "Unallocated"
 
 #: Inflows in the trailing year at or above this count make an account
 #: "regular" and give it an arrow (design section 3). Four catches quarterly
@@ -750,13 +765,21 @@ class RingCanvas(charts.SlicesPieCanvas):
         self.set_slices(slices)
 
     # -- state ------------------------------------------------------------
-    def set_slices(self, slices) -> None:
+    def set_slices(self, slices, colors=None) -> None:
         """Replace what the ring is a picture of. A selection that survives the
-        new slice set is kept, so a refresh does not silently drop the filter."""
+        new slice set is kept, so a refresh does not silently drop the filter.
+
+        ``colors`` overrides the palette for keys it names. Asset-class mode
+        passes the Asset Allocation report's map, so a class is the same hue in
+        both pictures; every other mode leaves it None and keys are colored by
+        :func:`ring_colors` as before."""
         rows = [(str(k), str(lab), int(c)) for k, lab, c in slices if int(c) > 0]
         self._keys = {lab: k for k, lab, _ in rows}
         self._labels = {k: lab for k, lab, _ in rows}
         self._color_by_key = ring_colors([k for k, _, _ in rows])
+        if colors:
+            self._color_by_key.update(
+                {str(k): v for k, v in colors.items() if str(k) in self._labels})
         if self._selected is not None and self._selected not in self._labels:
             self._selected = None
         self._base = [(lab, c) for _, lab, c in rows]
@@ -1066,19 +1089,32 @@ class RingArea(QWidget):
         top = self.selector_rects().get("top")
         above = top[1] if top else hy
         y = above - int(round(MODE_ROW_TITLE_GAP_ROWS * mh)) - mh
-        # ...but no higher than the inner circle stays wide enough to hold it.
-        # The circle narrows as it rises, so a row placed by the gap alone would
-        # eventually have its top corners out past the inner edge and onto the
-        # annulus, which is painted in front of it -- the corners would simply
-        # disappear under the ring. Solving r_inner^2 = dy^2 + (mw/2)^2 for the
-        # highest y whose half-width still covers the row:
+        # The circle narrows as it rises, so the row cannot simply be placed at
+        # the height the gap asks for: past a point its top corners would be out
+        # under the annulus, which is painted in front of them, and the corners
+        # would vanish. Two ways to obey that, and NARROWING is the better one --
+        # a third button ("Asset Class") made the row half again as wide, and
+        # sinking it to fit collapsed the reported gap from 39px to 1.
         cy = self.height() / 2.0
         r_inner = self.outer_radius() * RING_INNER_RADIUS
-        room = r_inner * r_inner - (mw / 2.0) ** 2
-        if room > 0:
-            y = max(y, int(math.ceil(cy - math.sqrt(room))))
+
+        def widest_at(top: float) -> float:
+            """The chord of the inner circle at ``top``, which is the widest a
+            row whose TOP sits there can be."""
+            dy = cy - top
+            return 2.0 * math.sqrt(max(0.0, r_inner * r_inner - dy * dy))
+
+        room = widest_at(y)
+        if room >= MODE_ROW_MIN_WIDTH:
+            # Keep the height the gap asked for and give up width for it.
+            mw = max(MODE_ROW_MIN_WIDTH, int(min(mw, room)))
         else:
-            y = max(y, 0)          # wider than the circle anywhere; keep it low
+            # Even a minimal row does not fit that high; sink it to where one
+            # does. This is the old behavior, now the fallback rather than the
+            # rule.
+            mw = min(mw, MODE_ROW_MIN_WIDTH)
+            span = r_inner * r_inner - (mw / 2.0) ** 2
+            y = max(y, int(math.ceil(cy - math.sqrt(span))) if span > 0 else 0)
         return (hx + (hw - mw) // 2, max(0, min(y, above - mh)), mw, mh)
 
     def set_mode_row(self, widget) -> None:
@@ -1581,9 +1617,12 @@ class CenterLine:
     #: money is real and earned, but it is in the account's cash, not in the
     #: security's market value.
     uninvested_dividends: int = 0
-    #: The cash slice's own scope. It has a value and nothing else -- cash has
-    #: no gain, no dividends and no rate of return to state.
-    cash_only: bool = False
+    #: A scope that has a VALUE and nothing else. Cash was the first; an asset
+    #: class is the second. Neither has a gain, dividends or a rate of return to
+    #: state -- performance is measured on holdings and their flows, and a class
+    #: is a property OF holdings, not one of them. Columns of zeros would claim
+    #: the scope earned nothing rather than that the question does not apply.
+    value_only: bool = False
 
     def columns(self) -> list:
         """``[(heading, value), ...]`` -- one column of the center block.
@@ -1600,8 +1639,7 @@ class CenterLine:
         if self.uninvested_dividends:
             total += "*"
         out = [("Total", total)]
-        if self.cash_only:
-            # Cash has a value and nothing else to say about it.
+        if self.value_only:
             return out
         if self.year_gain is not None:
             out.append(("1-yr gain", fmt_signed(self.year_gain)))
@@ -1672,16 +1710,22 @@ def _performance(conn, account_ids, symbol, start, end):
 
 
 def center_line(conn, as_of: Optional[str] = None, *, account_ids=None,
-                symbol: Optional[str] = None, subject: str = "All investments",
+                symbol: Optional[str] = None, asset_class: Optional[str] = None,
+                subject: str = "All investments",
                 horizons=ANNUALIZED_YEARS) -> CenterLine:
     """The center readout for a scope: market value now, the trailing year's
     gain and dividends, and the annualized return over each horizon that has
     enough history for :attr:`portfolio.Performance.annual_return` to exist."""
     end = as_of or _today()
     ids = list(_account_ids(conn) if account_ids is None else account_ids)
+    if asset_class:
+        alloc = portfolio.allocation(conn, account_ids=ids, as_of=end,
+                                     scope="investments")
+        value = next((s.value for s in alloc.by_class if s.key == asset_class), 0)
+        return CenterLine(total=value, subject=subject, value_only=True)
     if symbol == CASH_KEY:
         return CenterLine(total=_scope_cash(conn, ids, end), subject=subject,
-                          cash_only=True)
+                          value_only=True)
     line = CenterLine(total=_value_at(conn, ids, symbol, end), subject=subject)
     if symbol:
         # A single security's value is its HOLDINGS, so any dividend it paid in
@@ -3275,7 +3319,15 @@ def ring_slices(conn, mode: str, as_of: Optional[str] = None, *,
             out.append((str(account_id), (row["name"] if row else str(account_id)),
                         total))
         return out
-    alloc = portfolio.allocation(conn, account_ids=ids, as_of=end)
+    alloc = portfolio.allocation(conn, account_ids=ids, as_of=end,
+                                 scope="investments")
+    if mode == MODE_CLASSES:
+        # by_class ALREADY counts cash and splits every mixture, so this mode
+        # needs no cash wedge of its own and no arithmetic here.
+        return [(s.key,
+                 (UNALLOCATED_LABEL if s.key == "unclassified" else s.label),
+                 s.value)
+                for s in alloc.by_class if s.value > 0]
     out = [(s.key, s.label, s.value) for s in alloc.by_security if s.value > 0]
     # Cash last, so it reads as the remainder rather than as a holding, and only
     # when there is some: an account swept to zero should not draw a wedge.
@@ -3472,7 +3524,9 @@ class InvestmentDashboardPage(QWidget):
         self.mode_buttons = {}
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
-        for mode, text in ((MODE_ACCOUNTS, "Accounts"), (MODE_SECURITIES, "Securities")):
+        for mode, text in ((MODE_ACCOUNTS, "Accounts"),
+                           (MODE_SECURITIES, "Securities"),
+                           (MODE_CLASSES, "Asset Class")):
             btn = QPushButton(text, self.mode_row)
             btn.setCheckable(True)
             btn.setChecked(mode == self._mode)
@@ -3895,12 +3949,17 @@ class InvestmentDashboardPage(QWidget):
             row = self.conn.execute("SELECT name FROM accounts WHERE id=?",
                                     (key,)).fetchone()
             return row["name"] if row else str(key)
+        if kind == "class":
+            return (UNALLOCATED_LABEL if key == "unclassified"
+                    else portfolio.ASSET_CLASS_LABELS.get(str(key), str(key)))
         # The cash wedge's key is a sentinel, never a ticker; show its label.
         return CASH_LABEL if key == CASH_KEY else str(key)
 
     def _on_slice_clicked(self, key) -> None:
         if key is None:
             self._filter = None
+        elif self._mode == MODE_CLASSES:
+            self._filter = ("class", str(key))
         elif self._mode == MODE_ACCOUNTS:
             self._filter = ("account", int(key))
         else:
@@ -3938,6 +3997,8 @@ class InvestmentDashboardPage(QWidget):
             new = None
         elif self._mode == MODE_ACCOUNTS:
             new = ("account", int(selected))
+        elif self._mode == MODE_CLASSES:
+            new = ("class", str(selected))
         else:
             new = ("security", str(selected))
         changed = new != self._filter
@@ -3947,7 +4008,8 @@ class InvestmentDashboardPage(QWidget):
     # -- refresh ------------------------------------------------------------
     def refresh(self) -> None:
         self.ring.set_slices(ring_slices(self.conn, self._mode, self.as_of,
-                                         account_ids=self.account_scope()))
+                                         account_ids=self.account_scope()),
+                             colors=self._ring_palette())
         filter_changed = self._sync_filter_to_ring()
         # The ring's mask depends on whether it drew any wedges at all, so it is
         # recomputed whenever the slices change -- not just on resize.
@@ -3963,13 +4025,28 @@ class InvestmentDashboardPage(QWidget):
         if filter_changed:
             self.filterChanged.emit(self._filter)
 
+    def _ring_palette(self):
+        """The class palette in asset-class mode, else None (keys are colored by
+        identity). Imported lazily: the report imports this module back."""
+        if self._mode != MODE_CLASSES:
+            return None
+        from mammon.ui.asset_allocation import class_colors, unclassified_color
+        palette = dict(class_colors())
+        palette["unclassified"] = unclassified_color()
+        return palette
+
     def _refresh_center(self) -> None:
         if self._filter is None:
             line = center_line(self.conn, self.as_of,
                                account_ids=self.account_scope())
         else:
             kind, key = self._filter
-            if kind == "account":
+            if kind == "class":
+                line = center_line(self.conn, self.as_of,
+                                   account_ids=self.account_scope(),
+                                   asset_class=str(key),
+                                   subject=self.filter_subject())
+            elif kind == "account":
                 line = center_line(self.conn, self.as_of, account_ids=[int(key)],
                                    subject=self.filter_subject())
             else:
@@ -4028,8 +4105,17 @@ class InvestmentDashboardPage(QWidget):
         return list(base)
 
     def _scope_symbol(self) -> Optional[str]:
+        """The security the charts are scoped to, or None for the whole scope.
+
+        None for anything that is not a holding: an asset class, and the cash
+        wedge, whose key is a sentinel. Both would value at zero through
+        ``value_series`` and draw a flat line on the floor -- a picture of a
+        scope worth nothing, which is a lie about one that simply cannot be
+        charted this way. The plots stay on the account scope instead and the
+        center block states what was selected."""
         if self._filter is not None and self._filter[0] == "security":
-            return str(self._filter[1])
+            symbol = str(self._filter[1])
+            return None if symbol == CASH_KEY else symbol
         return None
 
     def _wedge_color(self) -> Optional[str]:
