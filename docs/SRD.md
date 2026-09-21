@@ -6886,6 +6886,15 @@ own payload before it will write a ZIP. `installer/README.md` has the details.
   the transaction list - decided one at a time as we reach each (Section 7).
 - Reconciliation acceptance test for the migration: match Mammon per-account
   balances to Quicken's - confirm this is the bar you want.
+- OPEN (deferred 2026-09-21, dashboard ring): with option contracts held, the
+  securities ring can still total less than the accounts ring. `allocation`
+  excludes contracts outright (SRD 5.8e-2d/5.8e-9) while
+  `account_valuation.securities` counts their premium, so the cash wedge closes
+  only the CASH half of the gap. `allocation.options_note` already renders the
+  sentence; nothing on the dashboard shows it. Decide whether the page states
+  the excluded premium, gives contracts their own wedge, or leaves it to the
+  Investment Center. Not a wrong number -- an unexplained one, and only for a
+  portfolio holding options.
 - Project NAME - RESOLVED: Mammon (Section 11).
 - Sample Quicken export (a few accounts incl. one investment) - needed to build
   and validate the QIF importer (Task 5a) and the direct-read spike.
