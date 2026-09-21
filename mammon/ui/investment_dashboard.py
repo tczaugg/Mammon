@@ -3413,12 +3413,24 @@ class InvestmentDashboardPage(QWidget):
         return self._open_report(INVESTMENT_PERFORMANCE_SPEC)
 
     def open_asset_categories(self):
-        """Bottom left: Asset Allocation, opened on its By security tab -- the
-        tab where a security is actually GIVEN its asset class, which is what
-        this corner is for."""
-        from mammon.ui.portfolio_dialogs import AllocationDialog
-        dlg = AllocationDialog(self.conn, parent=self)
-        dlg.tabs.setCurrentWidget(dlg.sec_table)
+        """Bottom left: the Asset Allocation report.
+
+        Points at ``ui/asset_allocation``, not the older ``AllocationDialog``.
+        This corner exists so a user can GIVE a holding its asset mix, and the
+        old window could only ever display one: ``set_mixture`` had no caller
+        but the yfinance fetch, so a 401(k) fund with no public ticker could not
+        be described at all. The old window keeps the property scopes and stays
+        reachable from the register's gear.
+
+        The page's own account scope is passed through, so the report covers
+        what the dashboard is showing rather than re-deciding it.
+        """
+        from mammon.ui.asset_allocation import AssetAllocationWindow
+        dlg = AssetAllocationWindow(self.conn, parent=self,
+                                    account_ids=self.account_scope(),
+                                    as_of=self.as_of)
+        # A mix changed here moves every figure on the page behind it.
+        dlg.changed.connect(self.refresh)
         return self._exec_dialog(dlg)
 
     def open_rebalancing(self):

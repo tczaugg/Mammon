@@ -2315,6 +2315,51 @@ note.**
 
 
 ### 5.8g Asset-class mixture per security (SRD 5.8g)
+- **An ACCOUNT may hold a mixture too** (`account_mixtures`, migration 76,
+  2026-09-21). `accounts.asset_class` held one class, so a conservative sleeve
+  or a managed account reported as a single balance had to pick one and be wrong
+  about the rest -- and an account holding no securities at all could say
+  nothing. Same table shape as `security_mixtures` so `normalize` and
+  `split_value` serve both. An account mixture governs only what the account
+  contributes ITSELF: a non-investment account's whole value, and an investment
+  account's idle CASH. It never touches the securities inside, which say what
+  they are for themselves. `allocation` also honors an INVESTMENT account's
+  explicit single class now, which it previously never read at all -- that
+  balance was cash whatever the user set.
+- **`crypto` is an assignable class** (2026-09-21). It lived only in
+  `forecast.PROJECTION_CLASSES`, so the projection knew it was four times as
+  volatile as equity while nothing upstream could emit it: a spot-crypto ETF or
+  a wallet could not be described as crypto at all, and `set_mixture`,
+  `set_security` and `set_account_asset_class` each refused the word.
+  `PROJECTION_CLASSES` is now exactly `ASSET_CLASSES`.
+- **A mixture can be typed by hand** (`ui/asset_allocation.MixEditor`).
+  `set_mixture` had existed since mixtures did and only `fetch_mixtures` ever
+  called it, so a 401(k) fund -- which has no public ticker for a provider to
+  look up -- could not be described at all. Percentages are scaled to 100 on
+  save, because 60/30/5 is plainly a ratio; all zeros clears the mixture and
+  returns the security to its single class.
+
+### 5.8g-1 The Asset Allocation report (`ui/asset_allocation.py`)
+- **Accounts, expandable into their securities, with a stacked bar each.** A pie
+  shows one grouping at a time and cannot compare two things, so "is my 401(k)
+  more aggressive than my taxable account?" -- the question that decides what to
+  buy next -- had no answer on screen. Bars over a shared class-to-color scale
+  answer it. Segments are ordered by `ASSET_CLASSES`, never by size, so bonds
+  are in the same place in every bar; the color map is one definition
+  (`class_colors`) so a class cannot change color between accounts.
+- **INVESTMENTS ONLY.** Property, vehicles and other owned assets are out of
+  scope (reported): the dashboard's ring already excludes them, `forecast` has
+  no (mu, sigma) for them so they can never join a projection, and here they
+  bought nothing but a wedge. The older `AllocationDialog` keeps the wider
+  scopes and stays reachable from the register's gear.
+- **Amber triangles, not a silent bucket.** A holding with neither a mixture nor
+  a class lands in `unclassified`, which the old view reported as one more wedge
+  and left the user to trace. Every undefined row is marked AND so is every
+  rollup above it, so an account with one unallocated fund says so on its own
+  line. Same rule as `options_note` and `position_discrepancies`: state what is
+  missing rather than averaging it in. `unclassified` is drawn in the theme's
+  muted gray, never a class color -- the absence of an answer must not look like
+  one.
 - **The equity slice follows the class the security carries NOW**
   (`security_mix._settle_stock_slice`, read-time, 2026-09-15). A provider states
   what fraction of a fund is stock, bond and cash but never the domestic/overseas

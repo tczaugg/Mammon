@@ -2516,18 +2516,20 @@ def test_top_right_opens_the_investment_performance_report(page, monkeypatch):
     assert seen == [("report", INVESTMENT_PERFORMANCE_SPEC)]
 
 
-def test_bottom_left_opens_asset_allocation_on_the_by_security_tab(
-        page, monkeypatch):
-    """The user's requirement is specifically the By security view -- the one
-    where a security is given its asset class."""
-    from mammon.ui.portfolio_dialogs import AllocationDialog
+def test_bottom_left_opens_the_asset_allocation_report(page, monkeypatch):
+    """The requirement is a place a holding is GIVEN its mix. The old window
+    could only display one -- set_mixture had no caller but the yfinance fetch
+    -- so this corner now opens ui/asset_allocation, which can edit."""
+    from mammon.ui.asset_allocation import AssetAllocationWindow
     seen = _capture(page, monkeypatch)
     page.placeholders["cornerBottomLeft"].click()
     assert len(seen) == 1
     kind, dlg = seen[0]
     assert kind == "dialog"
-    assert isinstance(dlg, AllocationDialog)
-    assert dlg.tabs.currentWidget() is dlg.sec_table
+    assert isinstance(dlg, AssetAllocationWindow)
+    # It covers what the dashboard is showing rather than re-deciding scope.
+    assert dlg.account_ids == page.account_scope()
+    assert dlg.as_of == page.as_of
     dlg.deleteLater()
 
 
