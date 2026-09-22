@@ -2152,6 +2152,45 @@ note.**
   the multiplier applied.
 
 
+### 5.8f-1 Targets stated PER FUND (SRD 5.8f-1)
+- **A weight per asset class is not a tradeable instruction.** A blended fund
+  moves three classes at once, so "sell $30,000 of domestic stock" has to be
+  decomposed across holdings whose mixes differ, using preferences the app does
+  not have. User, 2026-09-21: "when I sell that much in a fund that is 70/25/5
+  I've also sold bonds ... we could use some linear algebra ... and now we are
+  becoming too prescriptive. So I don't want to go there."
+- **So a target may state its weights per FUND, inside an account**
+  (`allocation_target_funds`, migration 77). That is the user's own career
+  practice: "I chose funds and came up with a target percent that each fund
+  would be in my portfolio. Then rebalancing was easy ... That had the correct
+  buy-low/sell-high effect and restored my asset class balance." The
+  instruction is then directly executable ("ZZBAL is 70%, target 60%, sell
+  $10,000"), the buy-low/sell-high effect falls out of holding the weights
+  fixed rather than from any rule, and the class mix is restored as a
+  CONSEQUENCE.
+- **The class mix becomes the CHECK, not the instruction.** `fund_target`
+  computes, forward and exactly, what the weights imply; nothing is solved for
+  and nothing is recommended beyond "this fund is N% and you said M%". The
+  class figures are there to be compared against the user's stated intent so
+  the weights can be nudged, which is what makes the loop work.
+- **Percent is of the ACCOUNT**, because an account is the unit you can trade
+  within -- money does not move between a 401(k) and a taxable account -- and
+  because that is how a broker's auto-rebalance is configured, so the same
+  numbers can be typed there.
+- **The whole-portfolio effect is the feature, not a footnote.** A target set in
+  one account says nothing about what the other accounts drifted to, and
+  "balanced" is a claim about everything owned. So the report carries
+  `portfolio_before` and `portfolio_after` over EVERY investment account, with
+  the accounts outside the target left exactly as they are: only the chosen
+  ones move, because proposing trades in an account the user did not select
+  would be a different thing entirely.
+- **Cash is a residue, not a target line.** A fund's own small cash holding is
+  part of its published mix and arrives through `security_mix`. The user holds
+  no cash deliberately in a retirement account -- theirs is un-reinvested
+  dividends -- so weights summing to 100 spend it, and weights summing to less
+  leave the remainder VISIBLE as cash rather than being scaled up to fill the
+  account, which is how a user notices they meant 100.
+
 ### 5.8f Target asset mix and drift (SRD 5.8f)
 - **The editor lists EVERY class; a read-only drift does not.** Setting a class
   to zero DELETES its target line, which is deliberate: a line left at zero

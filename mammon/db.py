@@ -2185,6 +2185,35 @@ CREATE INDEX idx_account_mixtures_account ON account_mixtures(account_id);
 """
 
 
+# A target's weights stated PER FUND inside an account, the way a broker's
+# auto-rebalance is actually set up.
+#
+# allocation_target_lines states a weight per ASSET CLASS, which is not a
+# tradeable unit: a blended fund moves three classes at once, so "sell $30,000
+# of domestic stock" cannot be executed without decomposing it across holdings
+# whose mixes differ. The user's own career practice was the other way round --
+# pick funds, give each a target percent, rebalance the funds -- which is
+# directly executable, produces the buy-low/sell-high effect by construction,
+# and restores the class mix as a CONSEQUENCE.
+#
+# So a target may state its weights in funds instead, and the class mix becomes
+# a computed read-out to check against rather than an instruction to follow.
+# Percent is of the ACCOUNT, because an account is the unit you can trade
+# within: money does not move between a 401(k) and a taxable account.
+_V77 = """
+CREATE TABLE allocation_target_funds (
+    id         INTEGER PRIMARY KEY,
+    target_id  INTEGER NOT NULL REFERENCES allocation_targets(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol     TEXT NOT NULL,
+    pct        TEXT NOT NULL,             -- Decimal text, percent of the ACCOUNT
+    UNIQUE(target_id, account_id, symbol)
+);
+CREATE INDEX idx_allocation_target_funds_target
+    ON allocation_target_funds(target_id);
+"""
+
+
 MIGRATIONS: list[str] = [
     _V1,
     _V2,
@@ -2262,6 +2291,7 @@ MIGRATIONS: list[str] = [
     _V74,
     _V75,
     _V76,
+    _V77,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

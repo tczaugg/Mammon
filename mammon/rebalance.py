@@ -492,6 +492,260 @@ def set_line_balanced(conn, target_id: int, asset_class: str, pct) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# targets stated PER FUND (SRD 5.8f-1)
+# ---------------------------------------------------------------------------
+# A weight per asset class is not a tradeable instruction: a blended fund moves
+# three classes at once, so "sell $30,000 of domestic stock" has to be
+# decomposed across holdings whose mixes differ, using preferences the app does
+# not have. Stated per FUND it is directly executable -- "FXAIX is 22%, target
+# 25%, buy 3%" -- it produces the buy-low/sell-high effect by construction, and
+# it restores the class mix as a consequence rather than as an aim.
+#
+# The class mix therefore stops being the instruction and becomes the CHECK:
+# these functions compute, forward and exactly, what a set of fund weights
+# implies. No optimizer, no lot selection, nothing the user did not state.
+#
+# Percent is of the ACCOUNT. An account is the unit you can trade within --
+# money does not move between a 401(k) and a taxable account -- which is also
+# how a broker's auto-rebalance is configured, so the same numbers can be typed
+# there.
+@dataclass
+class FundDrift:
+    """One fund's distance from its target inside one account."""
+    account_id: int
+    account_name: str
+    symbol: str
+    security_name: Optional[str]
+    target_pct: Decimal
+    current_pct: Decimal
+    target_cents: int
+    current_cents: int
+    move_cents: int                  # + buy, - sell
+    priced: bool = True
+
+    @property
+    def drift_pct(self) -> Decimal:
+        return self.current_pct - self.target_pct
+
+    @property
+    def action(self) -> str:
+        if self.move_cents == 0:
+            return "hold"
+        return "buy" if self.move_cents > 0 else "sell"
+
+
+@dataclass
+class FundTargetReport:
+    """What a per-fund target says, and what it would do to the whole portfolio.
+
+    ``blend`` and ``current_blend`` are about the TARGET ACCOUNTS alone -- the
+    part the user controls. ``portfolio_before`` and ``portfolio_after`` are
+    about everything they own, because a 401(k) set in isolation can be locally
+    right and globally wrong, and that whole-picture view is the thing the user
+    reports never having had.
+    """
+    target_id: int
+    as_of: str
+    account_ids: list = field(default_factory=list)
+    funds: list = field(default_factory=list)          # list[FundDrift]
+    account_totals: dict = field(default_factory=dict)  # {account_id: cents}
+    account_pct_totals: dict = field(default_factory=dict)  # {account_id: Decimal}
+    current_blend: dict = field(default_factory=dict)   # {class: cents}, target accts now
+    blend: dict = field(default_factory=dict)           # {class: cents}, at target
+    portfolio_before: dict = field(default_factory=dict)
+    portfolio_after: dict = field(default_factory=dict)
+    unpriced: list = field(default_factory=list)
+
+    def pct(self, cents_by_class: dict) -> dict:
+        """A cents-by-class mapping as percentages summing to 100."""
+        total = sum(cents_by_class.values())
+        if not total:
+            return {}
+        return {k: (Decimal(v) / Decimal(total) * _HUNDRED) for k, v in
+                cents_by_class.items()}
+
+    @property
+    def accounts_complete(self) -> list:
+        """Accounts whose fund weights do NOT add to 100, as
+        ``[(account_id, total)]``. Shown rather than normalized, the same rule
+        :func:`target_total` follows: normalizing a forgotten line turns a
+        mistake into a plausible, wrong target."""
+        return [(aid, total) for aid, total in sorted(self.account_pct_totals.items())
+                if total != _HUNDRED]
+
+
+def set_fund_line(conn, target_id: int, account_id: int, symbol: str, pct) -> None:
+    """Set (or, with zero/blank, clear) one fund's target weight in one account."""
+    sym = (symbol or "").strip()
+    if not sym:
+        raise ValueError("a fund line needs a symbol")
+    blank = pct is None or (isinstance(pct, str) and not pct.strip())
+    value = Decimal("0") if blank else _D(pct, None)
+    if value is None:
+        raise ValueError(f"not a percentage: {pct!r}")
+    if value < 0:
+        raise ValueError("a target weight cannot be negative")
+    if value == 0:
+        conn.execute("DELETE FROM allocation_target_funds "
+                     "WHERE target_id=? AND account_id=? AND symbol=?",
+                     (int(target_id), int(account_id), sym))
+    else:
+        conn.execute(
+            "INSERT INTO allocation_target_funds(target_id, account_id, symbol, pct) "
+            "VALUES (?,?,?,?) ON CONFLICT(target_id, account_id, symbol) "
+            "DO UPDATE SET pct=excluded.pct",
+            (int(target_id), int(account_id), sym, str(value)))
+    conn.commit()
+
+
+def fund_lines(conn, target_id: int) -> dict:
+    """``{(account_id, symbol): Decimal pct}`` for the target."""
+    return {(int(r["account_id"]), r["symbol"]): _D(r["pct"]) for r in conn.execute(
+        "SELECT account_id, symbol, pct FROM allocation_target_funds "
+        "WHERE target_id=? ORDER BY account_id, symbol", (int(target_id),))}
+
+
+def set_fund_lines(conn, target_id: int, mapping: dict) -> None:
+    """Replace every fund line on the target. Keys are ``(account_id, symbol)``."""
+    conn.execute("DELETE FROM allocation_target_funds WHERE target_id=?",
+                 (int(target_id),))
+    for (aid, sym), pct in (mapping or {}).items():
+        set_fund_line(conn, target_id, aid, sym, pct)
+    conn.commit()
+
+
+def has_fund_lines(conn, target_id: int) -> bool:
+    """Whether this target states its weights in funds. A target does one or the
+    other: maintaining both would be two statements of intent that can disagree,
+    with nothing to say which wins."""
+    row = conn.execute("SELECT 1 FROM allocation_target_funds WHERE target_id=? "
+                       "LIMIT 1", (int(target_id),)).fetchone()
+    return row is not None
+
+
+def _class_split(conn, symbol: str, cents: int, mixtures: dict,
+                 classes: dict) -> dict:
+    """``cents`` of one security spread over its asset classes.
+
+    The ONE place this module turns a holding into classes, and it defers to
+    ``security_mix`` exactly as ``portfolio.allocation`` does, so a fund target's
+    computed blend and the allocation report cannot disagree about what a fund
+    is made of."""
+    from mammon import security_mix
+    mix = mixtures.get(symbol)
+    if mix:
+        return security_mix.split_value(cents, mix)
+    return {classes.get(symbol) or "unclassified": cents}
+
+
+def fund_target(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
+                prices: Optional[dict] = None) -> FundTargetReport:
+    """What the per-fund weights say, what class mix they imply, and what moving
+    to them would do to the whole portfolio.
+
+    Forward only. Every number here follows from weights the user typed; nothing
+    is solved for and nothing is recommended beyond "this fund is N% and you
+    said M%".
+    """
+    from mammon import security_mix
+    target = get_target(conn, target_id) if target_id is not None else active_target(conn)
+    if target is None:
+        raise ValueError("no allocation target to measure against")
+    tid = int(target["id"])
+    on = as_of or _dt.date.today().isoformat()
+    lines = fund_lines(conn, tid)
+    chosen = target_accounts(conn, tid) or sorted(
+        {aid for aid, _sym in lines})
+
+    mixtures = security_mix.all_mixtures(conn)
+    classes = {r["symbol"]: r["asset_class"] for r in list_securities(conn)}
+
+    funds: list = []
+    account_totals: dict = {}
+    pct_totals: dict = {}
+    current_blend: dict = {}
+    blend: dict = {}
+    unpriced: list = []
+
+    for aid in chosen:
+        val = portfolio.account_valuation(conn, aid, on, prices)
+        acct = ledger.get_account(conn, aid)
+        name = acct["name"] if acct is not None else str(aid)
+        total = int(val.total)
+        account_totals[aid] = total
+        held = {h.symbol: h for h in val.holdings}
+        for h in val.holdings:
+            if h.price is None:
+                unpriced.append(h.symbol)
+            for cls, part in _class_split(conn, h.symbol, int(h.market_value),
+                                          mixtures, classes).items():
+                current_blend[cls] = current_blend.get(cls, 0) + part
+        if val.cash:
+            current_blend["cash"] = current_blend.get("cash", 0) + int(val.cash)
+
+        symbols = sorted({sym for (a, sym) in lines if a == aid} | set(held))
+        pct_totals[aid] = sum((lines.get((aid, s), Decimal("0")) for s in symbols),
+                              Decimal("0"))
+        for sym in symbols:
+            pct = lines.get((aid, sym), Decimal("0"))
+            target_cents = _cents(total, pct)
+            current_cents = int(held[sym].market_value) if sym in held else 0
+            row = FundDrift(
+                account_id=aid, account_name=name, symbol=sym,
+                security_name=None,
+                target_pct=pct,
+                current_pct=((Decimal(current_cents) / Decimal(total)) * _HUNDRED)
+                if total else Decimal("0"),
+                target_cents=target_cents, current_cents=current_cents,
+                move_cents=target_cents - current_cents,
+                priced=(sym not in held or held[sym].price is not None),
+            )
+            funds.append(row)
+            for cls, part in _class_split(conn, sym, target_cents, mixtures,
+                                          classes).items():
+                blend[cls] = blend.get(cls, 0) + part
+        # Whatever the weights do not spend stays as cash. The user does not
+        # hold cash deliberately in a retirement account -- theirs is
+        # un-reinvested dividends -- so weights summing to 100 sweep it away,
+        # and weights summing to less leave the remainder visible as cash
+        # rather than silently scaling the funds up to fill the account.
+        unspent = total - sum(_cents(total, lines.get((aid, s), Decimal("0")))
+                              for s in symbols)
+        if unspent:
+            blend["cash"] = blend.get("cash", 0) + unspent
+
+    # The whole picture. Accounts outside the target keep exactly what they hold;
+    # only the chosen ones move. This is the view the user reports never having
+    # had: a 401(k) set in isolation can be locally right and globally wrong.
+    portfolio_before: dict = {}
+    portfolio_after: dict = {}
+    for aid in portfolio.scope_account_ids(conn, "investments"):
+        val = portfolio.account_valuation(conn, aid, on, prices)
+        here: dict = {}
+        for h in val.holdings:
+            for cls, part in _class_split(conn, h.symbol, int(h.market_value),
+                                          mixtures, classes).items():
+                here[cls] = here.get(cls, 0) + part
+        if val.cash:
+            here["cash"] = here.get("cash", 0) + int(val.cash)
+        for cls, cents in here.items():
+            portfolio_before[cls] = portfolio_before.get(cls, 0) + cents
+        if aid not in account_totals:
+            for cls, cents in here.items():
+                portfolio_after[cls] = portfolio_after.get(cls, 0) + cents
+    for cls, cents in blend.items():
+        portfolio_after[cls] = portfolio_after.get(cls, 0) + cents
+
+    return FundTargetReport(
+        target_id=tid, as_of=on, account_ids=list(chosen), funds=funds,
+        account_totals=account_totals, account_pct_totals=pct_totals,
+        current_blend=current_blend, blend=blend,
+        portfolio_before=portfolio_before, portfolio_after=portfolio_after,
+        unpriced=sorted(set(unpriced)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # drift
 # ---------------------------------------------------------------------------
 @dataclass
