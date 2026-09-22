@@ -2191,6 +2191,30 @@ note.**
   leave the remainder VISIBLE as cash rather than being scaled up to fill the
   account, which is how a user notices they meant 100.
 
+- **The window: accounts with their composition, expandable into funds**
+  (`ui/fund_target_window.py`). Every investment account is a row with its own
+  stacked composition bar; opening one reveals its funds, each with the percent
+  it is of the account, a target percent to type, the drift and the resulting
+  buy/sell. Two bars at the foot, both over EVERYTHING owned: what you hold
+  now, and what you would hold with the open accounts at their targets.
+- **Expanding an account IS selecting it.** A closed account's target is
+  ignored, so with everything closed the two bars are identical and each
+  account opened moves the lower one (reported). That avoids a second selection
+  control saying the same thing -- the row being worked on is the row whose
+  target counts -- and it makes the mechanic self-evident on first open.
+- **A closed account's funds show no drift and no trade**, because its target is
+  not in the projection and those figures would describe a plan the lower bar
+  is not making.
+- **A segment is labelled only when its label fits** (`ClassBar(show_labels=)`).
+  Reported: "with the percentages in the bars or via tooltip for small bars". A
+  percentage clipped to "4" is worse than none, and the tooltip carries every
+  figure regardless. Ink over a segment is black or white by that segment's own
+  luminance, since the class palette spans pale gold to mid blue.
+- **The window is reached from Target & Drift's "By fund…" button**, and is a
+  separate window rather than a mode on that dialog: the two state the target
+  in different units and a target is one or the other, so one dialog holding
+  both would offer two statements of intent that can disagree.
+
 ### 5.8f Target asset mix and drift (SRD 5.8f)
 - **The editor lists EVERY class; a read-only drift does not.** Setting a class
   to zero DELETES its target line, which is deliberate: a line left at zero

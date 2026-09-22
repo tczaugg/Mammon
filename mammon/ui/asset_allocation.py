@@ -77,6 +77,10 @@ BAR_RADIUS = 3
 #: IS the segment, and a row of hairlines reads as a striped bar rather than as
 #: an allocation.
 BAR_MIN_SEPARATOR = 3
+#: A segment narrower than its own label plus this padding is left BLANK rather
+#: than labelled: a percentage clipped to "4" or spilling over its neighbour is
+#: worse than none, and the tooltip carries every figure anyway.
+BAR_LABEL_PADDING = 8
 
 #: The warning mark. A filled triangle, drawn rather than an emoji or an image:
 #: it has to take the theme's color and scale with the row's font.
@@ -103,6 +107,22 @@ def class_colors(pal=None) -> dict:
     labels = list(portfolio.ASSET_CLASSES)
     # wedge_colors returns a LIST parallel to its labels, not a mapping.
     return dict(zip(labels, charts.wedge_colors(labels, palette=pal)))
+
+
+def _on_segment_text(background: str) -> str:
+    """Black or white over a segment, by that segment's own lightness.
+
+    The class palette runs from a pale gold to a mid blue, so one fixed ink
+    would be unreadable on half of it. Relative luminance with the usual 0.5
+    threshold, which is the same call :func:`_on_text_for` makes for the
+    dashboard's toggle buttons.
+    """
+    value = background.lstrip("#")
+    if len(value) != 6:
+        return "#000000"
+    r, g, b = (int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#000000" if luminance > 0.55 else "#ffffff"
 
 
 def unclassified_color(pal=None) -> str:
@@ -179,10 +199,17 @@ class ClassBar(QWidget):
     That is the entire reason this is a bar and not a pie.
     """
 
-    def __init__(self, weights: Optional[dict] = None, parent=None):
+    def __init__(self, weights: Optional[dict] = None, parent=None, *,
+                 show_labels: bool = False, height: int = BAR_HEIGHT):
         super().__init__(parent)
         self._weights: dict = dict(weights or {})
-        self.setMinimumHeight(BAR_HEIGHT + 4)
+        #: Write each share INSIDE its segment where it fits (reported: "with
+        #: the percentages in the bars or via tooltip for small bars"). Off by
+        #: default: the tree's per-row bars are too short for type, and the
+        #: tooltip already says everything.
+        self._show_labels = bool(show_labels)
+        self._height = int(height)
+        self.setMinimumHeight(self._height + 4)
         self.setToolTip(self.describe())
 
     def set_weights(self, weights: dict) -> None:
@@ -221,20 +248,28 @@ class ClassBar(QWidget):
         gray = unclassified_color()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        y = (self.height() - BAR_HEIGHT) / 2.0
+        height = self._height
+        y = (self.height() - height) / 2.0
         width = float(self.width())
         x = 0.0
         pal = charts._active_palette()
+        metrics = QFontMetrics(self.font())
         for cls in self.order():
             share = float(self._weights[cls]) / float(total)
             seg = width * share
             color = gray if cls == UNCLASSIFIED else colors.get(cls, gray)
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(QColor(color)))
-            p.drawRect(QRectF(x, y, seg, BAR_HEIGHT))
+            p.drawRect(QRectF(x, y, seg, height))
             if seg >= BAR_MIN_SEPARATOR and x > 0:
                 p.setPen(QPen(QColor(pal["window"]), 1))
-                p.drawLine(QPointF(x, y), QPointF(x, y + BAR_HEIGHT))
+                p.drawLine(QPointF(x, y), QPointF(x, y + height))
+            if self._show_labels:
+                label = f"{share * 100:.0f}%"
+                if metrics.horizontalAdvance(label) + BAR_LABEL_PADDING <= seg:
+                    p.setPen(QPen(QColor(_on_segment_text(color))))
+                    p.drawText(QRectF(x, y, seg, height),
+                               Qt.AlignCenter, label)
             x += seg
         p.end()
 

@@ -29,7 +29,29 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from mammon import db
+
+def skip_under_xdist(reason: str):
+    """Mark a test to run SERIALLY only.
+
+    For the handful of Qt dialog tests that are sound on their own and fall over
+    under ``-n auto``: they drive a modeless dialog through ``processEvents``
+    while widgets are being created and destroyed, and under sixteen workers
+    that reliably crashes one. Every assertion in them still runs on the serial
+    suite, which is the correctness gate; what this removes is noise from the
+    pre-push parallel run, where a gate that cries wolf one run in two is a gate
+    people learn to ignore.
+
+    Keyed off PYTEST_XDIST_WORKER, which xdist sets in each worker process.
+    NOT a blanket skip: delete the mark and the test runs again the moment the
+    underlying fault is fixed.
+    """
+    import os
+    return pytest.mark.skipif(bool(os.environ.get("PYTEST_XDIST_WORKER")),
+                              reason=reason)
+
 
 #: (schema version, path) of this PROCESS's template. Keyed on the version so a
 #: test that patches `db.MIGRATIONS` cannot be served a stale schema; each xdist

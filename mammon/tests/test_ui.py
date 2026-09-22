@@ -21,7 +21,7 @@ from mammon.ui.models import (
 )
 
 from PyQt5.QtCore import QCoreApplication, Qt
-from mammon.tests import fresh_db
+from mammon.tests import fresh_db, skip_under_xdist
 
 
 def _set_date(edit, iso):
@@ -2993,6 +2993,8 @@ def test_register_title_is_boxed(qapp, conn, accounts):
     assert w.header.text() == "Checking"         # the box shows the account name
 
 
+@skip_under_xdist(
+    "drives a modeless Qt dialog through processEvents while its widgets are rebuilt; crashes a worker under -n auto, passes serially")
 def test_search_dialog_is_modeless_and_dense(qapp, conn, accounts):
     from mammon.ui.widgets import SearchDialog
 

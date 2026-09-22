@@ -639,7 +639,8 @@ def _class_split(conn, symbol: str, cents: int, mixtures: dict,
 
 
 def fund_target(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
-                prices: Optional[dict] = None) -> FundTargetReport:
+                prices: Optional[dict] = None,
+                account_ids: Optional[list] = None) -> FundTargetReport:
     """What the per-fund weights say, what class mix they imply, and what moving
     to them would do to the whole portfolio.
 
@@ -654,8 +655,15 @@ def fund_target(conn, target_id: Optional[int] = None, as_of: Optional[str] = No
     tid = int(target["id"])
     on = as_of or _dt.date.today().isoformat()
     lines = fund_lines(conn, tid)
-    chosen = target_accounts(conn, tid) or sorted(
-        {aid for aid, _sym in lines})
+    if account_ids is not None:
+        # The CALLER names the accounts whose targets are in play. The fund
+        # window passes the accounts the user has expanded, which is how
+        # expanding one opts its target into the projection: with none open,
+        # `portfolio_after` is `portfolio_before` and the two bars agree.
+        chosen = [int(a) for a in account_ids]
+    else:
+        chosen = target_accounts(conn, tid) or sorted(
+            {aid for aid, _sym in lines})
 
     mixtures = security_mix.all_mixtures(conn)
     classes = {r["symbol"]: r["asset_class"] for r in list_securities(conn)}

@@ -167,12 +167,21 @@ class RebalanceDialog(QDialog):
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setAutoDefault(False)
         self.delete_btn.clicked.connect(lambda *_: self.delete_target())
+        self.by_fund_btn = QPushButton("By fund…")
+        self.by_fund_btn.setAutoDefault(False)
+        self.by_fund_btn.setToolTip(
+            "Set a target percent per FUND instead of per asset class. A class "
+            "weight is not tradeable -- a blended fund moves three classes at "
+            "once -- so this states the target in the units you can actually "
+            "buy and sell, and shows what it does to your whole portfolio.")
+        self.by_fund_btn.clicked.connect(lambda *_: self.open_by_fund())
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Target"))
         top.addWidget(self.target_combo, 1)
         top.addWidget(self.new_btn)
         top.addWidget(self.delete_btn)
+        top.addWidget(self.by_fund_btn)
 
         self.accounts_btn = QPushButton("Accounts…")
         self.accounts_btn.setAutoDefault(False)
@@ -420,6 +429,24 @@ class RebalanceDialog(QDialog):
                                       include_empty_classes=True)
         self._fill_status(self.report)
         QTimer.singleShot(0, self._redraw_rows)
+
+    def open_by_fund(self):
+        """Open the per-fund rebalancing window (SRD 5.8f-1).
+
+        A separate window rather than a mode on this one: the two state the
+        target in different units and a target is one or the other, so putting
+        them in one dialog would offer two statements of intent that can
+        disagree with nothing to say which wins.
+        """
+        from mammon.ui.fund_target_window import FundTargetWindow
+        win = FundTargetWindow(self.conn, parent=self, as_of=self.as_of)
+        win.changed.connect(self.refresh)
+        return self._exec_window(win)
+
+    def _exec_window(self, win):
+        """Overridable so a test can assert the launch without entering a modal
+        loop -- an ``exec_()`` under the offscreen platform never returns."""
+        return win.exec_()
 
     def _redraw_rows(self) -> None:
         """Rebuild the tree from the current report, off the signal stack."""

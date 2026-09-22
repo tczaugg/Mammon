@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import QApplication, QCheckBox
 
 from mammon import db, investments, ledger, portfolio, rebalance
 from mammon.ui.rebalance_dialog import RebalanceDialog
-from mammon.tests import fresh_db
+from mammon.tests import fresh_db, skip_under_xdist
 
 AS_OF = "2026-06-30"
 HUNDRED = Decimal("100")
@@ -206,6 +206,8 @@ def _row_for(dlg, label: str):
                 if dlg.tree.topLevelItem(i).text(dlg.CLASS) == label)
 
 
+@skip_under_xdist(
+    "drives a modeless Qt dialog through processEvents while its widgets are rebuilt; crashes a worker under -n auto, passes serially")
 def test_the_dialog_locks_a_class_and_keeps_the_column_at_100(qapp, conn, world):
     dlg = RebalanceDialog(conn, as_of=AS_OF)
     dlg._ask_name = lambda: "Mix"
