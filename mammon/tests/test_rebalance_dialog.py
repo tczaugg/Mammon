@@ -82,7 +82,14 @@ def test_new_target_seeds_from_today_and_reads_on_target(qapp, conn, world):
     # The house is named as context, and explicitly not part of the mix.
     assert "Real estate" in dlg.fixed_label.text()
     assert "nothing here can be rebalanced" in dlg.fixed_label.text()
-    assert "real_estate" not in [r.asset_class for r in dlg.report.rows]
+    # The editor lists every class so a zeroed one can be typed back in, so
+    # real_estate HAS a row -- but an empty one: the house's cents are in
+    # fixed_rows and never reach the sleeve, which is the property that matters.
+    house_row = next(r for r in dlg.report.rows if r.asset_class == "real_estate")
+    assert house_row.current_cents == 0
+    assert house_row.target_pct == Decimal("0")
+    assert not house_row.out_of_band
+    assert dlg.report.fixed_total > 0
     dlg.deleteLater()
 
 
@@ -207,3 +214,64 @@ def test_nothing_classified_reports_the_next_step_instead_of_failing(qapp, conn)
     assert warnings and "asset class" in warnings[0]
     assert rebalance.list_targets(conn) == []
     dlg.deleteLater()
+
+def test_zeroing_a_class_leaves_a_row_you_can_type_back_into(qapp, conn, world):
+    """Reported: "when I zero out an asset class it disappears and there
+    doesn't appear to be a way to get it back."
+
+    A zero DELETES the line, deliberately -- a line left at zero rejoins the
+    unlocked pool in apply_target_edit and could silently be handed weight
+    again. But drift's rows were `lines | current`, so a class the user holds
+    none of then appeared in neither and the edit was one-way. The editor asks
+    for the whole palette instead.
+    """
+    dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Mix")
+    tid = dlg.new_target()
+    assert "bond" in rebalance.target_lines(conn, tid)
+
+    dlg.set_target_pct("bond", 0)
+    # The line really is gone from the target...
+    assert "bond" not in rebalance.target_lines(conn, tid)
+    # ...and the row is still on screen, at zero, ready to be typed into.
+    row = next(r for r in dlg.report.rows if r.asset_class == "bond")
+    assert row.target_pct == Decimal("0")
+    assert "bond" in [r.asset_class for r in dlg.report.rows]
+
+    # Typing a weight back in restores it.
+    dlg.set_target_pct("bond", 25)
+    assert rebalance.target_lines(conn, tid)["bond"] == Decimal("25")
+    assert rebalance.target_total(conn, tid) == Decimal("100")
+    dlg.deleteLater()
+
+
+def test_the_editor_offers_every_class_even_ones_never_targeted(qapp, conn,
+                                                                world):
+    """Including crypto, which became targetable on 2026-09-21. A class absent
+    from the palette is a class the user cannot choose."""
+    dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Mix")
+    dlg.new_target()
+    shown = {r.asset_class for r in dlg.report.rows}
+    assert set(portfolio.ASSET_CLASSES) <= shown
+    assert "crypto" in shown
+    dlg.deleteLater()
+
+
+def test_a_read_only_drift_is_not_padded_with_empty_classes(conn, world):
+    """The padding is for the EDITOR. A column of zeros where nothing can be
+    typed is noise, so the default is unchanged and every other caller --
+    the Investment Center card, the MCP tool -- sees what it always did."""
+    tid = rebalance.create_target(conn, "Plain")
+    rebalance.set_lines(conn, tid, {"domestic_stock": 60, "bond": 40})
+    plain = rebalance.drift(conn, tid, as_of=AS_OF)
+    padded = rebalance.drift(conn, tid, as_of=AS_OF, include_empty_classes=True)
+    plain_classes = {r.asset_class for r in plain.rows}
+    padded_classes = {r.asset_class for r in padded.rows}
+    assert "crypto" not in plain_classes
+    assert "crypto" in padded_classes
+    assert plain_classes < padded_classes
+    # Padding adds rows, never cents.
+    assert plain.sleeve_total == padded.sleeve_total
+    for cls in plain_classes:
+        a = next(r for r in plain.rows if r.asset_class == cls)
+        b = next(r for r in padded.rows if r.asset_class == cls)
+        assert (a.current_cents, a.target_pct) == (b.current_cents, b.target_pct)

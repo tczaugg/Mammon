@@ -383,7 +383,12 @@ class RebalanceDialog(QDialog):
         signal frame is still live -- the heap-corruption pattern CLAUDE.md
         documents for ``setModelData`` (0xc0000374, no Python traceback). It is
         reachable in ordinary use: setting a class to 0 drops its target line,
-        and a class with no holding then loses its row entirely.
+        so the tree really is rebuilt on an ordinary edit.
+
+        That zero no longer costs the class its ROW -- the editor asks drift for
+        every class in the palette (``include_empty_classes``), so a zeroed one
+        stays on screen at 0% and can be typed back in. It used to vanish, and
+        with no way to bring it back the edit was one-way (reported).
         """
         tid = self.current_target_id()
         if tid is None or self._loading:
@@ -392,7 +397,8 @@ class RebalanceDialog(QDialog):
         # the column still totals 100, and clamps an edit nothing can absorb.
         rebalance.set_line_balanced(self.conn, int(tid), asset_class,
                                     Decimal(str(pct)))
-        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of)
+        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of,
+                                      include_empty_classes=True)
         self._fill_status(self.report)
         QTimer.singleShot(0, self._redraw_rows)
 
@@ -408,7 +414,8 @@ class RebalanceDialog(QDialog):
         if tid is None or self._loading:
             return
         rebalance.set_locked(self.conn, int(tid), asset_class, bool(locked))
-        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of)
+        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of,
+                                      include_empty_classes=True)
         self._fill_status(self.report)
         QTimer.singleShot(0, self._redraw_rows)
 
@@ -436,7 +443,8 @@ class RebalanceDialog(QDialog):
                 "which you can then edit.")
             self.fixed_label.setText("")
             return
-        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of)
+        self.report = rebalance.drift(self.conn, int(tid), as_of=self.as_of,
+                                      include_empty_classes=True)
         r = self.report
         self._loading = True
         try:

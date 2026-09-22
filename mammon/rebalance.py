@@ -731,13 +731,24 @@ def _holdings_by_class(conn, alloc, as_of=None, prices=None, since=None) -> dict
 
 
 def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
-          prices: Optional[dict] = None, since: Optional[str] = None) -> DriftReport:
+          prices: Optional[dict] = None, since: Optional[str] = None, *,
+          include_empty_classes: bool = False) -> DriftReport:
     """Compare the real mix against a target (the ACTIVE one when ``target_id``
     is omitted).
 
     Percentages are of the target's SLEEVE, not of everything owned; property and
     other fixed assets come back in ``fixed_rows`` as context. Raises when there
     is no target to measure against -- an empty report would read as "on target".
+
+    ``include_empty_classes`` adds a row for every class in
+    ``portfolio.ASSET_CLASSES``, even one this target does not name and holds
+    none of. The EDITOR passes it; a read-only view does not, because a column
+    of zeros is noise where nothing can be typed. Reported: zeroing a class made
+    its row disappear with no way to bring it back -- a zero DELETES the line
+    (deliberately: see :func:`set_line`, and note that a line left at zero would
+    rejoin the unlocked pool in :func:`apply_target_edit` and could silently be
+    handed weight again), so a class held nowhere then appeared in neither
+    ``lines`` nor ``current``.
     """
     target = get_target(conn, target_id) if target_id is not None else active_target(conn)
     if target is None:
@@ -771,8 +782,10 @@ def drift(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
     cash_only = list(sleeve_alloc.cash_only_accounts)
 
     rows: list = []
-    for cls in sorted(set(lines) | set(current),
-                      key=lambda c: (-current.get(c, 0), c)):
+    shown = set(lines) | set(current)
+    if include_empty_classes:
+        shown |= set(portfolio.ASSET_CLASSES)
+    for cls in sorted(shown, key=lambda c: (-current.get(c, 0), c)):
         cents = int(current.get(cls, 0))
         target_pct = lines.get(cls, Decimal("0"))
         current_pct = ((Decimal(cents) / Decimal(total)) * _HUNDRED) if total else Decimal("0")
