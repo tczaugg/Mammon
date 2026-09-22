@@ -623,6 +623,320 @@ def has_fund_lines(conn, target_id: int) -> bool:
     return row is not None
 
 
+# ---------------------------------------------------------------------------
+# seeding a fund target from the last mix the user STATED (SRD 5.8f-1)
+# ---------------------------------------------------------------------------
+# A fresh window starts every fund at zero, which is the one weight that is
+# certainly wrong, and typing eight of them from memory is how a target never
+# gets set at all. The ledger already holds the answer: the last time money
+# moved on purpose IS a statement of the mix the user wanted.
+#
+# Two shapes of statement, and the MORE RECENT wins whichever it is:
+#
+#   * a REALLOCATION -- funds bought and sold on the same day. What it says is
+#     the mix it left behind, so the seed is that day's closing weights.
+#   * a CONTRIBUTION -- several funds bought on one day, nothing sold, funded by
+#     money that came INTO the account. What it says is how new money was split,
+#     which is the election as typed at the plan.
+#   * the OPENING purchase -- the first day the account bought anything at all.
+#     Weakest of the three and used only when there is nothing else, because an
+#     account can be funded in ways the ledger does not record as money arriving
+#     (an opening balance is a column, not a row). What you first bought with an
+#     account is still something you chose.
+#
+# Both are read from the SHAPE of the rows, never from memo text. A memo like
+# "CONTRIBUTION" survives only from some plan imports and not others, and an
+# account being rebalanced today may carry no memos at all.
+#
+# What is deliberately NOT a statement:
+#
+#   * a share-class conversion -- one fund out, one in, the same money. The plan
+#     did that, not the user, and the weights it leaves are just yesterday's.
+#   * dividends swept into funds: buys with no money entering the account. That
+#     split follows what each fund paid, not what the holder wants, and the two
+#     are not close -- an accumulated-dividend sweep reads as an allocation
+#     nobody chose.
+#   * an exchange too small to be an allocation decision, which is how closing
+#     out a residual across several funds (around 1% of the account) differs
+#     from a rebalance (several times that).
+#
+# A statement that does not cover every fund now held is STALE, not partial:
+# seeding only the funds it names gives the rest a target of zero, which reads
+# as "sell all of it". So a seed is offered only when every material holding is
+# accounted for. Funds named then but since sold are dropped and the remainder
+# renormalized -- that direction is safe, because not holding one is not an
+# instruction to buy it.
+
+#: An exchange smaller than this share of the account is housekeeping, not an
+#: allocation decision (see the residual sweep above).
+SEED_EXCHANGE_MIN_PCT = Decimal("2")
+#: How long before a purchase money may have arrived and still be read as what
+#: funded it. The user's payrolls land 2-4 days ahead of the buys they pay for.
+SEED_FUNDING_DAYS = 14
+#: ...and it has to be most of the purchase, or the buy was mostly internal cash.
+SEED_FUNDING_MIN_PCT = Decimal("50")
+#: A held fund smaller than this share of the account does not make a statement
+#: stale by being absent from it -- at that size it is a dividend residual.
+SEED_STALE_MIN_PCT = Decimal("1")
+#: How far back to look for a statement before giving up. Bounded because each
+#: candidate date costs a valuation.
+SEED_MAX_CANDIDATES = 24
+
+_SEED_BUY = {"buy", "buyx"}
+_SEED_SELL = {"sell", "sellx"}
+#: Money arriving from OUTSIDE the account. A Sell or a Div is the account's own
+#: money changing form, which is exactly what must not count as funding.
+_SEED_EXTERNAL_CASH = {"xin", "contribx", "cash", "buyx"}
+
+
+@dataclass(frozen=True)
+class FundSeed:
+    """A suggested set of fund weights for one account, and where it came from.
+
+    ``lines`` is ``{symbol: Decimal pct}`` summing to exactly 100 at the
+    resolution the window edits in. ``dropped`` names funds the statement
+    covered that are no longer held.
+    """
+    account_id: int
+    source: str                       # "reallocation" | "contribution"
+    stated_on: str                    # the date the statement was made
+    lines: dict = field(default_factory=dict)
+    dropped: tuple = ()
+
+    def describe(self) -> str:
+        what = {
+            "reallocation": "your reallocation on %s",
+            "contribution": "how you split contributions on %s",
+            "opening": "the funds this account was opened with on %s",
+        }[self.source] % self.stated_on
+        text = "Targets seeded from %s." % what
+        if self.dropped:
+            text += (" %s no longer held, so the rest were rescaled to 100%%."
+                     % ", ".join(self.dropped))
+        return text
+
+
+def _seed_percentages(weights: dict) -> dict:
+    """Shares of any positive scale as percentages to one decimal, summing to
+    exactly 100 -- the resolution of the window's spin boxes.
+
+    Largest remainder rather than plain rounding, because eight funds rounded
+    independently land on 99.9 or 100.1 and the window would then report the
+    seed it had just written as not adding up.
+    """
+    total = sum(Decimal(v) for v in weights.values())
+    if total <= 0:
+        return {}
+    tenths: dict = {}
+    parts = []
+    for sym, value in weights.items():
+        exact = Decimal(value) * 1000 / total
+        whole = int(exact)
+        tenths[sym] = whole
+        parts.append((exact - whole, sym))
+    short = 1000 - sum(tenths.values())
+    for _frac, sym in sorted(parts, key=lambda r: (-r[0], r[1]))[:short]:
+        tenths[sym] += 1
+    return {sym: Decimal(n) / 10 for sym, n in tenths.items() if n}
+
+
+def _seed_trades(conn, account_id: int, as_of: str) -> list:
+    """``[(date, {symbol: cents} bought, {symbol: cents} sold)]``, newest first."""
+    rows = conn.execute(
+        "SELECT date, action, symbol, amount FROM investment_transactions "
+        "WHERE account_id=? AND date<=? AND symbol IS NOT NULL AND amount IS NOT NULL "
+        "ORDER BY date DESC, id DESC", (int(account_id), as_of)).fetchall()
+    by_date: dict = {}
+    for r in rows:
+        action = (r["action"] or "").strip().lower().replace(" ", "")
+        if action not in _SEED_BUY and action not in _SEED_SELL:
+            continue
+        bought, sold = by_date.setdefault(r["date"], ({}, {}))
+        side = bought if action in _SEED_BUY else sold
+        side[r["symbol"]] = side.get(r["symbol"], 0) + abs(int(r["amount"]))
+    return [(d, b, s) for d, (b, s) in by_date.items()]
+
+
+def _is_share_class_conversion(conn, account_id: int, when: str,
+                               bought: dict, sold: dict) -> bool:
+    """One fund out, one fund in, the same money: the plan renamed a holding.
+
+    Four conditions, because three of them are also true of a real decision to
+    swap one fund for another. What separates a conversion is that the old fund
+    is left EMPTY and the new one had never been held: the money did not move
+    between two funds the user was choosing among, it followed a single holding
+    to a new name. A partial sale, or a purchase of something already held, is
+    an allocation decision and is read as one.
+    """
+    if len(bought) != 1 or len(sold) != 1:
+        return False
+    new_name = next(iter(bought))
+    old_name = next(iter(sold))
+    if new_name == old_name:
+        return False
+    if abs(bought[new_name] - sold[old_name]) > 2:
+        return False
+    after = investments.compute_holdings(conn, account_id, when)
+    if _D(getattr(after.get(old_name), "qty", 0)) > 0:
+        return False                   # a trim, not an exit
+    before = investments.compute_holdings(
+        conn, account_id,
+        (_dt.date.fromisoformat(when) - _dt.timedelta(days=1)).isoformat())
+    return _D(getattr(before.get(new_name), "qty", 0)) <= 0
+
+
+def _seed_from_reallocation(conn, account_id: int, as_of: str):
+    """``(date, {symbol: cents})`` for the last real reallocation, or None."""
+    seen = 0
+    for when, bought, sold in _seed_trades(conn, account_id, as_of):
+        if not bought or not sold:
+            continue
+        seen += 1
+        if seen > SEED_MAX_CANDIDATES:
+            break
+        if _is_share_class_conversion(conn, account_id, when, bought, sold):
+            continue
+        val = portfolio.account_valuation(conn, account_id, when)
+        size = int(val.total)
+        moved = min(sum(bought.values()), sum(sold.values()))
+        if size <= 0 or Decimal(moved) * _HUNDRED / Decimal(size) < SEED_EXCHANGE_MIN_PCT:
+            continue
+        weights = {h.symbol: int(h.market_value) for h in val.holdings
+                   if h.price is not None and int(h.market_value) > 0}
+        if len(weights) >= 2:
+            return when, weights
+    return None
+
+
+def _seed_from_contribution(conn, account_id: int, as_of: str):
+    """``(date, {symbol: cents})`` for the last split of money that came IN."""
+    seen = 0
+    for when, bought, sold in _seed_trades(conn, account_id, as_of):
+        if sold or len(bought) < 2:
+            continue
+        seen += 1
+        if seen > SEED_MAX_CANDIDATES:
+            break
+        spent = sum(bought.values())
+        if spent <= 0:
+            continue
+        start = (_dt.date.fromisoformat(when)
+                 - _dt.timedelta(days=SEED_FUNDING_DAYS)).isoformat()
+        funding = 0
+        for r in conn.execute(
+                "SELECT action, amount FROM investment_transactions "
+                "WHERE account_id=? AND date>=? AND date<=? AND amount IS NOT NULL",
+                (int(account_id), start, when)):
+            action = (r["action"] or "").strip().lower().replace(" ", "")
+            if action in _SEED_EXTERNAL_CASH and int(r["amount"]) > 0:
+                funding += int(r["amount"])
+        # Money can also arrive on the CASH side -- a deposit or a transfer into
+        # a brokerage is an ordinary ledger row, not an investment action -- and
+        # a buy it paid for is as much a statement as one a payroll paid for.
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS paid_in FROM transactions "
+            "WHERE account_id=? AND date>=? AND date<=? AND amount>0",
+            (int(account_id), start, when)).fetchone()
+        funding += int(row["paid_in"] if row is not None else 0)
+        if Decimal(funding) * _HUNDRED / Decimal(spent) >= SEED_FUNDING_MIN_PCT:
+            return when, bought
+    return None
+
+
+def _seed_conversions(conn, account_id: int, after: str, as_of: str) -> dict:
+    """``{old symbol: what it became}`` for share-class conversions since a
+    statement was made, chained forward.
+
+    A statement names the funds of its day. When the plan later moves a holding
+    to another share class -- twice over in a single plan, in one real ledger --
+    the weight still applies to the same money, and without this the statement
+    reads as stale and no seed is offered at all.
+    """
+    renames: dict = {}
+    for when, bought, sold in sorted(_seed_trades(conn, account_id, as_of)):
+        if when <= after or not _is_share_class_conversion(
+                conn, account_id, when, bought, sold):
+            continue
+        renames[next(iter(sold))] = next(iter(bought))
+
+    def final(symbol: str) -> str:
+        seen = set()
+        while symbol in renames and symbol not in seen:
+            seen.add(symbol)
+            symbol = renames[symbol]
+        return symbol
+
+    return {old: final(old) for old in renames}
+
+
+def _seed_from_first_purchase(conn, account_id: int, as_of: str):
+    """``(date, {symbol: cents})`` for the day this account first bought funds.
+
+    No funding test: nothing had been sold and nothing had paid a dividend yet,
+    so whatever paid for it came from outside by definition. This is what makes
+    an account created with an opening balance -- a column on the account, not a
+    row anything can find -- seedable at all.
+    """
+    first = None
+    for when, bought, sold in _seed_trades(conn, account_id, as_of):
+        if sold or len(bought) < 2 or sum(bought.values()) <= 0:
+            continue
+        if first is None or when < first[0]:
+            first = (when, bought)
+    return first
+
+
+def suggest_fund_lines(conn, account_id: int,
+                       as_of: Optional[str] = None) -> Optional[FundSeed]:
+    """The weights this account was last STATED to hold, ready to seed a target.
+
+    Returns None when the ledger holds no statement, or holds one that no longer
+    covers what is in the account -- a stale statement is worse than none, since
+    every fund it omits would be targeted at zero.
+    """
+    when = as_of or _dt.date.today().isoformat()
+    val = portfolio.account_valuation(conn, account_id, when)
+    held = {h.symbol: (int(h.market_value) if h.price is not None else 0)
+            for h in val.holdings if _D(h.quantity) > 0}
+    if len(held) < 2:
+        return None                    # nothing to divide between
+    size = int(val.total) or sum(held.values())
+
+    found = []
+    for source, hit in (
+            ("reallocation", _seed_from_reallocation(conn, account_id, when)),
+            ("contribution", _seed_from_contribution(conn, account_id, when)),
+            ("opening", _seed_from_first_purchase(conn, account_id, when))):
+        if hit is not None:
+            found.append((hit[0], source, hit[1]))
+    if not found:
+        return None
+    # The more recent statement wins, and on the same date the stronger kind
+    # does: money actually moved between funds, then new money was split, then
+    # "this is what the account was opened with".
+    _RANK = {"reallocation": 2, "contribution": 1, "opening": 0}
+    stated_on, source, stated = max(found, key=lambda f: (f[0], _RANK[f[1]]))
+    renames = _seed_conversions(conn, account_id, stated_on, when)
+    if renames:
+        under_new_names: dict = {}
+        for symbol, cents in stated.items():
+            now_called = renames.get(symbol, symbol)
+            under_new_names[now_called] = under_new_names.get(now_called, 0) + cents
+        stated = under_new_names
+
+    for symbol, cents in held.items():
+        if symbol in stated:
+            continue
+        if size <= 0 or Decimal(cents) * _HUNDRED / Decimal(size) >= SEED_STALE_MIN_PCT:
+            return None                # stale: it says nothing about this fund
+    kept = {sym: cents for sym, cents in stated.items() if sym in held}
+    if len(kept) < 2 or sum(kept.values()) <= 0:
+        return None
+    return FundSeed(account_id=int(account_id), source=source,
+                    stated_on=stated_on, lines=_seed_percentages(kept),
+                    dropped=tuple(sorted(set(stated) - set(kept))))
+
+
 def _class_split(conn, symbol: str, cents: int, mixtures: dict,
                  classes: dict) -> dict:
     """``cents`` of one security spread over its asset classes.
@@ -640,13 +954,20 @@ def _class_split(conn, symbol: str, cents: int, mixtures: dict,
 
 def fund_target(conn, target_id: Optional[int] = None, as_of: Optional[str] = None,
                 prices: Optional[dict] = None,
-                account_ids: Optional[list] = None) -> FundTargetReport:
+                account_ids: Optional[list] = None,
+                scope_ids: Optional[list] = None) -> FundTargetReport:
     """What the per-fund weights say, what class mix they imply, and what moving
     to them would do to the whole portfolio.
 
     Forward only. Every number here follows from weights the user typed; nothing
     is solved for and nothing is recommended beyond "this fund is N% and you
     said M%".
+
+    ``account_ids`` names the accounts whose TARGETS are in play; ``scope_ids``
+    names the accounts that count as "everything you own" in the two portfolio
+    figures. They are different questions -- money held for someone else is not
+    part of the mix at all, while an account you simply are not rebalancing
+    today still is -- and the second defaults to every investment account.
     """
     from mammon import security_mix
     target = get_target(conn, target_id) if target_id is not None else active_target(conn)
@@ -727,7 +1048,13 @@ def fund_target(conn, target_id: Optional[int] = None, as_of: Optional[str] = No
     # had: a 401(k) set in isolation can be locally right and globally wrong.
     portfolio_before: dict = {}
     portfolio_after: dict = {}
-    for aid in portfolio.scope_account_ids(conn, "investments"):
+    universe = (portfolio.scope_account_ids(conn, "investments")
+                if scope_ids is None else [int(a) for a in scope_ids])
+    # A chosen account outside the universe would put its TARGET into
+    # `portfolio_after` while its current value was in neither figure, so the
+    # two bars would stop being comparable. The caller narrows both together.
+    universe = sorted(set(universe) | set(account_totals))
+    for aid in universe:
         val = portfolio.account_valuation(conn, aid, on, prices)
         here: dict = {}
         for h in val.holdings:

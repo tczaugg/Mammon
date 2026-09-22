@@ -2223,10 +2223,61 @@ note.**
   percentage clipped to "4" is worse than none, and the tooltip carries every
   figure regardless. Ink over a segment is black or white by that segment's own
   luminance, since the class palette spans pale gold to mid blue.
-- **The window is reached from Target & Drift's "By fund…" button**, and is a
-  separate window rather than a mode on that dialog: the two state the target
-  in different units and a target is one or the other, so one dialog holding
-  both would offer two statements of intent that can disagree.
+- **Opening an untargeted account SEEDS it from the last mix the user stated**
+  (`rebalance.suggest_fund_lines`). Every fund starts at zero, which is the one
+  weight that is certainly wrong, and typing eight of them from memory is how a
+  target never gets set at all. User, 2026-09-22: "A useful default for the
+  target values could be the initial percentages, the contribution percentages.
+  Those can change over the life of the investments, as can the populated
+  funds." Three shapes of statement are read, and the MOST RECENT wins:
+  a REALLOCATION (funds bought and sold the same day -- the seed is the mix it
+  left behind), a CONTRIBUTION (several funds bought, nothing sold, funded by
+  money that came INTO the account -- the seed is how the new money was split),
+  and the OPENING purchase (the first day the account bought anything, used only
+  when there is nothing else, since an opening balance is a column rather than a
+  row anything can find).
+- **The statement is read from the SHAPE of the rows, never from memo text.** A
+  "CONTRIBUTION" memo survives only from some plan imports, and the accounts
+  being rebalanced today may carry no memos at all.
+- **Three things are deliberately NOT statements.** A share-class conversion --
+  one fund out, one in, the same money, the old position emptied and the new
+  name never held before -- is the plan renaming a holding, and its weights are
+  just yesterday's; a weight instead FOLLOWS the money into the fund's new name,
+  which is the only reason a plan that has renamed a fund twice can be seeded at
+  all. Dividends swept back into the funds that paid them are a split of what
+  each fund paid, not of what the user wants. And an exchange too small to be an
+  allocation decision (under `SEED_EXCHANGE_MIN_PCT` of the account) is
+  housekeeping -- closing out a residual across several funds is about 1% of an
+  account where a real rebalance is several times that.
+- **A statement that misses a fund now held is STALE, not partial**, and no seed
+  is offered: seeding the funds it names would leave the others targeted at
+  zero, which reads as "sell all of it". The other direction is safe -- a fund
+  named then but since sold is dropped and the rest rescaled to 100 -- because
+  not holding something is not an instruction to buy it. Weights are quantized
+  by largest remainder so they total exactly 100 at the window's own resolution.
+- **An account already carrying weights is NEVER re-seeded.** Suggesting over a
+  statement the user typed is the one way this could destroy their own work. The
+  note under the bars says which statement a seed came from, so a stale
+  suggestion is visible rather than silent.
+- **The window has the dashboard's account gear** (`CustomizeDialog` restricted
+  to `INVESTMENT_LIKE_TYPES`). Reported: "I need the same account picker
+  customization for the rebalance report as we have in the dashboard so I can
+  exclude some accounts." It narrows BOTH the accounts offered for rebalancing
+  and the two bars at the foot (`fund_target(scope_ids=)`), because money held
+  for someone else is not part of the mix at all. Its scope is remembered
+  separately from the dashboard's: "what am I looking at" and "what is mine to
+  rebalance" are different questions.
+- **Enter must not close the window.** Reported: "If I hit Enter while editing a
+  target amount the dialog should not close." A `QDialogButtonBox` promotes its
+  button to the dialog default and a spin box IGNORES Return once it has read
+  the typed value, so the keystroke meaning "I have finished this number"
+  arrived at Close as a click. The button is un-defaulted AND the key is
+  swallowed in `keyPressEvent`; there is nothing to accept, since weights are
+  stored as they are typed.
+- **The window is a separate window, not a mode on the old dialog**: the two
+  stated the target in different units and a target is one or the other, so one
+  dialog holding both would offer two statements of intent that can disagree.
+  (The old dialog is gone; see the first bullet.)
 
 ### 5.8f Target asset mix and drift (SRD 5.8f)
 - **The editor lists EVERY class; a read-only drift does not.** Setting a class

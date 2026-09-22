@@ -15,7 +15,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QDoubleSpinBox   # noqa: E402
+from PyQt5.QtCore import Qt                                # noqa: E402
+from PyQt5.QtTest import QTest                             # noqa: E402
+from PyQt5.QtWidgets import (                              # noqa: E402
+    QApplication, QDialogButtonBox, QDoubleSpinBox)
 
 from mammon import investments, ledger, portfolio, rebalance, security_mix  # noqa: E402
 from mammon.ui import fund_target_window as ftw            # noqa: E402
@@ -296,3 +299,137 @@ def test_a_segment_is_labelled_only_when_its_label_fits(qapp):
     # The narrow slice gets no room: at 400px wide its segment is 12px.
     plain = ClassBar({"domestic_stock": 97, "cash": 3})
     assert plain._show_labels is False
+
+
+# --- seeding a target from what was last stated -----------------------------
+def test_opening_an_untargeted_account_offers_the_mix_it_last_stated(
+        conn, world, qapp):
+    """Reported: "A useful default for the target values could be the initial
+    percentages, the contribution percentages." The fixture's plan was funded
+    once and split 70/30, so that is what opening it should propose."""
+    win = _window(conn, qapp)
+    plan = world["plan"]
+    try:
+        win.expand_account(plan)
+        qapp.processEvents()
+        assert win.fund_target_pct(plan, "ZZBAL") == 70.0
+        assert win.fund_target_pct(plan, "ZZIDX") == 30.0
+        assert rebalance.fund_lines(conn, win.target_id())[(plan, "ZZBAL")] == 70
+        # ...and it says where the number came from, so a stale suggestion is
+        # visible rather than silent.
+        assert "Targets seeded from" in win.note.text()
+        assert "2020-01-02" in win.note.text()
+        assert "ZZ 401k" in win.note.text()
+    finally:
+        win.deleteLater()
+
+
+def test_an_account_already_carrying_weights_is_never_re_seeded(conn, world, qapp):
+    """Suggesting over a statement the user typed is the one way this could
+    destroy their own work."""
+    win = _window(conn, qapp)
+    plan = world["plan"]
+    try:
+        win.expand_account(plan)          # seeds 70/30
+        qapp.processEvents()
+        top = next(win.tree.topLevelItem(i)
+                   for i in range(win.tree.topLevelItemCount())
+                   if win.tree.topLevelItem(i).text(ftw.COL_NAME) == "ZZ 401k")
+        for i in range(top.childCount()):
+            kid = top.child(i)
+            _kind, _aid, symbol = kid.data(ftw.COL_NAME, Qt.UserRole)
+            win.tree.itemWidget(kid, ftw.COL_TARGET).setValue(
+                10.0 if symbol == "ZZBAL" else 90.0)
+        qapp.processEvents()
+
+        win.expand_account(plan, False)
+        win.expand_account(plan)
+        qapp.processEvents()
+        assert win.fund_target_pct(plan, "ZZBAL") == 10.0
+        assert win.fund_target_pct(plan, "ZZIDX") == 90.0
+        assert rebalance.fund_lines(conn, win.target_id()) == {
+            (plan, "ZZBAL"): Decimal("10"), (plan, "ZZIDX"): Decimal("90")}
+    finally:
+        win.deleteLater()
+
+
+def test_an_account_with_nothing_to_divide_is_left_at_zero(conn, world, qapp):
+    """The taxable account holds one fund, so there is no mix to suggest."""
+    win = _window(conn, qapp)
+    try:
+        win.expand_account(world["taxable"])
+        qapp.processEvents()
+        assert win.fund_target_pct(world["taxable"], "ZZBND") == 0.0
+        assert "seeded" not in win.note.text()
+    finally:
+        win.deleteLater()
+
+
+# --- the Enter key ----------------------------------------------------------
+def test_enter_does_not_close_the_window(conn, world, qapp):
+    """Reported: "If I hit Enter while editing a target amount the dialog should
+    not close." A spin box ignores Return once it has read the typed value, and
+    the button box had promoted Close to the dialog default."""
+    win = _window(conn, qapp)
+    try:
+        win.show()
+        box = win.findChildren(QDialogButtonBox)[0]
+        assert box.button(QDialogButtonBox.Close).isDefault() is False
+        win.expand_account(world["plan"])
+        qapp.processEvents()
+        QTest.keyClick(win, Qt.Key_Return)
+        QTest.keyClick(win, Qt.Key_Enter)
+        qapp.processEvents()
+        assert win.isVisible()
+        assert win.result() == 0
+    finally:
+        win.deleteLater()
+
+
+# --- the account gear -------------------------------------------------------
+def test_the_gear_narrows_the_list_and_both_bars(conn, world, qapp):
+    """Reported: "I need the same account picker customization for the rebalance
+    report as we have in the dashboard so I can exclude some accounts."
+    """
+    win = _window(conn, qapp)
+    plan = world["plan"]
+    try:
+        assert sum(win.current_bar.weights().values()) == 150_000_00
+        win.set_account_scope([plan])
+        qapp.processEvents()
+        names = [win.tree.topLevelItem(i).text(ftw.COL_NAME)
+                 for i in range(win.tree.topLevelItemCount())]
+        assert names == ["ZZ 401k"]
+        # The taxable account is not merely un-expanded, it is not owned here.
+        assert sum(win.current_bar.weights().values()) == 100_000_00
+        assert sum(win.target_bar.weights().values()) == 100_000_00
+    finally:
+        win.deleteLater()
+
+
+def test_an_excluded_account_stops_counting_toward_the_projection(conn, world, qapp):
+    win = _window(conn, qapp)
+    plan, taxable = world["plan"], world["taxable"]
+    try:
+        win.expand_account(taxable)
+        assert win.expanded_accounts() == [taxable]
+        win.set_account_scope([plan])
+        qapp.processEvents()
+        assert win.expanded_accounts() == []
+    finally:
+        win.deleteLater()
+
+
+def test_the_scope_is_remembered_per_ledger(conn, world, qapp, tmp_path):
+    from PyQt5.QtCore import QSettings
+    from mammon.ui import prefs
+    settings = QSettings("MammonTests", "FundWindowScope")
+    try:
+        path = prefs.ledger_path(conn)
+        prefs.set_rebalance_account_scope(path, [world["plan"]], settings)
+        assert prefs.rebalance_account_scope(path, settings) == [world["plan"]]
+        # ...and it is not the dashboard's scope, which is a different question.
+        assert prefs.dashboard_account_scope(path, settings) is None
+    finally:
+        settings.clear()
+        settings.sync()
