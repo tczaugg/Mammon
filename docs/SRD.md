@@ -2153,6 +2153,19 @@ note.**
 
 
 ### 5.8f Target asset mix and drift (SRD 5.8f)
+- **The editor lists EVERY class; a read-only drift does not.** Setting a class
+  to zero DELETES its target line, which is deliberate: a line left at zero
+  rejoins the unlocked pool in `apply_target_edit`, so the next edit of another
+  class could proportionally hand weight back to the class the user had just
+  refused -- the same reasoning `set_line` already applies to a LOCKED zero,
+  which it keeps because it is a decision rather than an empty field. But
+  `drift`'s rows were `lines | current`, so a zeroed class the user holds none
+  of was in neither and its row vanished with no way to bring it back
+  (reported). `drift(include_empty_classes=True)` pads the rows out to
+  `portfolio.ASSET_CLASSES` and the Target & Drift dialog asks for it; every
+  other caller (the Investment Center card, the MCP tool) keeps the unpadded
+  rows, because a column of zeros is noise where nothing can be typed. Padding
+  adds rows, never cents.
 - `mammon/rebalance.py` holds a **target mix** and measures the real one against
   it. `portfolio.allocation` answers "where is my money"; this answers "is it
   where I meant it to be", which is the question an allocation view exists to
