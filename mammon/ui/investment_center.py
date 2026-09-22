@@ -1322,7 +1322,11 @@ class InvestmentCenterPanel(QWidget):
                       "Current %", fmt_pct(r.current_pct), right)
             self._put(self.drift_table, DRIFT_COLUMNS, row,
                       "Drift", fmt_points(r.drift_pp), right)
-            self._put(self.drift_table, DRIFT_COLUMNS, row, "Action", r.action)
+            # The domain's label, not the raw action: this cell read "invest"
+            # in lower case, which is both unpolished and the misreading the
+            # verb was renamed to avoid.
+            self._put(self.drift_table, DRIFT_COLUMNS, row, "Action",
+                      rebalance.action_label(r.action))
             self._put(self.drift_table, DRIFT_COLUMNS, row,
                       "Amount", fmt_move(r.move_cents), right)
             band = (UNPRICED_MARK if r.out_of_band is None

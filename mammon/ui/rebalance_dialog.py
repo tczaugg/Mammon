@@ -65,8 +65,10 @@ _UNDER = ("#1f5fa8", "#6fb1ff")
 # Display verbs for rebalance.ClassDrift.action. Cash is Invest / Raise, never
 # Sell -- see ClassDrift.action for why cash is spent and raised rather than
 # sold -- and the unclassified bucket is never traded at all.
-_MOVE_VERBS = {"buy": "Buy", "sell": "Sell", "invest": "Invest", "raise": "Raise",
-               "classify": "Classify"}
+#: Kept as a name several call sites spell, but the words come from the domain
+#: (``rebalance.ACTION_LABELS``) so the dialog and the Investment Center card
+#: cannot disagree about what a verb is called.
+_MOVE_VERBS = rebalance.ACTION_LABELS
 
 
 def _dark() -> bool:
@@ -558,6 +560,15 @@ class RebalanceDialog(QDialog):
             parts.append(f"Note: the target adds up to {_pct(r.target_total_pct)}%, "
                          f"not 100% — the numbers below are measured against it "
                          f"as entered.")
+        # The cash row's verb acts on CASH while its effect is on the rows
+        # above, so it gets a sentence -- said here rather than as a tooltip on
+        # the cell, because a tooltip nobody hovers does not cure a misreading
+        # and this one is the whole point of the row.
+        cash_note = next((rebalance.CASH_ACTION_NOTE[d.action] for d in r.rows
+                          if d.is_cash and d.action in rebalance.CASH_ACTION_NOTE),
+                         None)
+        if cash_note:
+            parts.append(cash_note)
         span = ("since you marked it rebalanced on " if r.since_is_rebalance
                 else "over the last year, until you mark it rebalanced — since ")
         parts.append(f"Change is {span}{r.since}.")

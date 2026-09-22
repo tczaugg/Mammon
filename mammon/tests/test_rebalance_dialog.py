@@ -275,3 +275,38 @@ def test_a_read_only_drift_is_not_padded_with_empty_classes(conn, world):
         a = next(r for r in plain.rows if r.asset_class == cls)
         b = next(r for r in padded.rows if r.asset_class == cls)
         assert (a.current_cents, a.target_pct) == (b.current_cents, b.target_pct)
+
+def test_the_cash_row_says_which_way_the_money_goes(qapp, conn, world):
+    """Reported: "now it's telling me to invest in cash".
+
+    Every other row's verb acts on THAT row's class, so "Invest" on the cash row
+    parsed as an instruction to put money INTO cash -- the one thing a rebalance
+    never does. The verb is "Spend" now, and the status line says where it goes.
+    """
+    dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Mix")
+    tid = dlg.new_target()
+    # Give cash a zero target while the sleeve holds some: cash is overweight.
+    rebalance.set_lines(conn, tid, {"domestic_stock": 60, "bond": 40})
+    dlg.refresh()
+
+    cash = next(r for r in dlg.report.rows if r.asset_class == "cash")
+    assert cash.move_cents < 0
+    assert cash.action == "spend", "never 'invest', and never 'sell'"
+    assert rebalance.action_label(cash.action) == "Spend"
+    assert _row_for(dlg, "Cash").text(dlg.MOVE).startswith("Spend")
+    # And the direction is stated in words, not left to a tooltip nobody hovers.
+    assert "spent on the buys" in dlg.status.text()
+    dlg.deleteLater()
+
+
+def test_an_underweight_cash_row_reads_raise_not_buy(qapp, conn, world):
+    """Its opposite, and the other half of "cash is never bought or sold"."""
+    dlg = _named(RebalanceDialog(conn, as_of=AS_OF), "Mix")
+    tid = dlg.new_target()
+    rebalance.set_lines(conn, tid, {"domestic_stock": 30, "cash": 70})
+    dlg.refresh()
+    cash = next(r for r in dlg.report.rows if r.asset_class == "cash")
+    assert cash.move_cents > 0
+    assert cash.action == "raise"
+    assert "raised by the sells" in dlg.status.text()
+    dlg.deleteLater()

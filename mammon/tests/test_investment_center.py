@@ -854,13 +854,13 @@ def test_drift_panel_rows_and_flags(qapp, conn, targeted):
             for i in range(panel.drift_table.columnCount())] == list(DRIFT_COLUMNS)
     assert panel.drift_table.rowCount() == 3
     assert panel.drift_row_text(0) == (
-        "Cash", fmt_cents(3025_00), "55.0%", "54.3%", "-0.7 pp", "raise",
+        "Cash", fmt_cents(3025_00), "55.0%", "54.3%", "-0.7 pp", "Raise",
         "+41.25", DRIFT_IN_BAND)
     assert panel.drift_row_text(1) == (
-        "Domestic stock", fmt_cents(1500_00), "40.0%", "26.9%", "-13.1 pp", "buy",
+        "Domestic stock", fmt_cents(1500_00), "40.0%", "26.9%", "-13.1 pp", "Buy",
         "+730.00", DRIFT_OUT_OF_BAND)
     assert panel.drift_row_text(2) == (
-        "Bonds", fmt_cents(1050_00), "5.0%", "18.8%", "+13.8 pp", "sell",
+        "Bonds", fmt_cents(1050_00), "5.0%", "18.8%", "+13.8 pp", "Sell",
         "-771.25", DRIFT_OUT_OF_BAND)
     assert not panel.drift_table.isHidden()
     assert panel.drift_empty.isHidden()
@@ -920,7 +920,7 @@ def test_drift_never_judges_or_trades_the_unclassified_bucket(qapp, conn, target
     assert rendered[DRIFT_COLUMNS.index("Drift")] == UNPRICED_MARK
     assert rendered[DRIFT_COLUMNS.index("Amount")] == UNPRICED_MARK
     assert rendered[DRIFT_COLUMNS.index("Band")] == UNPRICED_MARK
-    assert rendered[DRIFT_COLUMNS.index("Action")] == "classify"
+    assert rendered[DRIFT_COLUMNS.index("Action")] == "Classify"
     assert DRIFT_UNCLASSIFIED_TEXT.format(mark=UNPRICED_MARK) in panel.drift_note.text()
 
 

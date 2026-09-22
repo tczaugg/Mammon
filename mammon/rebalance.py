@@ -570,19 +570,53 @@ class ClassDrift:
         (overweight). CASH is different and must NEVER be ``sell``: you cannot
         sell cash, you spend it. It is consumed and generated only as the
         by-product of the securities trades -- when cash is OVER target the
-        surplus is deployed into the underweight securities (``invest``), and
-        when it is UNDER target you ``raise`` it by selling the overweight ones.
-        A rebalance is therefore set up NOT to be cash-neutral on purpose: the
+        surplus goes into the underweight securities (``spend``), and when it is
+        UNDER target you ``raise`` it by selling the overweight ones. A
+        rebalance is therefore set up NOT to be cash-neutral on purpose: the
         cash line's move drives how far the securities trades diverge. ``hold``
         when the class already sits on its target.
+
+        ``spend``, not ``invest``. Every other row's verb acts on THAT row's
+        class -- "Buy" the domestic stock, "Sell" the bonds -- so "Invest" on
+        the cash row parsed as an instruction to invest INTO cash, which is the
+        one thing a rebalance never does (reported: "now it's telling me to
+        invest in cash"). "Spend" acts on cash the same way the others act on
+        theirs, and pairs with "Raise" as its plain opposite.
         """
         if self.is_unclassified:
             return "classify"
         if self.move_cents == 0:
             return "hold"
         if self.is_cash:
-            return "invest" if self.move_cents < 0 else "raise"
+            return "spend" if self.move_cents < 0 else "raise"
         return "buy" if self.move_cents > 0 else "sell"
+
+
+#: How each :attr:`ClassDrift.action` reads to a person. Here rather than in a
+#: UI because two surfaces render it -- the Target & Drift dialog and the
+#: Investment Center's card, which was showing the raw lowercase verb -- and a
+#: word this easy to misread should be defined once.
+ACTION_LABELS = {
+    "buy": "Buy", "sell": "Sell",
+    "spend": "Spend", "raise": "Raise",
+    "hold": "Hold", "classify": "Classify",
+}
+
+#: Why the cash row's verb is not the others'. Shown as a tooltip beside it:
+#: the figure is right but its DIRECTION is the thing a reader has to get, and
+#: the cell has room for a word, not a sentence.
+CASH_ACTION_NOTE = {
+    "spend": ("You hold more cash than the target. It is spent on the buys "
+              "above -- cash is never bought, only used."),
+    "raise": ("You hold less cash than the target. It is raised by the sells "
+              "above -- cash is never sold, only produced."),
+}
+
+
+def action_label(action: str) -> str:
+    """The human verb for a drift action. Unknown actions pass through
+    capitalized rather than raising: a label is not worth a crash."""
+    return ACTION_LABELS.get(action, (action or "").capitalize())
 
 
 @dataclass

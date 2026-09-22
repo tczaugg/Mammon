@@ -328,7 +328,13 @@ def test_cash_is_never_sold(conn, world):
     r = rebalance.drift(conn, as_of=AS_OF)
     rows = {row.asset_class: row for row in r.rows}
     assert rows["cash"].move_cents < 0            # 10% held vs 5% target: overweight
-    assert rows["cash"].action == "invest"        # deploy the surplus...
+    # "spend", not "invest": every other row's verb acts on THAT row's class,
+    # so "Invest" on the cash row read as an instruction to invest INTO cash
+    # (reported). It pairs with "raise" as its plain opposite.
+    assert rows["cash"].action == "spend"         # deploy the surplus...
+    assert rebalance.action_label("spend") == "Spend"
+    assert rebalance.action_label("raise") == "Raise"
+    assert "never bought" in rebalance.CASH_ACTION_NOTE["spend"]
     assert rows["cash"].action != "sell"          # ...never sell cash
     # A security class is unaffected: still a plain Sell when overweight.
     assert rows["domestic_stock"].move_cents < 0
