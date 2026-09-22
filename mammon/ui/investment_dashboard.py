@@ -622,7 +622,8 @@ CORNER_TOOLTIPS = {
     "cornerTopRight": "Gain, income and annual return per holding.",
     "cornerBottomLeft": ("Asset Allocation, opened on By security -- where a "
                          "security is given its asset class."),
-    "cornerBottomRight": "Your target asset mix and how far the real one has drifted.",
+    "cornerBottomRight": ("A target percent per fund in each account, and the "
+                          "asset-class mix it produces across everything you own."),
 }
 #: Corner -> the themed graphic painted under its title. The value names the
 #: ``CornerButton._paint_<glyph>`` method that draws it, which is how
@@ -3563,8 +3564,9 @@ class InvestmentDashboardPage(QWidget):
     def open_rebalancing(self):
         """Bottom right: Target & Drift -- the target asset mix and how far the
         real one has strayed from it."""
-        from mammon.ui.rebalance_dialog import RebalanceDialog
-        return self._exec_dialog(RebalanceDialog(self.conn, parent=self))
+        from mammon.ui.fund_target_window import FundTargetWindow
+        return self._exec_dialog(
+            FundTargetWindow(self.conn, parent=self, as_of=self.as_of))
 
     def _build_left_band(self) -> QWidget:
         """The band has NO layout: :meth:`_layout_left_band` places its four

@@ -148,6 +148,12 @@ COLUMNS = ("Symbol", "Name", "Shares", "Price", "Market Value", "% of Securities
 #: Columns of the allocation table, in order.
 ALLOCATION_COLUMNS = ("Asset Class", "Value", "% of Allocation")
 
+#: Shown under the drift table when the target is stated per fund.
+FUND_TARGET_NOTE = (
+    "This target is set per fund, so these class figures follow from the fund "
+    "weights rather than being goals of their own. Open Rebalance by fund to "
+    "change them.")
+
 #: Columns of the rebalance-drift table, in order.
 DRIFT_COLUMNS = ("Asset Class", "Value", "Target %", "Current %", "Drift",
                  "Action", "Amount", "Band")
@@ -638,6 +644,10 @@ class DriftView:
     out_of_band_count: int = 0
     unpriced: list = field(default_factory=list)
     refusal: str = ""                # the domain's reason, when there is no target
+    #: Set when the target states its weights per FUND: the class figures are
+    #: then a CONSEQUENCE of those weights rather than something the user set,
+    #: so the panel says so instead of implying they are goals.
+    note: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -646,6 +656,44 @@ class DriftView:
     @property
     def has_unclassified(self) -> bool:
         return any(r.is_unclassified for r in self.rows)
+
+
+def _fund_drift_view(conn, target_id: int, when: str) -> "DriftView":
+    """The drift card for a target whose weights are per FUND.
+
+    Same columns, different meaning: the target percentage is what the fund
+    weights IMPLY for that class, not something the user set directly, so there
+    is no action and no band verdict. Those would be claims about a class the
+    user never made a statement about.
+    """
+    report = rebalance.fund_target(conn, target_id, when)
+    now = report.pct(report.current_blend)
+    at_target = report.pct(report.blend)
+    rows = []
+    for cls in sorted(set(now) | set(at_target),
+                      key=lambda c: -report.current_blend.get(c, 0)):
+        unclassified = cls == "unclassified"
+        rows.append(DriftRow(
+            key=cls,
+            label=portfolio.ASSET_CLASS_LABELS.get(cls, cls),
+            value=report.current_blend.get(cls, 0),
+            target_pct=_quantize_pct(at_target.get(cls, 0)),
+            current_pct=_quantize_pct(now.get(cls, 0)),
+            drift_pp=None if unclassified else _quantize_pct(
+                now.get(cls, 0) - at_target.get(cls, 0)),
+            action="hold",
+            move_cents=None,
+            out_of_band=None,
+            is_unclassified=unclassified,
+        ))
+    target = rebalance.get_target(conn, target_id)
+    return DriftView(
+        as_of=report.as_of or when,
+        target_name=(target["name"] if target is not None else None),
+        sleeve_total=sum(report.current_blend.values()),
+        rows=rows,
+        note=FUND_TARGET_NOTE,
+    )
 
 
 def rebalance_drift(conn, as_of: Optional[str] = None,
@@ -661,6 +709,17 @@ def rebalance_drift(conn, as_of: Optional[str] = None,
     shows inline.
     """
     when = as_of or investments.valuation_as_of(conn)
+    tid = target_id
+    if tid is None:
+        active = rebalance.active_target(conn)
+        tid = int(active["id"]) if active is not None else None
+    if tid is not None and rebalance.has_fund_lines(conn, tid):
+        # A target stated per FUND has no class lines, and rebalance.drift would
+        # therefore read every class as targeting 0% and tell the user to
+        # liquidate. Its class mix is a CONSEQUENCE of the fund weights, so the
+        # card shows that comparison instead -- and no per-class action, because
+        # a class is not something you trade.
+        return _fund_drift_view(conn, tid, when)
     try:
         report = rebalance.drift(conn, target_id=target_id, as_of=when)
     except ValueError as exc:

@@ -296,20 +296,3 @@ def test_a_segment_is_labelled_only_when_its_label_fits(qapp):
     # The narrow slice gets no room: at 400px wide its segment is 12px.
     plain = ClassBar({"domestic_stock": 97, "cash": 3})
     assert plain._show_labels is False
-
-
-def test_the_target_and_drift_dialog_can_open_it(conn, world, qapp, monkeypatch):
-    """It has to be reachable. A separate window rather than a mode on that
-    dialog: the two state the target in different units, and a target is one or
-    the other."""
-    from mammon.ui.rebalance_dialog import RebalanceDialog
-    dlg = RebalanceDialog(conn, as_of=AS_OF)
-    try:
-        seen = []
-        monkeypatch.setattr(dlg, "_exec_window", lambda win: seen.append(win))
-        dlg.by_fund_btn.click()
-        assert len(seen) == 1
-        assert isinstance(seen[0], ftw.FundTargetWindow)
-        seen[0].deleteLater()
-    finally:
-        dlg.deleteLater()

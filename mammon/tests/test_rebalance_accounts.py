@@ -167,39 +167,3 @@ def test_a_target_percentage_is_stored_without_an_exponent(conn, world):
     assert rebalance.get_target(conn, tid)["band_abs_pct"] == "10"
 
 
-def test_the_dialog_picks_accounts_and_shows_the_kind_of_money(qapp, conn, world):
-    from mammon.ui.rebalance_dialog import RebalanceDialog
-    tid = rebalance.create_target(conn, "Plan", lines={"domestic_stock": 60, "bond": 40},
-                                  active=True)
-    dlg = RebalanceDialog(conn, as_of=AS_OF)
-    warned = []
-    dlg._warn = lambda title, text: warned.append(text)
-    dlg.choose_accounts([world["plan"], world["roth"]])
-    assert warned and "one kind of money" in warned[0]
-    dlg.choose_accounts([world["plan"]])
-    assert rebalance.target_accounts(conn, tid) == [world["plan"]]
-    assert "Tax-deferred" in dlg.fixed_label.text()
-    stock = next(dlg.tree.topLevelItem(i) for i in range(dlg.tree.topLevelItemCount())
-                 if dlg.tree.topLevelItem(i).text(dlg.CLASS) == "Domestic stock")
-    assert stock.childCount() == 1                      # its holdings hang under it
-    assert "ANONSTK" in stock.child(0).text(dlg.CLASS)
-    dlg.mark_rebalanced()
-    assert rebalance.get_target(conn, tid)["rebalanced_on"]
-    assert "rebalanced on" in dlg.status.text()
-    dlg.deleteLater()
-
-
-def test_clicking_the_buttons_does_not_pass_qt_the_answer(qapp, conn, world):
-    """A clicked signal hands a `checked` bool to any slot that can take one.
-    Connected to choose_accounts directly, the click read False as "these are
-    the accounts" and emptied the target."""
-    from mammon.ui.rebalance_dialog import RebalanceDialog
-    tid = rebalance.create_target(conn, "Plan", lines={"domestic_stock": 100}, active=True)
-    rebalance.set_target_accounts(conn, tid, [world["plan"]])
-    dlg = RebalanceDialog(conn, as_of=AS_OF)
-    dlg._ask_accounts = lambda chosen: None            # the user cancels the picker
-    dlg.accounts_btn.click()
-    assert rebalance.target_accounts(conn, tid) == [world["plan"]]   # not emptied
-    dlg.rebalanced_btn.click()
-    assert rebalance.get_target(conn, tid)["rebalanced_on"]
-    dlg.deleteLater()

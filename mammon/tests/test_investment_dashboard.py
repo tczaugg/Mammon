@@ -2721,14 +2721,19 @@ def test_bottom_left_opens_the_asset_allocation_report(page, monkeypatch):
     dlg.deleteLater()
 
 
-def test_bottom_right_opens_target_and_drift(page, monkeypatch):
-    from mammon.ui.rebalance_dialog import RebalanceDialog
+def test_bottom_right_opens_the_fund_rebalancer(page, monkeypatch):
+    """The class-based Target & Drift editor is gone (user, 2026-09-21: "I
+    don't want the old interface at all. Just the new one"). A weight per asset
+    class is not a tradeable instruction; this corner opens the window that
+    states the target in funds."""
+    from mammon.ui.fund_target_window import FundTargetWindow
     seen = _capture(page, monkeypatch)
     page.placeholders["cornerBottomRight"].click()
     assert len(seen) == 1
     kind, dlg = seen[0]
     assert kind == "dialog"
-    assert isinstance(dlg, RebalanceDialog)
+    assert isinstance(dlg, FundTargetWindow)
+    assert dlg.as_of == page.as_of
     dlg.deleteLater()
 
 

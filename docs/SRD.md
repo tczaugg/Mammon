@@ -2153,6 +2153,19 @@ note.**
 
 
 ### 5.8f-1 Targets stated PER FUND (SRD 5.8f-1)
+- **This REPLACED the class-based editor.** User, 2026-09-21: "I don't want the
+  old interface at all. Just the new one." `ui/rebalance_dialog.py` and its two
+  test files are gone; the dashboard's bottom-right corner and Reports ▸
+  Rebalance by fund… both open `FundTargetWindow`. The domain's class targets,
+  bands and locks stay -- `rebalance.drift` still serves the MCP tool and the
+  Investment Center card -- but nothing in the UI sets a class weight any more.
+- **The Investment Center's drift card must NOT read a fund target as class
+  lines.** A fund-stated target has no class lines at all, so `rebalance.drift`
+  reads every class as targeting 0% and tells the user to liquidate (verified
+  before the removal). The card detects `has_fund_lines` and shows the implied
+  blend instead -- current versus what the fund weights produce -- with no
+  action and no band verdict, because a class is not something you trade and
+  the user stated no goal for it.
 - **A weight per asset class is not a tradeable instruction.** A blended fund
   moves three classes at once, so "sell $30,000 of domestic stock" has to be
   decomposed across holdings whose mixes differ, using preferences the app does

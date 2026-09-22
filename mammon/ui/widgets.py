@@ -8461,7 +8461,7 @@ class MainWindow(QMainWindow):
         # which is what everything else on this menu answers. (Quicken hangs it
         # off the Investing tab, which Mammon does not have.)
         reports.addAction("Asset Allocation…", self._allocation_dialog)
-        reports.addAction("Target && Drift…", self._rebalance_dialog)
+        reports.addAction("Rebalance by fund…", self._rebalance_dialog)
         # Net worth broken out per coin/currency. Once a ledger holds coin or a
         # foreign currency, one folded dollar figure hides what it is made of:
         # the same total can be four coins or one, and the sidebar strip has no
@@ -10366,11 +10366,16 @@ class MainWindow(QMainWindow):
         NetWorthByAssetDialog(self.conn, parent=self).exec_()
 
     def _rebalance_dialog(self):
-        """Reports ▸ Target & Drift…: the target asset mix and how far the real
-        one has strayed from it. Read-only over the ledger -- it proposes the
-        arithmetic that closes the gap and trades nothing."""
-        from mammon.ui.rebalance_dialog import RebalanceDialog
-        RebalanceDialog(self.conn, parent=self).exec_()
+        """Reports ▸ Rebalance by fund…: a target percent per fund inside each
+        account, with the asset-class mix it implies. Read-only over the ledger
+        -- it proposes the arithmetic that closes the gap and trades nothing.
+
+        This replaced the class-based Target & Drift editor (2026-09-21, user:
+        "I don't want the old interface at all. Just the new one"): a weight per
+        asset class is not a tradeable instruction, and the editor could only
+        ever issue one the user then had to decompose across blended funds."""
+        from mammon.ui.fund_target_window import FundTargetWindow
+        FundTargetWindow(self.conn, parent=self).exec_()
 
     def _projected_balances_dialog(self):
         """Tools ▸ Projected Balances…: the balance ahead, from entered rows,
