@@ -16,6 +16,7 @@ from mammon import db, ledger, loans, predictions, projection, scheduled
 from mammon.ui import projection_dialogs, style
 from mammon.ui.projection_dialogs import (CalendarPanel, ProjectedBalancesDialog,
                                           spending_accounts)
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 
@@ -27,7 +28,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pred.db")
+    c = fresh_db(tmp_path / "pred.db")
     yield c
     c.close()
 
@@ -213,7 +214,7 @@ def test_spending_accounts_leave_out_assets_loans_and_investments(qapp, conn, wo
     dlg.deleteLater()
 
 
-def test_calendar_colours_events_by_kind_and_theme_and_reads_today(qapp, conn, world, monkeypatch):
+def test_calendar_colors_events_by_kind_and_theme_and_reads_today(qapp, conn, world, monkeypatch):
     chk = world["chk"]
     scheduled.add_scheduled(conn, chk, payee="Rent", amount=-1500_00, frequency="monthly",
                             next_date="2026-09-10")
@@ -231,14 +232,14 @@ def test_calendar_colours_events_by_kind_and_theme_and_reads_today(qapp, conn, w
     pay_day = next(d for d in range(1, 31) if any(e.payee == "Employer" for e in dlg.events_on(d)))
     assert "#1f5fa8" in dlg.grid.cellWidget(*_pos(2026, 9, pay_day)).text()  # predicted deposit
     today_cell = dlg.grid.cellWidget(*_pos(2026, 9, 2))
-    # Read the expected colour from the palette rather than repeating its hex:
+    # Read the expected color from the palette rather than repeating its hex:
     # what matters is that today is highlighted with the LIGHT set and that the
     # two themes differ. Hardcoding the value made a deliberate palette tweak
     # (commit 9a2016c, calendar highlight) look like a regression.
     light_bg, dark_bg = projection_dialogs._TODAY_BG
     assert light_bg in today_cell.styleSheet()
     dlg.deleteLater()
-    # Dark theme: every colour and the today highlight come from the dark set.
+    # Dark theme: every color and the today highlight come from the dark set.
     monkeypatch.setattr(style, "theme", lambda: "dark")
     dark = CalendarPanel(conn, year=2026, month=9, today=TODAY)
     assert "#e5c07b" in dark.grid.cellWidget(*_pos(2026, 9, 5)).text()

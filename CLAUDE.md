@@ -19,7 +19,8 @@ per-platform default font in `ui/style.py`) but are untested - do not assume a
 change works there without saying so.
 
 Packaging: `requirements.txt` and `pyproject.toml` list the SAME required set
-(PyQt5, matplotlib, yfinance, mcp, sqlcipher3, pytest, pytest-xdist) and there
+(PyQt5, matplotlib, yfinance, mcp, sqlcipher3, PyYAML, pytest, pytest-xdist) and
+there
 are NO optional-dependency extras - an absent Python package is a broken install,
 not a configuration. Everything runs from the repo root against the ambient
 interpreter with no install step; the heavy imports stay lazy, so an offline
@@ -126,7 +127,7 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
   text.
 - **Never edit an existing migration.** `db.py` holds an ordered `MIGRATIONS`
   list; index *i* upgrades the DB from version *i* to *i+1*, tracked in
-  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 74).
+  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 77).
   Append a new `_Vn` and add it to the list - real databases have already
   applied the existing ones. `init_db()` is idempotent and safe on new and
   existing files. (That number is pinned by
@@ -161,6 +162,22 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
 - Module docstrings carry the *rationale* - why a design was chosen and what
   bug the current shape prevents. They are load-bearing; when you change
   behavior, update the reasoning rather than deleting it.
+- **American English, in identifiers and in prose.** center, color, behavior,
+  gray, license, normalize - never the British spelling. This is not a style
+  preference to weigh against matching nearby code: an LLM writing this codebase
+  drifts to British spellings wherever no external API pins the token (it once
+  wrote `color=colour` on ONE line - American where matplotlib forced it, British
+  where the name was its own), and every later session then matched the drift
+  because that is what reading like the surrounding code means. 358 occurrences
+  across 86 identifiers accumulated that way before anyone said so. If you find
+  one, it is a defect: fix it rather than matching it.
+- **Tests open a database with `fresh_db`, not `db.init_db`.** `from
+  mammon.tests import fresh_db` - it copies a per-process, already-migrated
+  template instead of replaying all 75 migrations per test, which took the
+  suite from 332s to 55s. It falls back to the real `init_db` for an in-memory
+  or encrypted database and for a file that already has content (the idempotent
+  upgrade path), so the six tests whose SUBJECT is the schema, backups or
+  encryption still call `db.init_db` directly.
 - Every behavioral fix lands with a regression test in `mammon/tests/`. Test
   files mirror module names - so run `test_smoke.py` plus `test_<module>.py` for
   what you changed, and NOT the whole suite (that is a pre-push step).

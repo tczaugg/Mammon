@@ -5,11 +5,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, ledger
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -1087,7 +1088,7 @@ def test_reconcile_summary_bounds_cleared_by_statement_date(conn, accounts):
     assert bounded["cleared_after"] == 500_00    # named, not silently folded in
     assert bounded["difference"] == 0            # so January can actually close
 
-    # Unbounded (no statement date) keeps the old whole-account behaviour.
+    # Unbounded (no statement date) keeps the old whole-account behavior.
     unbounded = ledger.reconcile_summary(conn, checking, 75_00)
     assert unbounded["cleared_total"] == -25_00 + 500_00
     assert unbounded["cleared_after"] == 0
@@ -1181,3 +1182,152 @@ def test_reconcile_summary_beginning_override_ignores_the_r_rows(conn, accounts)
     ledger.finish_reconciliation(conn, checking, "2026-01-31", -525_00,
                                  beginning_balance=-500_00)
     assert ledger.get_transaction(conn, item)["reconciled"] == 1
+
+
+# --------------------------------------------------------------------------
+# The report exclusion toggle (SRD 5.9u)
+# --------------------------------------------------------------------------
+#
+# WHERE an exclusion tag may live is a fact about tag STORAGE, which is why the
+# rule is here and not in the report window: a transaction holds many tags (the
+# junction), a split leg holds exactly one (``splits.tag_id``, a single column),
+# and a parent's tags reach every leg. Both refusals below exist to stop a
+# precise-looking gesture from doing something blunt.
+
+def _toggle_fixture(conn):
+    acct = ledger.create_account(conn, "Checking", "checking")
+    cat = ledger.resolve_category(conn, "Rental:Rent")
+    return acct, cat
+
+
+def test_exclusion_joins_a_transactions_comma_list(conn):
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00,
+                                 category_id=cat)
+    ledger.set_tags(conn, txn, ["7344 Muirfield"])
+
+    assert ledger.toggle_report_exclusion(conn, "Rents received", txn) is True
+    assert ledger.get_tags(conn, txn) == ["7344 Muirfield", "!Rents received"]
+    # The cache the legacy readers use stays in step.
+    assert conn.execute("SELECT tag FROM transactions WHERE id = ?",
+                        (txn,)).fetchone()[0] == \
+        "7344 Muirfield, !Rents received"
+
+    assert ledger.toggle_report_exclusion(conn, "Rents received", txn) is False
+    assert ledger.get_tags(conn, txn) == ["7344 Muirfield"]
+
+
+def test_exclusion_matching_is_case_insensitive(conn):
+    """``tags.name`` collates NOCASE, so one spelling must toggle the other or a
+    line could collect two exclusions that look like one."""
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 100_00,
+                                 category_id=cat)
+    ledger.set_tags(conn, txn, ["!rents received"])
+    assert ledger.toggle_report_exclusion(conn, "Rents received", txn) is False
+    assert ledger.get_tags(conn, txn) == []
+
+
+def test_an_untagged_split_leg_takes_the_exclusion_on_its_own(conn):
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00)
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": 600_00},
+        {"category_id": cat, "amount": 400_00},
+    ])
+    legs = ledger.get_splits(conn, txn)
+    assert ledger.toggle_report_exclusion(
+        conn, "Rents received", txn, legs[0]["id"]) is True
+    assert ledger.split_leg_tag(conn, legs[0]["id"]) == "!Rents received"
+    # Only that leg, and never the parent.
+    assert ledger.split_leg_tag(conn, legs[1]["id"]) is None
+    assert ledger.get_tags(conn, txn) == []
+
+    assert ledger.toggle_report_exclusion(
+        conn, "Rents received", txn, legs[0]["id"]) is False
+    assert ledger.split_leg_tag(conn, legs[0]["id"]) is None
+
+
+def test_a_tagged_split_leg_refuses_and_names_the_tag_in_the_way(conn):
+    """A leg holds ONE tag. Overwriting the property tag would destroy the very
+    attribution that put the line in the report."""
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00)
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": 600_00, "tag": "7344 Muirfield"},
+        {"category_id": cat, "amount": 400_00},
+    ])
+    legs = ledger.get_splits(conn, txn)
+    with pytest.raises(ValueError) as err:
+        ledger.toggle_report_exclusion(conn, "Rents received", txn,
+                                       legs[0]["id"])
+    assert "7344 Muirfield" in str(err.value)
+    assert "only one tag" in str(err.value)
+    assert ledger.split_leg_tag(conn, legs[0]["id"]) == "7344 Muirfield"
+
+
+def test_a_parent_with_tagged_legs_refuses_the_whole_transaction(conn):
+    """The parent's tags are the union applied to every leg, so an exclusion
+    there would drop legs a per-leg tag deliberately pulled in."""
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00)
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": 600_00, "tag": "7344 Muirfield"},
+        {"category_id": cat, "amount": 400_00},
+    ])
+    with pytest.raises(ValueError) as err:
+        ledger.toggle_report_exclusion(conn, "Rents received", txn)
+    assert "7344 Muirfield" in str(err.value)
+    assert "split line instead" in str(err.value)
+    assert ledger.get_tags(conn, txn) == []
+
+
+def test_a_split_with_no_tagged_legs_can_be_excluded_whole(conn):
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00)
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": 600_00},
+        {"category_id": cat, "amount": 400_00},
+    ])
+    assert ledger.toggle_report_exclusion(conn, "Rents received", txn) is True
+    assert ledger.get_tags(conn, txn) == ["!Rents received"]
+
+
+def test_set_split_tag_moves_one_column_and_leaves_the_siblings(conn):
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 1000_00)
+    ledger.set_splits(conn, txn, [
+        {"category_id": cat, "amount": 600_00, "tag": "7344 Muirfield"},
+        {"category_id": cat, "amount": 400_00, "tag": "6054 Mapleview"},
+    ])
+    legs = ledger.get_splits(conn, txn)
+    ledger.set_split_tag(conn, legs[0]["id"], "Renamed")
+    assert ledger.split_leg_tag(conn, legs[0]["id"]) == "Renamed"
+    assert ledger.split_leg_tag(conn, legs[1]["id"]) == "6054 Mapleview"
+    assert [s["amount"] for s in ledger.get_splits(conn, txn)] == \
+        [600_00, 400_00]
+    ledger.set_split_tag(conn, legs[0]["id"], None)
+    assert ledger.split_leg_tag(conn, legs[0]["id"]) is None
+
+
+def test_the_toggle_refuses_a_row_that_is_not_there(conn):
+    with pytest.raises(KeyError):
+        ledger.toggle_report_exclusion(conn, "Rents received", 9999)
+    with pytest.raises(KeyError):
+        ledger.set_split_tag(conn, 9999, "x")
+
+
+def test_a_comma_in_the_item_name_refuses_the_exclusion(conn):
+    """``transactions.tag`` is comma-joined, so ``!Div inc., non-taxable`` would
+    be read back as TWO tags -- an exclusion matching nothing, plus a junk tag in
+    the user's vocabulary. Fourteen lines of the packaged Quicken tax definition
+    have a comma in the name, so this is the common case, not a corner."""
+    acct, cat = _toggle_fixture(conn)
+    txn = ledger.add_transaction(conn, acct, "2025-03-01", 100_00,
+                                 category_id=cat)
+    with pytest.raises(ValueError) as err:
+        ledger.toggle_report_exclusion(conn, "Div inc., non-taxable", txn)
+    assert "comma" in str(err.value)
+    # Nothing was written -- not the exclusion, and not a stray tag either.
+    assert ledger.get_tags(conn, txn) == []
+    assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0

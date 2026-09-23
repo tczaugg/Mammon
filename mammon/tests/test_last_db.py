@@ -18,6 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import app, db, last_db, mcp_server, paths
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +32,7 @@ def data_dir(tmp_path, monkeypatch):
 def ledger_file(tmp_path):
     p = tmp_path / "elsewhere" / "household.db"
     p.parent.mkdir()
-    db.init_db(p).close()
+    fresh_db(p).close()
     return p
 
 
@@ -159,7 +160,7 @@ def qapp(tmp_path):
 def test_open_database_reports_the_switch_to_the_hook(qapp, tmp_path, ledger_file):
     from mammon.ui.widgets import MainWindow
     first = tmp_path / "first.db"
-    conn = db.init_db(first)
+    conn = fresh_db(first)
     opened = []
     win = MainWindow(conn, db_path=str(first), on_database_opened=opened.append)
     try:
@@ -175,7 +176,7 @@ def test_a_window_without_the_hook_writes_no_pointer(qapp, tmp_path, data_dir,
     """Every test builds MainWindow this way. None of them may move the default."""
     from mammon.ui.widgets import MainWindow
     first = tmp_path / "first.db"
-    conn = db.init_db(first)
+    conn = fresh_db(first)
     win = MainWindow(conn, db_path=str(first))
     try:
         win.open_database(str(ledger_file))
@@ -189,7 +190,7 @@ def test_a_window_without_the_hook_writes_no_pointer(qapp, tmp_path, data_dir,
 def test_a_failing_hook_does_not_stop_the_switch(qapp, tmp_path, ledger_file):
     from mammon.ui.widgets import MainWindow
     first = tmp_path / "first.db"
-    conn = db.init_db(first)
+    conn = fresh_db(first)
 
     def broken(path):
         raise OSError("disk full")

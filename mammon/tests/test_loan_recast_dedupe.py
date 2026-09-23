@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, ledger, loans, loans_schedule
+from mammon.tests import fresh_db
 
 # A small synthetic fixed-rate loan.
 PRINCIPAL = 300_000_00
@@ -32,7 +33,7 @@ PAYMENT = PI_PAYMENT + ESCROW
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "loans.db")
+    c = fresh_db(tmp_path / "loans.db")
     yield c
     c.close()
 
@@ -189,7 +190,7 @@ def test_v21_dedupe_collapses_doubled_loan_rows(tmp_path):
     conn.close()
 
     # Trigger the in-place _V21 upgrade.
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
 
     def loan_rows_on(date):
@@ -230,7 +231,7 @@ def test_v21_dedupe_collapses_doubled_loan_rows(tmp_path):
         "SELECT COUNT(*) c FROM transactions WHERE account_id=?", (loan,)
     ).fetchone()["c"]
     conn.close()
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     assert conn.execute(
         "SELECT COUNT(*) c FROM transactions WHERE account_id=?", (loan,)
     ).fetchone()["c"] == after

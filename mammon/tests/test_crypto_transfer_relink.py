@@ -34,13 +34,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import crypto, db, ledger
+from mammon.tests import fresh_db
 
 MOVE = 250000        # $2,500.00 -- the amount that crosses, in cents
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_transfer_relink.db")
+    c = fresh_db(tmp_path / "crypto_transfer_relink.db")
     yield c
     c.close()
 

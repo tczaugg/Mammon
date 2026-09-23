@@ -13,6 +13,7 @@ import pytest
 from mammon import (budgets, crypto, db, instruments, investments, ledger, loans,
                     mcp_server, mcp_tools, portfolio, rebalance, scheduled,
                     securities, sqldriver)
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def dbfile(tmp_path):
 
 @pytest.fixture
 def conn(dbfile):
-    c = db.init_db(dbfile)
+    c = fresh_db(dbfile)
     yield c
     c.close()
 

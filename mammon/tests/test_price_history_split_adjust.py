@@ -31,11 +31,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, investments, ledger
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pricesplit.db")
+    c = fresh_db(tmp_path / "pricesplit.db")
     yield c
     c.close()
 

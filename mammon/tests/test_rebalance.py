@@ -17,11 +17,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import asset_values, db, investments, ledger, portfolio, rebalance
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rebalance.db")
+    c = fresh_db(tmp_path / "rebalance.db")
     yield c
     c.close()
 
@@ -83,8 +84,9 @@ def test_impossible_targets_are_refused(conn):
     for bad in (-1, 101, "abc"):
         with pytest.raises(ValueError):
             rebalance.set_line(conn, tid, "bond", bad)
+    rebalance.set_line(conn, tid, "crypto", 10)              # an asset class now
     with pytest.raises(ValueError):
-        rebalance.set_line(conn, tid, "crypto", 10)          # not an asset class
+        rebalance.set_line(conn, tid, "tulips", 10)          # not an asset class
     with pytest.raises(ValueError):
         rebalance.create_target(conn, "  ")                  # needs a name
     with pytest.raises(ValueError):
@@ -188,7 +190,7 @@ def test_drift_needs_a_target_and_survives_an_empty_sleeve(conn, world):
     with pytest.raises(ValueError, match="no allocation target"):
         rebalance.drift(conn, as_of=AS_OF)
 
-    empty = db.init_db(":memory:")
+    empty = fresh_db(":memory:")
     ledger.create_account(empty, "Brokerage", "investment", opening_balance=0)
     rebalance.create_target(empty, "T", lines={"domestic_stock": 100}, active=True)
     r = rebalance.drift(empty, as_of=AS_OF)
@@ -239,7 +241,7 @@ def test_target_from_current_forces_the_rounding_remainder_to_land(conn):
     assert rebalance.target_total(conn, tid) == Decimal("100")
 
     with pytest.raises(ValueError, match="nothing in the sleeve"):
-        rebalance.target_from_current(db.init_db(":memory:"), "X")
+        rebalance.target_from_current(fresh_db(":memory:"), "X")
 
 
 def test_rebalance_never_writes_a_transaction(conn, world):
@@ -326,7 +328,13 @@ def test_cash_is_never_sold(conn, world):
     r = rebalance.drift(conn, as_of=AS_OF)
     rows = {row.asset_class: row for row in r.rows}
     assert rows["cash"].move_cents < 0            # 10% held vs 5% target: overweight
-    assert rows["cash"].action == "invest"        # deploy the surplus...
+    # "spend", not "invest": every other row's verb acts on THAT row's class,
+    # so "Invest" on the cash row read as an instruction to invest INTO cash
+    # (reported). It pairs with "raise" as its plain opposite.
+    assert rows["cash"].action == "spend"         # deploy the surplus...
+    assert rebalance.action_label("spend") == "Spend"
+    assert rebalance.action_label("raise") == "Raise"
+    assert "never bought" in rebalance.CASH_ACTION_NOTE["spend"]
     assert rows["cash"].action != "sell"          # ...never sell cash
     # A security class is unaffected: still a plain Sell when overweight.
     assert rows["domestic_stock"].move_cents < 0

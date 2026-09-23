@@ -50,6 +50,7 @@ from mammon.ui.report_window import (
     tree_rows_to_html,
 )
 from mammon.ui.models import fmt_cents, fmt_date
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -245,7 +246,7 @@ def _win(conn, spec):
 ])
 def test_report_window_constructs_for_each_spec(qapp, tmp_path, spec):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, spec)
@@ -267,7 +268,7 @@ def test_report_window_constructs_for_each_spec(qapp, tmp_path, spec):
 
 def test_report_window_defaults_to_cash_flow(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     # The historical one-arg call still opens Cash Flow (regression guard).
@@ -284,7 +285,7 @@ def test_report_window_defaults_to_cash_flow(qapp, tmp_path):
 
 def test_generalized_window_export_csv_matches_serializer(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, BY_PAYEE_SPEC)
@@ -303,7 +304,7 @@ def test_generalized_window_export_csv_matches_serializer(qapp, tmp_path):
 
 def test_generalized_window_export_html_matches_serializer(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, INCOME_EXPENSE_SPEC)
@@ -320,7 +321,7 @@ def test_generalized_window_export_html_matches_serializer(qapp, tmp_path):
 
 def test_generalized_window_print_to_pdf_writes_pdf(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, ACCOUNT_BALANCES_SPEC)
@@ -350,7 +351,7 @@ def test_report_export_html_is_white_under_dark_theme(qapp, monkeypatch):
 
     assert "background: #ffffff" in html
     assert "color: #000000" in html
-    # No dark-palette colour may leak into the print/export artifact.
+    # No dark-palette color may leak into the print/export artifact.
     assert style.DARK["window"] not in html
     assert style.DARK["text"] not in html
 
@@ -361,7 +362,7 @@ def test_report_print_to_pdf_stays_white_under_dark_theme(qapp, tmp_path, monkey
     from mammon.app import sample_data
     from mammon.ui import style
 
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
     monkeypatch.setattr(style, "theme", lambda: "dark")
 
@@ -381,7 +382,7 @@ def test_report_print_to_pdf_stays_white_under_dark_theme(qapp, tmp_path, monkey
 
 def test_default_filename_derives_from_title(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, INCOME_EXPENSE_SPEC)
@@ -395,7 +396,7 @@ def test_default_filename_derives_from_title(qapp, tmp_path):
 
 def test_account_balances_spec_shows_the_account_checklist(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, ACCOUNT_BALANCES_SPEC)
@@ -431,7 +432,7 @@ def test_customization_controls_live_behind_the_gear(qapp, tmp_path):
     from PyQt5.QtWidgets import QToolButton
     from mammon.app import sample_data
     from mammon.ui.report_filters import CustomizeDialog, ReportFilterBar
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, INCOME_EXPENSE_SPEC)
@@ -478,7 +479,7 @@ def test_period_dropdown_options_and_default(qapp, tmp_path):
     report answers 'how am I doing this year' without a trip to the dropdown."""
     from PyQt5.QtWidgets import QComboBox
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, CASH_FLOW_SPEC)
@@ -500,7 +501,7 @@ def test_period_dropdown_is_identical_across_reports(qapp, tmp_path):
     report: Cash Flow, Income vs Expense, By Payee, Transactions and Account
     Balances all offer exactly the same options."""
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
     try:
         for spec in (CASH_FLOW_SPEC, INCOME_EXPENSE_SPEC, BY_PAYEE_SPEC,
@@ -522,7 +523,7 @@ def test_period_preset_reranges_and_refreshes(qapp, tmp_path):
     from datetime import date
     from mammon.reports.spending import preset_range
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, CASH_FLOW_SPEC)
@@ -543,7 +544,7 @@ def test_period_custom_opens_the_gear(qapp, tmp_path):
     explicit range. Driven through the overridable ``_open_customize`` seam so no
     modal ``exec_()`` blocks under the offscreen platform."""
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, CASH_FLOW_SPEC)
@@ -566,7 +567,7 @@ def test_saved_filter_controls_live_in_the_gear(qapp, tmp_path):
     from PyQt5.QtWidgets import QComboBox
     from mammon.ui.report_filters import CustomizeDialog
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, CASH_FLOW_SPEC)
@@ -593,7 +594,7 @@ def test_itemize_report_drills_down_with_correct_headers(qapp, tmp_path):
     Date header no longer sits mislabeled over the category column (the migration
     regression). It never falls back to the shared three-column header."""
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, ITEMIZE_SPEC)
@@ -626,7 +627,7 @@ def test_itemize_report_offers_csv_html_pdf_export(qapp, tmp_path):
     -- reusing the one serializer + print seam, now driven with its two-column set
     -- rather than the old Close-only dialog with no export at all."""
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, ITEMIZE_SPEC)
@@ -668,7 +669,7 @@ def test_income_expense_shows_end_date_centered_in_header(qapp, tmp_path):
     from datetime import date
     from mammon.app import sample_data
     from mammon.reports.spending import preset_range
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, INCOME_EXPENSE_SPEC)
@@ -700,7 +701,7 @@ def test_other_reports_have_no_end_date_label(qapp, tmp_path):
     label at all -- the field defaults False and only INCOME_EXPENSE_SPEC
     turns it on."""
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = _win(conn, CASH_FLOW_SPEC)

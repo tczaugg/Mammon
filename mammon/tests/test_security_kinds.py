@@ -22,6 +22,7 @@ import pytest
 
 from mammon import db, instruments, investments, ledger, portfolio, securities
 from mammon.investments import Quote
+from mammon.tests import fresh_db
 
 EQUITY = "ZZZT"                    # an ordinary listed stock, kind left NULL
 PLAN = "INTL EQUITY INDEX"         # tickerless plan fund, kind='mutual_fund'
@@ -54,7 +55,7 @@ class RecordingSource:
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "kinds.db")
+    c = fresh_db(tmp_path / "kinds.db")
     yield c
     c.close()
 

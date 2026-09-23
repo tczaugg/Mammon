@@ -19,6 +19,7 @@ from mammon.ui.models import RegisterModel
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import QDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -36,7 +37,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "reg.db")
+    c = fresh_db(tmp_path / "reg.db")
     yield c
     c.close()
 

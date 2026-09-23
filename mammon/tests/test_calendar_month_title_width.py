@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import QApplication
 from mammon import db, ledger
 from mammon.ui import prefs
 from mammon.ui.projection_dialogs import CalendarPanel
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 
@@ -42,7 +43,7 @@ def _isolated_settings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "caltitle.db")
+    c = fresh_db(tmp_path / "caltitle.db")
     ledger.create_account(c, "Checking", "checking", opening_balance=1000_00)
     ledger.create_account(c, "Savings", "savings", opening_balance=500_00)
     yield c

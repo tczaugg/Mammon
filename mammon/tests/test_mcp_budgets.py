@@ -16,6 +16,7 @@ import sqlite3
 import pytest
 
 from mammon import budgets, db, ledger, mcp_server, mcp_tools, sqldriver
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -25,7 +26,7 @@ def dbfile(tmp_path):
 
 @pytest.fixture
 def conn(dbfile):
-    c = db.init_db(dbfile)
+    c = fresh_db(dbfile)
     yield c
     c.close()
 

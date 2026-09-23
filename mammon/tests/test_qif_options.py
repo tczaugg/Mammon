@@ -35,11 +35,12 @@ import pytest
 from mammon import db, importers, instruments, ledger, securities
 from mammon.importers import csvimp
 from mammon.importers.record import derive_investment_amounts
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     ledger.create_account(c, "Brokerage", "investment", opening_balance=0)
     yield c
     c.close()

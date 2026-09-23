@@ -36,6 +36,7 @@ from mammon.ui.report_window import (
     report_rows_to_csv,
     report_rows_to_html,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -105,7 +106,7 @@ def test_by_payee_html_header_is_payee_first():
 
 def test_by_payee_window_table_is_payee_first(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = ReportWindow(conn, spec=BY_PAYEE_SPEC)
@@ -140,7 +141,7 @@ def test_by_payee_window_keeps_period_gear_and_export(qapp, tmp_path):
     CSV / HTML / PDF export controls remain intact on the By-Payee window."""
     from PyQt5.QtWidgets import QComboBox, QToolButton
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "gen.db")
+    conn = fresh_db(tmp_path / "gen.db")
     sample_data(conn)
 
     win = ReportWindow(conn, spec=BY_PAYEE_SPEC)
@@ -167,7 +168,7 @@ def test_by_payee_window_runs_net_so_an_employer_is_not_summed_backwards(
     from mammon import ledger
     from mammon.ui.report_filters import ReportFilterBar
 
-    conn = db.init_db(tmp_path / "net.db")
+    conn = fresh_db(tmp_path / "net.db")
     chk = ledger.create_account(conn, "Checking", "checking", opening_balance=0)
     plan = ledger.create_account(conn, "Plan 401K", "savings", opening_balance=0)
     salary = ledger.resolve_category(conn, "Salary")

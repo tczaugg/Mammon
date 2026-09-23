@@ -8,7 +8,7 @@ manually-entered date with the bank's posting date (the exact failure users
 report of other tools).
 
 ``mammon.import_review.accept_match`` is the sole writer of this path; these tests
-assert (1) the behaviour at that seam and (2) that ``ImportReviewPanel`` surfaces
+assert (1) the behavior at that seam and (2) that ``ImportReviewPanel`` surfaces
 the policy per matched row so it is inspectable rather than implicit. All data
 here is synthetic.
 """
@@ -22,11 +22,12 @@ import pytest
 
 from mammon import db, import_review, ledger
 from mammon.import_review import build_review
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -53,7 +54,7 @@ def _isolate_qsettings(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# behaviour: a match never overwrites a user-entered field
+# behavior: a match never overwrites a user-entered field
 # ---------------------------------------------------------------------------
 def test_matching_accept_does_not_overwrite_user_edited_fields(conn, account):
     """A hand-entered register line is matched by an incoming download whose

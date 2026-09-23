@@ -28,6 +28,7 @@ import pytest
 
 from mammon import crypto, db, ledger
 from mammon.importers import crypto_csv, crypto_core
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etherscan_eth_2020.csv"
 
@@ -53,7 +54,7 @@ def _csv(*rows):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_import.db")
+    c = fresh_db(tmp_path / "crypto_import.db")
     yield c
     c.close()
 

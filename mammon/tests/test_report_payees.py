@@ -7,11 +7,12 @@ import pytest
 
 from mammon import db, ledger
 from mammon.reports import payees
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "payees.db")
+    c = fresh_db(tmp_path / "payees.db")
     yield c
     c.close()
 
@@ -92,7 +93,7 @@ def test_by_payee_bills_a_split_to_its_payee_at_the_parents_amount(conn):
     assert _rows(net) == [("Acme Corp.", 1, 2800_00)]
 
     # You paid your employer nothing: the withholding is a category fact, not a
-    # payment to them. The old behaviour reported 900.00 here.
+    # payment to them. The old behavior reported 900.00 here.
     out = payees.by_payee(conn, "2026-01-01", "2026-01-31")
     assert _rows(out) == []
     assert out.total == 0

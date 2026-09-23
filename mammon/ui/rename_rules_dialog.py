@@ -30,7 +30,7 @@ class RenameRulesDialog(QDialog):
     """Per-payee applied/overridden report over the learned rename tree.
 
     ``changed`` fires whenever a payee is forgotten so the owner can refresh
-    anything that depends on renaming behaviour.
+    anything that depends on renaming behavior.
     """
 
     changed = pyqtSignal()

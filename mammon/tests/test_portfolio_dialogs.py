@@ -18,6 +18,7 @@ from mammon.ui.portfolio_dialogs import (AllocationDialog, CapitalGainsDialog,
                                          LotsDialog, PerformanceDialog,
                                          SpecifyLotsDialog)
 from mammon.ui.widgets import InvestmentRegisterWidget
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +37,7 @@ def _isolated_settings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pdialogs.db")
+    c = fresh_db(tmp_path / "pdialogs.db")
     yield c
     c.close()
 

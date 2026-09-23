@@ -30,6 +30,7 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, instruments, investments, ledger, securities
+from mammon.tests import fresh_db
 
 # One synthetic issuer, two OSI contracts on it, and one cash-settled index
 # contract. None of these is a real ticker.
@@ -46,7 +47,7 @@ LONG_AGO = "2024-06-03"                 # > 1 year before EXPIRY, for term tests
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "lifecycle.db")
+    c = fresh_db(tmp_path / "lifecycle.db")
     yield c
     c.close()
 

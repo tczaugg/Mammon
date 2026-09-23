@@ -17,11 +17,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import category_rules, db, ledger, transfer_rules
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

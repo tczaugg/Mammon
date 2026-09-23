@@ -50,7 +50,13 @@ from mammon import ledger
 class Line:
     """One attributable money line. ``amount`` is signed cents (negative = out).
     ``category_id`` is None for uncategorized money and for a transfer leg,
-    which carries ``transfer_account_id`` instead."""
+    which carries ``transfer_account_id`` instead.
+
+    ``split_id`` is the ``splits`` row this line came from, or ``None`` for a
+    whole transaction. It exists so a caller that wants to WRITE back to the
+    exact line it is showing (the custom report's exclusion toggle) can address
+    the leg rather than guessing which of a split's legs it meant -- a leg holds
+    its own single ``tag_id``, so "the leg" is a real, addressable thing."""
 
     txn_id: int
     date: str
@@ -62,6 +68,7 @@ class Line:
     memo: str
     transfer_account_id: Optional[int]
     is_split_line: bool
+    split_id: Optional[int] = None
 
 
 def validate_date(date: str) -> None:
@@ -126,7 +133,7 @@ def signed_lines(conn, start: str, end: str, acct_list: list[int], *,
                 split_parents.add(int(s["transaction_id"]))
             continue
         for s in conn.execute(
-            f"SELECT s.transaction_id, s.category_id, s.amount, s.memo, "
+            f"SELECT s.id, s.transaction_id, s.category_id, s.amount, s.memo, "
             f"s.transfer_account_id, g.name AS tag "
             f"FROM splits s LEFT JOIN tags g ON g.id = s.tag_id "
             f"WHERE s.transaction_id IN ({cmarks}) ORDER BY s.id", chunk,
@@ -156,7 +163,7 @@ def signed_lines(conn, start: str, end: str, acct_list: list[int], *,
                     amount=int(s["amount"]), payee=t["payee"] or "",
                     tag=_line_tags(t["tag"], s["tag"]),
                     memo=s["memo"] or t["memo"] or "", transfer_account_id=taid,
-                    is_split_line=True))
+                    is_split_line=True, split_id=int(s["id"])))
         else:
             taid = t["transfer_account_id"]
             # A collapsed SPLIT is kept whatever the parent carries: it is a real
@@ -189,6 +196,22 @@ def _line_tags(parent_tag, leg_tag) -> str:
         if name.casefold() not in {n.casefold() for n in names}:
             names.append(name)
     return ledger.format_tags(names)
+
+
+def effective_tags(line: Line) -> set[str]:
+    """The EFFECTIVE TAG SET of one line, case-folded for matching.
+
+    This is only a reader of what :func:`signed_lines` already built, exposed so
+    a report can ask the question without re-deriving it: ``Line.tag`` is the
+    parent transaction's tags for an unsplit row, and for a split leg the union
+    of the parent's tags and the leg's own :func:`_line_tags` -- the union, NOT
+    the parent's set folded back onto every sibling, which over-counted a real
+    ledger by 2.6x (SRD compartment F).
+
+    Folded because ``tags.name`` is ``COLLATE NOCASE``: ``TX-1040:LINE 20`` and
+    ``TX-1040:line 20`` are one tag in storage and must be one tag in a match.
+    """
+    return {name.casefold() for name in ledger.parse_tags(line.tag)}
 
 
 def category_paths(conn) -> dict[int, str]:

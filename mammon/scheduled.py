@@ -108,6 +108,25 @@ def _advance_semimonthly(s: str) -> str:
     return _date(y, m, min(day, _last_day(y, m))).isoformat()
 
 
+def _semimonthly_back(s: str) -> str:
+    """The semimonthly date immediately BEFORE ``s`` -- the inverse of
+    ``_advance_semimonthly``, found by trying the only spacings a semimonthly
+    pair can have (13 days, 16th -> 1st across February, up to 16, the 15th ->
+    a 31-day month's last day) and keeping the candidate that advances back to
+    ``s``. Inverting by trial keeps this in step with ``_advance_semimonthly``
+    by construction: the day-of-month rules live in exactly one function, so a
+    change there cannot leave the inverse quietly wrong. The shortest spacing
+    wins, which picks the 15th (not the 13th) as February's predecessor of the
+    28th, the pairing the forward rule means. Used by ``predictions.fit_period``
+    to lay a semimonthly grid backwards from a run's last date."""
+    d = _iso_to_date(s)
+    for back in range(13, 18):
+        c = (d - timedelta(days=back)).isoformat()
+        if _advance_semimonthly(c) == s:
+            return c
+    return (d - timedelta(days=15)).isoformat()      # unreachable in practice
+
+
 def advance_date(s: str, frequency: str) -> str:
     """The date one ``frequency`` period after ISO date ``s``."""
     f = _valid_frequency(frequency)
@@ -622,7 +641,15 @@ def ensure_due_pre_entries(conn, sid: int, as_of_date: str, *,
 # (label, days per period, tolerance in days): the intervals a run of dates is
 # tested against, and how far one gap may stray from it (a monthly bill posts
 # on the 1st one month and the 3rd the next; a payday is every other Friday).
-_INTERVAL_TESTS = (("weekly", 7, 2), ("biweekly", 14, 3), ("monthly", 30.44, 6),
+# semimonthly is 365.25/24 days and its real gaps run 13 (the 16th to the 1st
+# across February) to 16 (the 15th to a 31-day month's last day), so it needs a
+# 3-day tolerance -- the same as biweekly's, and it does NOT steal biweekly's
+# runs: a candidate is chosen by which row the MEDIAN gap is nearest, and a
+# median of 14 is 0 from biweekly and 1.22 from semimonthly. A median of 15 or
+# more is the twice-a-month paycheck it looks like. Do not reorder or widen a
+# row: every boundary here is a midpoint between two rows.
+_INTERVAL_TESTS = (("weekly", 7, 2), ("biweekly", 14, 3), ("semimonthly", 15.22, 3),
+                   ("monthly", 30.44, 6),
                    ("quarterly", 91.3, 12), ("semiannual", 182.6, 20),
                    ("annual", 365.25, 30))
 
@@ -630,7 +657,11 @@ _INTERVAL_TESTS = (("weekly", 7, 2), ("biweekly", 14, 3), ("monthly", 30.44, 6),
 def _classify_gaps(gaps: list) -> Optional[str]:
     """The recurrence a run of day-gaps fits, or None: the interval nearest
     the median gap, provided at least three quarters of the gaps sit within
-    its tolerance."""
+    its tolerance. Semimonthly needs no special case here even though it is not
+    a flat interval: every gap it produces (13 to 16 days) is within 3 of
+    15.22, so testing gaps one at a time already recognizes it. Only
+    ``predictions.fit_period``, which measures a whole run against one grid,
+    has to build the semimonthly grid from the calendar."""
     if not gaps:
         return None
     s = sorted(gaps)

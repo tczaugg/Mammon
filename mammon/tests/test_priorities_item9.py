@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import QApplication
 
 from mammon import db, ledger
 from mammon.ui.models import RegisterModel
+from mammon.tests import fresh_db
 
 R = RegisterModel
 
@@ -49,7 +50,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def conn(db_path):
-    c = db.init_db(db_path)
+    c = fresh_db(db_path)
     yield c
     c.close()
 
@@ -105,7 +106,7 @@ def test_order_is_stable_across_reopen(conn, account, db_path):
     for i in range(5):
         ledger.add_transaction(conn, account, "2026-06-15", -(i + 1) * 100, payee=f"P{i}")
     before = _ids(ledger.register_rows(conn, account))
-    c2 = db.init_db(db_path)  # init_db is idempotent; opens the same file
+    c2 = fresh_db(db_path)  # init_db is idempotent; opens the same file
     try:
         assert _ids(ledger.register_rows(c2, account)) == before
     finally:

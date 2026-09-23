@@ -1,6 +1,6 @@
 """QuickFill (parity roadmap, item 1): the register completes a payee from its
 own history and pre-enters that payee's last category, memo, tag and amount
-into a NEW transaction -- Quicken's memorized-payee behaviour, derived from the
+into a NEW transaction -- Quicken's memorized-payee behavior, derived from the
 ledger itself rather than a separately maintained list.
 
 Three things are locked in here and were each wrong before:
@@ -31,6 +31,7 @@ from mammon.ui.delegates import (PayeeCompleter, _accept_active_completion,
                                  payee_completions)
 from mammon.ui.models import RegisterModel, fmt_cents
 from mammon.ui.widgets import RegisterWidget, TransactionDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -40,7 +41,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "quickfill.db")
+    c = fresh_db(tmp_path / "quickfill.db")
     yield c
     c.close()
 

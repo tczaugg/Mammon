@@ -34,6 +34,7 @@ from mammon.ui.models import (
 from mammon.ui.widgets import CryptoHoldingsDialog, CryptoRegisterWidget
 
 from PyQt5.QtCore import Qt
+from mammon.tests import fresh_db
 
 
 # --------------------------------------------------------------------------
@@ -55,7 +56,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_ui.db")
+    c = fresh_db(tmp_path / "crypto_ui.db")
     yield c
     c.close()
 

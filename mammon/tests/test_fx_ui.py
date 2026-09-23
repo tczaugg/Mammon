@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 from mammon import db, fx, ledger
 from mammon.ui.fx_rates_dialog import FxRateEditor, FxRatesDialog
 from mammon.ui.models import AccountsModel
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -41,7 +42,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "fx_ui.db")
+    c = fresh_db(tmp_path / "fx_ui.db")
     yield c
     c.close()
 
@@ -157,7 +158,7 @@ def test_refresh_with_only_base_accounts_writes_nothing(conn, monkeypatch):
 # ---------------------------------------------------------------------------
 # the editor refuses a bad rate rather than writing a zero/nonsense one
 # ---------------------------------------------------------------------------
-def test_editor_refuses_bad_input_and_normalises_good(conn, monkeypatch):
+def test_editor_refuses_bad_input_and_normalizes_good(conn, monkeypatch):
     warned = []
     monkeypatch.setattr(QMessageBox, "warning",
                         staticmethod(lambda *a, **k: warned.append(a[2])))

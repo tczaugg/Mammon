@@ -2,7 +2,7 @@
 
 All three category pies -- Spending by Category, Income by Category and Asset
 Allocation -- share ``ui/charts.SlicesPieCanvas`` and its ``group_small_slices``
-helper. This pins the three behaviours the helper must guarantee for every one
+helper. This pins the three behaviors the helper must guarantee for every one
 of them:
 
 1. ``Other`` is the SET OF LOWEST-share categories that together reach 10% of
@@ -27,11 +27,12 @@ import pytest
 
 from mammon import db, ledger, reports
 from mammon.ui.charts import SlicesPieCanvas, group_small_slices
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "pie_rollup.db")
+    c = fresh_db(tmp_path / "pie_rollup.db")
     yield c
     c.close()
 

@@ -3,8 +3,8 @@
 Where :mod:`mammon.reports.spending` reports money OUT only (expenses as positive
 magnitudes), this report lists ALL categories together -- income and expense --
 each carrying its actual SIGNED net over the period. Income categories net
-positive (shown without a sign, coloured green by the GUI); expense categories
-net negative (shown with a leading minus, coloured red). Totals sum the signed
+positive (shown without a sign, colored green by the GUI); expense categories
+net negative (shown with a leading minus, colored red). Totals sum the signed
 values, so the grand total is the period's net cash flow across categories.
 
 Ordering follows :mod:`mammon.category_types`: INCOME categories first, then

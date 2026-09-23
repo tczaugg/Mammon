@@ -31,6 +31,7 @@ from mammon import db, investments, ledger, securities
 from mammon.ui.securities_dialog import (
     SecuritiesDialog, DESCRIPTION, INCLUDE, STATUS,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -41,7 +42,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "seccase.db")
+    c = fresh_db(tmp_path / "seccase.db")
     yield c
     c.close()
 

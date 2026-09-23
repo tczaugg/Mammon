@@ -343,7 +343,7 @@ def looks_like_option(*texts) -> bool:
     rendering -- and "no" to everything else, including pre-2010 OPRA symbols
     (``IBMAF``) and broker prose (``XYZ 01/17/2026 150.00 C``). Those are false
     NEGATIVES on purpose: every caller uses this to REFUSE an action, so a miss
-    leaves today's behaviour and a false positive would block a legitimate
+    leaves today's behavior and a false positive would block a legitimate
     rename.
 
     It exists because :func:`ticker_of` cannot tell a contract from its
@@ -1187,6 +1187,19 @@ def _add_year(d: _dt.date) -> _dt.date:
         return d.replace(year=d.year + 1, day=28)
 
 
+def long_term_date(acquired: str) -> str:
+    """The first date on which shares acquired on ``acquired`` (ISO) are
+    LONG-term: the anniversary plus one day.
+
+    This is the SAME rule :attr:`RealizedGain.term` applies -- long when the sale
+    falls strictly AFTER the anniversary -- expressed as a date instead of a
+    verdict, so a report that counts the days down to long-term treatment can
+    never disagree with the term the realized-gain rows report. Do not restate
+    the holding period anywhere else; call this."""
+    return (_add_year(_dt.date.fromisoformat(acquired))
+            + _dt.timedelta(days=1)).isoformat()
+
+
 @dataclass
 class RealizedGain:
     """One sale matched to one lot -- what the tax form asks for: when the
@@ -1345,7 +1358,7 @@ def _relieve_short(pos, q: Decimal) -> list:
     ``pos.qty`` is left to the caller, exactly as :func:`_relieve` does. Falls
     back to the aggregate average when no short lot history exists (a ShtSell
     from before this vocabulary, or a snapshot seeded position), which reproduces
-    the pre-existing average-credit behaviour to the cent."""
+    the pre-existing average-credit behavior to the cent."""
     if q <= 0 or pos.qty >= 0:
         return []
     q = min(q, -pos.qty)
@@ -1544,7 +1557,7 @@ def _apply_txn(positions: dict, t, method: str = "average", assignments=None) ->
             # the date it was written on. Short is the normal direction for an
             # option, so "the position average" is not good enough here. ShtSell
             # is deliberately excluded: an equity short keeps the lot-less
-            # average behaviour it has always had. A negative lot is inert to the
+            # average behavior it has always had. A negative lot is inert to the
             # rest of the module -- both _spread_cost and _relieve return early
             # while the position quantity is not positive.
             pos.lots.append(_Lot(-q, -credit, t["date"], _row_value(t, "id")))
@@ -1849,6 +1862,44 @@ def compute_holdings(conn, account_id: int, as_of: Optional[str] = None) -> dict
     }
 
 
+@dataclass
+class OpenLot:
+    """One OPEN tax lot of one security in one account -- the public projection
+    of the replay's private ``_Lot``. ``quantity`` is ``Decimal``, ``cost_basis``
+    signed integer cents, ``acquired`` an ISO date or ``None`` when the lot's
+    history is not known (shares restored from a pre-lot-tracking snapshot)."""
+    account_id: int
+    symbol: str
+    quantity: Decimal
+    cost_basis: int                  # cents
+    acquired: Optional[str]          # ISO YYYY-MM-DD, or None if unknown
+    txn_id: Optional[int]            # the acquiring transaction
+
+
+def open_lots(conn, account_id: int, as_of: Optional[str] = None) -> dict:
+    """The account's still-open tax lots as ``{symbol: [OpenLot, ...]}``, oldest
+    acquisition first. Pure read -- a thin projection of :func:`_replay_positions`
+    (the SAME replay behind :func:`compute_holdings` and the Holdings window), so
+    the lots always reconcile: per symbol they sum to that position's quantity and
+    cost basis, whatever the account's lot method did to them.
+
+    :func:`compute_holdings` answers "how much do I hold and what did it cost" --
+    one average-cost figure per symbol, which cannot say WHEN the shares were
+    acquired. Anything that needs the holding period of the shares still on hand
+    (the capital-gains/tax report) needs this instead.
+
+    Lots with a non-positive quantity are omitted: a negative lot is the premium
+    of a WRITTEN option, an obligation rather than shares held, and it has no
+    holding period to run (see :attr:`RealizedGain.term_override`)."""
+    return {
+        sym: [OpenLot(account_id=account_id, symbol=sym, quantity=lot.qty,
+                      cost_basis=lot.cost, acquired=lot.date, txn_id=lot.txn_id)
+              for lot in pos.lots if lot.qty > 0]
+        for sym, pos in _replay_positions(conn, account_id, as_of).items()
+        if any(lot.qty > 0 for lot in pos.lots)
+    }
+
+
 def _states_no_cash(t) -> bool:
     """True for a buy or sell trade whose amount is stated as exactly zero.
 
@@ -1921,7 +1972,7 @@ def rebuild_holdings(conn, account_id: int) -> list[dict]:
         # be re-read from the security registry every time or it survives exactly
         # until the next rebuild -- and a rebuild happens on every import, rename
         # and lot-method change. `securities.name` is the one place it lives;
-        # this column is a denormalised copy for display.
+        # this column is a denormalized copy for display.
         conn.execute(
             "INSERT INTO holdings(account_id, symbol, name, quantity, cost_basis) "
             "VALUES (?,?,(SELECT name FROM securities WHERE symbol=?),?,?)",
@@ -2119,7 +2170,7 @@ def _kind_identity_symbols(conn, symbol) -> list:
     option = instruments.Kind.OPTION.value
     kinds = {s: _stored_kind(conn, s) for s in syms}
     if not any(k == option for k in kinds.values()):
-        return syms                       # today's behaviour, untouched
+        return syms                       # today's behavior, untouched
     want_option = _stored_kind(conn, symbol) == option
     kept = [s for s in syms if (kinds.get(s) == option) == want_option]
     # Never widen back to the fused set when the partition empties: the asked-for
@@ -2219,6 +2270,22 @@ def record_price(conn, symbol: str, date: str, close_price, source: Optional[str
         (symbol, date, _qty_text(_D(close_price)), source),
     )
     conn.commit()
+
+
+def delete_price(conn, symbol: str, date: str) -> bool:
+    """Remove ONE recorded price. Returns True if a row went.
+
+    Deleting is the whole repertoire for a bad quote, deliberately. A price is an
+    OBSERVATION -- what the market closed at on a day -- so "correct" it and the
+    question becomes what the right number was, which nobody in this app is in a
+    position to answer offline; the honest state is then no price for that day,
+    which every valuation already knows how to report (an unpriced holding says
+    so rather than inventing a number). A replacement close comes from the same
+    download path every other price does."""
+    cur = conn.execute("DELETE FROM price_history WHERE symbol = ? AND date = ?",
+                       (symbol, date))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def record_prices(conn, rows) -> int:
@@ -2560,7 +2627,7 @@ def record_prices_if_absent(conn, rows, replace_sources=()) -> int:
     Zero/blank closes are skipped -- a $0 price is not a valid quote.
 
     A row already carrying one of ``replace_sources`` IS overwritten; the
-    default replaces nothing, so every existing caller keeps the behaviour its
+    default replaces nothing, so every existing caller keeps the behavior its
     own docstring promises. :func:`fetch_quote_history` opts in with
     :data:`REFETCHABLE_SOURCES`, because ``DO NOTHING`` for every conflict made
     a downloaded price permanently uncorrectable: a whole history fetched on the
@@ -2844,6 +2911,28 @@ def price_history(conn, symbol: str, as_of: Optional[str] = None) -> list:
             for row in conn.execute(sql, params)]
 
 
+def stored_prices(conn, symbol: str) -> list:
+    """Every recorded price for ``symbol``'s identity, AS STORED, ascending.
+
+    ``[{symbol, date, close_price (Decimal), source}]``. The symbol is per ROW,
+    not the one asked for, because an aliased ticker's series spans both names
+    (:func:`_identity_symbols`) and an editor has to delete the row where it
+    actually lives.
+
+    Deliberately NOT split-adjusted, which is the whole reason this exists beside
+    :func:`price_history`. That one divides every close by the splits dated after
+    it so the chart reads in today's units; an editor showing those numbers would
+    write a rescaled price back as though it were the as-traded one, and one
+    round-trip through the dialog would silently restate the history. What is
+    shown here is what is in the table."""
+    clause, params = _price_identity_clause(conn, symbol)
+    sql = ("SELECT symbol, date, close_price, source FROM price_history "
+           "WHERE " + clause + " ORDER BY date, id")
+    return [{"symbol": row["symbol"], "date": row["date"],
+             "close_price": _D(row["close_price"]), "source": row["source"]}
+            for row in conn.execute(sql, params)]
+
+
 def price_history_bounds(conn, symbol: str, as_of: Optional[str] = None) -> list:
     """``(date, close, low, high)`` per recorded price, ascending.
 
@@ -2935,7 +3024,7 @@ def option_terms(conn, symbol) -> Optional[dict]:
     ``{'symbol', 'multiplier', 'underlying', 'expiration', 'strike', 'right'}``.
     ``multiplier`` and ``strike`` come back Decimal (never float); ``multiplier``
     is ``None`` when the column is NULL, which the caller must treat as "not
-    recorded", NOT as a licence to assume 100 -- a mini contract is 10 and an
+    recorded", NOT as a license to assume 100 -- a mini contract is 10 and an
     index contract can be anything. Terms are READ here, never parsed: parsing
     belongs to :mod:`mammon.instruments` and the write belongs to the backfill.
     Resolved across the identity so a contract stored under either spelling of a
@@ -3091,7 +3180,7 @@ def _holdings_as_of(conn, account_id: int, as_of: Optional[str]):
     position vanished from the past (and an account closed out years ago reported
     its cash sleeve alone), making the whole net-worth curve understate history.
     The two row shapes -- ``holdings`` rows (symbol/quantity/cost_basis) and
-    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalised HERE,
+    ``compute_holdings``'s ``{symbol: _Lot(qty, cost)}`` -- are normalized HERE,
     at the one boundary, so every caller above sees a single shape."""
     if as_of is None:
         for h in list_holdings(conn, account_id):

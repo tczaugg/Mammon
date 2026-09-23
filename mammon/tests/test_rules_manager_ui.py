@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 from mammon import categorize, category_rules, db, ledger, transfer_rules
 from mammon.ui import rules_manager_widget
 from mammon.ui.rules_manager_widget import RulesManagerWidget, _RuleModel
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -26,7 +27,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rules_ui.db")
+    c = fresh_db(tmp_path / "rules_ui.db")
     yield c
     c.close()
 

@@ -19,11 +19,12 @@ from mammon import app, backup, download_log, paths
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     monkeypatch.delenv("MAMMON_DATA_DIR", raising=False)
+    monkeypatch.delenv("MAMMON_REPORT_DEFS_DIR", raising=False)
     monkeypatch.delattr(sys, "frozen", raising=False)
 
 
 def test_a_source_checkout_uses_the_data_dir_beside_the_package():
-    """Unchanged behaviour: this is how it has always run, and how it must keep
+    """Unchanged behavior: this is how it has always run, and how it must keep
     running for everyone working from a clone."""
     assert paths.data_dir() == paths.install_root() / "data"
     assert paths.default_db_path().name == "mammon.db"
@@ -107,6 +108,30 @@ def test_a_directory_named_like_the_marker_is_not_an_install(tmp_path, monkeypat
 def test_the_last_db_pointer_follows_the_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("MAMMON_DATA_DIR", str(tmp_path))
     assert paths.last_db_record_path() == tmp_path / paths.LAST_DB_RECORD
+
+
+def test_report_definitions_live_under_the_data_dir(tmp_path, monkeypatch):
+    """A definition the user writes for his own return names his forms and his
+    lines, so it is his data: it follows MAMMON_DATA_DIR with the ledger, and it
+    is gitignored with the rest of data/."""
+    assert paths.report_defs_dir() == paths.data_dir() / "report_defs"
+    monkeypatch.setenv("MAMMON_DATA_DIR", str(tmp_path))
+    assert paths.report_defs_dir() == tmp_path / "report_defs"
+
+
+def test_the_report_definitions_dir_has_its_own_override(tmp_path, monkeypatch):
+    """Its own variable, so a test (and a read-only install) can point the
+    definitions somewhere without moving the ledger too."""
+    monkeypatch.setenv("MAMMON_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("MAMMON_REPORT_DEFS_DIR", str(tmp_path / "defs"))
+    assert paths.report_defs_dir() == tmp_path / "defs"
+    assert paths.data_dir() == tmp_path / "data"       # and only that
+
+
+def test_asking_for_the_report_definitions_dir_creates_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAMMON_REPORT_DEFS_DIR", str(tmp_path / "defs"))
+    paths.report_defs_dir()
+    assert not (tmp_path / "defs").exists()
 
 
 def test_an_explicit_db_argument_still_wins(tmp_path):

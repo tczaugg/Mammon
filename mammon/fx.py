@@ -16,7 +16,7 @@ Why this is its own pure-domain module, parallel to :mod:`mammon.investments`:
   date and derives the inverse when only one direction was recorded, so storing
   USD->EUR also answers EUR->USD.
 - ``accounts.currency`` is ``NOT NULL DEFAULT 'USD'`` in the schema, so an
-  account with no explicit currency IS USD, the base. Everything here normalises
+  account with no explicit currency IS USD, the base. Everything here normalizes
   a missing/blank currency to ``'USD'`` (:func:`_norm_ccy`) rather than treating
   a NULL specially -- the schema never stores one.
 
@@ -112,7 +112,7 @@ def list_rates(conn: sqlite3.Connection, base=None, quote=None) -> list:
     A pure read over the same table :func:`set_rate` writes and :func:`get_rate`
     reads; the FX-rate UI lists through here so the UI layer keeps no SQL of its
     own (CLAUDE.md). ``base``/``quote`` optionally narrow to one pair (both
-    normalised)."""
+    normalized)."""
     sql = "SELECT date, base, quote, rate FROM fx_rates"
     clauses, params = [], []
     if base is not None:

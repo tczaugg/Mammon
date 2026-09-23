@@ -15,11 +15,12 @@ from datetime import date, timedelta
 import pytest
 
 from mammon import asset_values, db, demo, investments, ledger, scheduled
+from mammon.tests import fresh_db
 
 
 @pytest.fixture()
 def conn(tmp_path):
-    return db.init_db(str(tmp_path / "demo.db"))
+    return fresh_db(str(tmp_path / "demo.db"))
 
 
 ANCHOR = date(2026, 6, 15)
@@ -58,7 +59,7 @@ def test_every_payee_is_an_invented_one(conn):
 def test_the_same_anchor_date_rebuilds_the_same_ledger(tmp_path):
     """Seeded amounts, so regenerating a screenshot does not reshuffle rows."""
     def totals(path):
-        c = db.init_db(str(path))
+        c = fresh_db(str(path))
         demo.build(c, today=ANCHOR, months=6)
         return (c.execute("SELECT COUNT(*), SUM(amount) FROM transactions").fetchone(),
                 c.execute("SELECT COUNT(*) FROM splits").fetchone()[0])

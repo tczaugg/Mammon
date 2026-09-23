@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import crypto, db, investments, ledger
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -28,7 +29,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "coins.db")
+    c = fresh_db(tmp_path / "coins.db")
     yield c
     c.close()
 

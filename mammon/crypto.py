@@ -290,7 +290,7 @@ def is_crypto_account(acct: Optional[sqlite3.Row]) -> bool:
 
 
 def _norm_kind(kind: Optional[str]) -> str:
-    """Normalise/validate a crypto account KIND, raising on anything unexpected so a
+    """Normalize/validate a crypto account KIND, raising on anything unexpected so a
     bad value is caught at creation rather than silently mis-routing later."""
     k = (kind or "").strip().lower()
     if k not in CRYPTO_KINDS:
@@ -319,7 +319,7 @@ def is_exchange_account(acct: Optional[sqlite3.Row]) -> bool:
     """A crypto exchange/custodial account: coins PLUS a fiat cash sleeve, driven by
     the BUY/SELL/SWAP writers. Any crypto account not explicitly a wallet reads as an
     exchange -- migration 61 backfills legacy crypto accounts (whose kind predates the
-    split) to 'exchange', so this is the historical behaviour, not NULL-overloading."""
+    split) to 'exchange', so this is the historical behavior, not NULL-overloading."""
     return is_crypto_account(acct) and account_kind(acct) != CRYPTO_KIND_WALLET
 
 

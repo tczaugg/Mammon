@@ -142,7 +142,7 @@ def _find_col(header: list[str], *predicates) -> Optional[int]:
 
 
 def _is_hash_col(n: str) -> bool:
-    """Whether a normalised header name is the on-chain hash column.
+    """Whether a normalized header name is the on-chain hash column.
 
     ETHERSCAN RENAMES ITS COLUMNS, and this one is load-bearing twice over: it is
     the exact-dedup key AND the signature that identifies the file as an

@@ -21,6 +21,7 @@ from mammon.ui.models import (
 )
 
 from PyQt5.QtCore import QCoreApplication, Qt
+from mammon.tests import fresh_db, skip_under_xdist
 
 
 def _set_date(edit, iso):
@@ -70,7 +71,7 @@ def dbfile(tmp_path):
 
 @pytest.fixture
 def conn(dbfile):
-    c = db.init_db(dbfile)
+    c = fresh_db(dbfile)
     yield c
     c.close()
 
@@ -910,7 +911,7 @@ def test_ledger_update_account_and_date_bounds(conn, accounts):
 def test_main_window_menus_present(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "menus.db")
+    conn = fresh_db(tmp_path / "menus.db")
     sample_data(conn)
     win = MainWindow(conn)
     titles = {a.text().replace("&", "") for a in win.menuBar().actions()}
@@ -1023,7 +1024,7 @@ def test_search_matches_investment_security_amount_memo(qapp, conn):
 def test_search_dialog_finds_and_opens(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow, SearchDialog
-    conn = db.init_db(tmp_path / "find.db")
+    conn = fresh_db(tmp_path / "find.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -1051,7 +1052,7 @@ def test_search_dialog_finds_and_opens(qapp, tmp_path):
 def test_ensure_seed_only_on_demo(tmp_path):
     # A plain open must NOT fabricate the sample "test set"; only --demo seeds.
     from mammon import app as appmod
-    c = db.init_db(tmp_path / "plain.db")
+    c = fresh_db(tmp_path / "plain.db")
     appmod._ensure_seed(c, demo=False)
     assert ledger.list_accounts(c) == []
     appmod._ensure_seed(c, demo=True)
@@ -1063,13 +1064,13 @@ def test_main_window_open_database_switches(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
     a_path = tmp_path / "a.db"
-    a = db.init_db(a_path)
+    a = fresh_db(a_path)
     sample_data(a)
     win = MainWindow(a, db_path=str(a_path))
     assert win.accounts.model.rowCount() >= 3
     # a second, different database with just one account
     b_path = tmp_path / "b.db"
-    b = db.init_db(b_path)
+    b = fresh_db(b_path)
     ledger.create_account(b, "Solo", "checking", opening_balance=500_00)
     b.close()
     win.open_database(str(b_path))
@@ -1083,7 +1084,7 @@ def test_main_window_new_database_creates_empty(qapp, tmp_path, monkeypatch):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
     a_path = tmp_path / "a.db"
-    a = db.init_db(a_path)
+    a = fresh_db(a_path)
     sample_data(a)
     win = MainWindow(a, db_path=str(a_path))
     assert win.accounts.model.rowCount() >= 3        # sample data present
@@ -1111,7 +1112,7 @@ def test_main_window_opens_register(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "win.db")
+    conn = fresh_db(tmp_path / "win.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -1130,7 +1131,7 @@ def test_the_import_report_lists_what_the_import_could_not_settle(qapp, tmp_path
     from mammon.ui import widgets
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "report.db")
+    conn = fresh_db(tmp_path / "report.db")
     acct = ledger.create_account(conn, "Brokerage", "investment", opening_balance=0)
     investments.record_investment(conn, acct, "2025-01-07", "ShrsOut",
                                   symbol="BOND INDEX(ANON)", quantity="0.5")
@@ -2145,7 +2146,7 @@ def test_main_window_view_menu_toggles_registers(qapp, tmp_path):
     from mammon.ui import prefs
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "view.db")
+    conn = fresh_db(tmp_path / "view.db")
     sample_data(conn)
     win = MainWindow(conn)
     titles = {a.text().replace("&", "") for a in win.menuBar().actions()}
@@ -2454,7 +2455,7 @@ def test_main_window_applies_display_prefs_live(qapp, tmp_path):
     from mammon.ui import prefs, style
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "prefs.db")
+    conn = fresh_db(tmp_path / "prefs.db")
     sample_data(conn)
     win = MainWindow(conn)
     accts = ledger.list_accounts(conn)
@@ -2697,7 +2698,7 @@ def test_main_window_applies_dark_theme_live(qapp, tmp_path):
     from mammon.ui import style
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "dark.db")
+    conn = fresh_db(tmp_path / "dark.db")
     sample_data(conn)
     win = MainWindow(conn)
     accts = ledger.list_accounts(conn)
@@ -2992,6 +2993,8 @@ def test_register_title_is_boxed(qapp, conn, accounts):
     assert w.header.text() == "Checking"         # the box shows the account name
 
 
+@skip_under_xdist(
+    "drives a modeless Qt dialog through processEvents while its widgets are rebuilt; crashes a worker under -n auto, passes serially")
 def test_search_dialog_is_modeless_and_dense(qapp, conn, accounts):
     from mammon.ui.widgets import SearchDialog
 
@@ -3008,7 +3011,7 @@ def test_find_dialog_refreshes_when_an_edit_drops_a_match(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "findlive.db")
+    conn = fresh_db(tmp_path / "findlive.db")
     sample_data(conn)
     win = MainWindow(conn)
     first = ledger.list_accounts(conn)[0]["id"]
@@ -3169,7 +3172,7 @@ def test_investment_register_xout_and_miscexp(qapp, conn):
 def test_open_register_branches_on_account_type(qapp, tmp_path):
     from mammon.ui.widgets import (InvestmentRegisterWidget, MainWindow,
                                   RegisterWidget)
-    conn = db.init_db(tmp_path / "invbranch.db")
+    conn = fresh_db(tmp_path / "invbranch.db")
     chk = ledger.create_account(conn, "Checking", "checking", opening_balance=100_00)
     inv = _seed_investment_account(conn)
     win = MainWindow(conn)
@@ -3199,7 +3202,7 @@ def test_investment_widget_display_prefs_and_stack_api(qapp, tmp_path):
     # View-menu one/two-line flip must not raise on an open investment register.
     from mammon.ui.widgets import InvestmentRegisterWidget, MainWindow
 
-    conn = db.init_db(tmp_path / "invapi.db")
+    conn = fresh_db(tmp_path / "invapi.db")
     inv = _seed_investment_account(conn)
     win = MainWindow(conn)
     reg = win.open_register(inv)
@@ -3317,7 +3320,7 @@ def test_holdings_button_opens_dialog(qapp, tmp_path, monkeypatch):
     from mammon.ui import widgets
     from mammon.ui.widgets import InvestmentRegisterWidget
 
-    conn = db.init_db(tmp_path / "holdbtn.db")
+    conn = fresh_db(tmp_path / "holdbtn.db")
     inv = _seed_holdings_account(conn)
     reg = InvestmentRegisterWidget(conn, inv)
 
@@ -3345,7 +3348,7 @@ def test_holdings_button_opens_dialog(qapp, tmp_path, monkeypatch):
 
 def test_holdings_dialog_double_click_charts_price_history(qapp, conn, monkeypatch):
     # Double-clicking a priced holding opens its price-history chart; an unpriced
-    # holding shows an informational message instead of an empty chart.
+    # holding is ASKED whether to add prices instead of getting an empty chart.
     from mammon.ui import charts, widgets
     from mammon.ui.widgets import HoldingsDialog
 
@@ -3357,21 +3360,27 @@ def test_holdings_dialog_double_click_charts_price_history(qapp, conn, monkeypat
     charted = []
     monkeypatch.setattr(
         charts.ChartDialog, "exec_", lambda self: charted.append(self.canvas))
-    infos = []
+    # The no-prices branch ASKS ("Add prices now?") rather than merely informing,
+    # so the seam to patch is QMessageBox.question. This test used to patch
+    # .information, which left a real modal to exec_() -- under the offscreen
+    # platform that blocks forever and hung the entire run. Answer No so the
+    # price-history editor does not open either.
+    asked = []
     monkeypatch.setattr(
-        widgets.QMessageBox, "information",
-        staticmethod(lambda *a, **k: infos.append(a)))
+        widgets.QMessageBox, "question",
+        staticmethod(
+            lambda *a, **k: (asked.append(a), widgets.QMessageBox.No)[1]))
 
     # AAPL has a recorded price -> a real price-history canvas is charted
     dlg.show_price_history("AAPL")
     assert len(charted) == 1
     assert charted[0].figure.axes                    # a real Axes was drawn
-    assert not infos
+    assert not asked
 
-    # OBSCURE has no recorded prices -> informational message, no chart
+    # OBSCURE has no recorded prices -> the user is asked, and no chart opens
     dlg.show_price_history("OBSCURE")
     assert len(charted) == 1                          # still no new chart
-    assert infos                                      # user was told instead
+    assert asked                                      # user was asked instead
 
 
 def test_price_history_canvas_priced_and_placeholder(qapp):
@@ -3442,7 +3451,7 @@ def test_loan_setup_launches_from_register_toolbar_not_settings(qapp, tmp_path,
     from mammon.ui.widgets import MainWindow
     from mammon.ui.models import RegisterModel
 
-    conn = db.init_db(tmp_path / "loanbtn.db")
+    conn = fresh_db(tmp_path / "loanbtn.db")
     # A fully-configured loan (liability + loan_params) and a plain cash account.
     principal, term = 200_000_00, 360
     pi = loans.standard_payment(principal, "5.0", term)
@@ -3534,23 +3543,28 @@ def test_register_charts_any_security_including_sold_out(qapp, conn, monkeypatch
     charted = []
     monkeypatch.setattr(
         charts.ChartDialog, "exec_", lambda self: charted.append(self.canvas))
-    infos = []
+    # The no-prices branch ASKS ("Add prices now?") rather than merely informing,
+    # so the seam to patch is QMessageBox.question. Patching .information instead
+    # left a real modal to exec_() -- under the offscreen platform that blocks
+    # forever and wedged the whole run. Answer No so the editor does not open.
+    asked = []
     monkeypatch.setattr(
-        widgets.QMessageBox, "information",
-        staticmethod(lambda *a, **k: infos.append(a)))
+        widgets.QMessageBox, "question",
+        staticmethod(
+            lambda *a, **k: (asked.append(a), widgets.QMessageBox.No)[1]))
 
     # double-click the sold-out ZZZ's Security cell -> a real price-history chart
     zrow = _register_row_for(reg, "ZZZ")
     reg._on_cell_double_clicked(reg.model.index(zrow, M.SECURITY))
     assert len(charted) == 1
     assert charted[0].figure.axes
-    assert not infos
+    assert not asked
 
-    # a held security with no recorded prices -> info note, not an empty chart
+    # a held security with no recorded prices -> the user is asked, not an empty chart
     nrow = _register_row_for(reg, "NOPX")
     reg._on_cell_double_clicked(reg.model.index(nrow, M.SECURITY))
     assert len(charted) == 1                 # no new chart
-    assert infos                             # user was told instead
+    assert asked                             # user was asked instead
 
     # double-clicking a NON-Security column does nothing (guard)
     reg._on_cell_double_clicked(reg.model.index(zrow, M.DATE))
@@ -4324,7 +4338,7 @@ def test_loan_wizard_new_payment_edit_resplits_forward_via_save(qapp, conn,
     sched_before = {r.date: r for r in loans.amortization_schedule(conn, aid)}
 
     # Spy on the engine to prove the save path actually invokes it (keep the real
-    # behaviour by delegating through).
+    # behavior by delegating through).
     calls = []
     real = loans_schedule.apply_payment_change
 
@@ -4440,7 +4454,7 @@ def test_loan_setup_moved_out_of_settings_menu(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "loanmenu.db")
+    conn = fresh_db(tmp_path / "loanmenu.db")
     sample_data(conn)
     win = MainWindow(conn)
     settings = next(m.menu() for m in win.menuBar().actions()
@@ -4873,7 +4887,7 @@ def test_main_window_toolbar_wiring_and_hide_flow(qapp, tmp_path, monkeypatch):
     from PyQt5.QtWidgets import QDialog, QMessageBox
     from mammon.app import sample_data
     from mammon.ui.widgets import AccountDetailsDialog, MainWindow
-    conn = db.init_db(tmp_path / "toolbar.db")
+    conn = fresh_db(tmp_path / "toolbar.db")
     sample_data(conn)
     win = MainWindow(conn)
     acct = next(a for a in ledger.list_accounts(conn) if a["type"] != "investment")
@@ -4905,7 +4919,7 @@ def test_backup_now_action_writes_a_manual_snapshot(qapp, tmp_path, monkeypatch)
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 
@@ -4941,7 +4955,7 @@ def test_autobackup_timer_ticks_and_rotates(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 
@@ -4969,7 +4983,7 @@ def test_autobackup_timer_ticks_and_rotates(qapp, tmp_path, monkeypatch):
 def test_no_autobackup_without_db_path(qapp, tmp_path):
     from mammon.app import sample_data
     from mammon.ui.widgets import MainWindow
-    conn = db.init_db(tmp_path / "nopath.db")
+    conn = fresh_db(tmp_path / "nopath.db")
     sample_data(conn)
     win = MainWindow(conn)                      # no db_path -> nothing to name
     assert win._autobackup_timer is None
@@ -5002,7 +5016,7 @@ def test_autobackup_startup_purges_stale_beyond_retention(qapp, tmp_path, monkey
              for i in range(backup.AUTO_RETENTION_FLOOR + 1)]
 
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))   # __init__ -> _start_autobackup -> purge
 
@@ -5096,9 +5110,11 @@ def test_tools_menu_has_accounts_and_toolbar_lacks_it(qapp, conn, accounts):
     win.close()
 
 
-def test_view_menu_has_calendar_and_investment_center_placeholder(qapp, conn, accounts):
-    """Financial Calendar moved off Tools onto View, alongside a disabled
-    Investment Center placeholder for the not-yet-built holdings landing page."""
+def test_view_menu_has_calendar_and_investment_dashboard(qapp, conn, accounts):
+    """Financial Calendar moved off Tools onto View, alongside the Investment
+    Dashboard. That second entry was a disabled "Investment Center…" placeholder
+    until the dashboard page existed; it is now a live action (its behavior is
+    pinned by test_dashboard_menu.py)."""
     from mammon.ui.widgets import MainWindow
     win = MainWindow(conn, webslinger=_fake_client())
 
@@ -5108,9 +5124,10 @@ def test_view_menu_has_calendar_and_investment_center_placeholder(qapp, conn, ac
 
     view_labels = [a.text() for a in menu("View").actions()]
     assert "Financial Calendar" in view_labels
-    assert "Investment Center…" in view_labels
-    ic = next(a for a in menu("View").actions() if a.text() == "Investment Center…")
-    assert ic.isEnabled() is False
+    assert "Investment Dashboard…" in view_labels
+    dash = next(a for a in menu("View").actions()
+                if a.text() == "Investment Dashboard…")
+    assert dash.isEnabled() is True
 
     assert "Financial Calendar" not in [a.text() for a in menu("Tools").actions()]
     win.close()
@@ -5307,7 +5324,7 @@ def test_the_app_runs_with_no_webslinger_at_all(qapp, conn, tmp_path, monkeypatc
         reg = win.open_register(chk)
         assert reg is not None and reg.model.rowCount() >= 1
         # 2. Download stays CLICKABLE (bug 6cfb82e4) so its handler can explain
-        #    what is missing -- a greyed button explains nothing.
+        #    what is missing -- a grayed button explains nothing.
         assert reg.toolbar.act_download.isEnabled() is True
         # 3. Clicking it reports the problem instead of raising. This is the
         #    "appropriate error message" the manual workflow relies on.
@@ -5326,7 +5343,7 @@ def test_the_app_runs_with_no_webslinger_at_all(qapp, conn, tmp_path, monkeypatc
 
 
 def test_download_button_always_enabled_even_when_unconfigured(qapp, conn):
-    # Bug 6cfb82e4: Download must NEVER be a dead/greyed-out button. It stays
+    # Bug 6cfb82e4: Download must NEVER be a dead/grayed-out button. It stays
     # clickable in every setup state (no client, no creds, no script...) so its
     # click handler can always run and explain what's missing.
     from mammon.ui.widgets import MainWindow
@@ -5799,7 +5816,7 @@ def test_review_accept_auto_advances_to_next(qapp, conn, accounts):
     """Accepting a review item retires it and auto-advances the review selection
     to the next transaction still needing action.
 
-    In the default visibility the accepted row STAYS on screen (greyed) rather
+    In the default visibility the accepted row STAYS on screen (grayed) rather
     than vanishing, so the advance moves DOWN the list instead of the next row
     sliding up into the vacated slot."""
     from mammon.ui.widgets import RegisterWidget
@@ -5892,7 +5909,7 @@ def test_review_new_item_editable_register_row_accept_button_and_enter(qapp, con
 
     # Nothing left to action: the register's pending row is gone and the Review…
     # toolbar action re-syncs to disabled. The panel itself STAYS up, now showing
-    # both rows greyed -- the user has just accepted them and can still see (and
+    # both rows grayed -- the user has just accepted them and can still see (and
     # undo) what they did. It is a reopened account, not a finished session, that
     # gets no panel: see reload_pending.
     assert panel.pending_count() == 0
@@ -6207,9 +6224,9 @@ def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
 
     A discarded row LEAVES the list, in every visibility mode. Discard deletes
     its ``review_items`` row (so re-downloading the range offers it again), and
-    greying a row the database no longer holds would put the screen at odds with
-    a re-query -- the same disagreement the greying was introduced to fix,
-    pointed the other way. Accepted rows are what stay visible and grey.
+    graying a row the database no longer holds would put the screen at odds with
+    a re-query -- the same disagreement the graying was introduced to fix,
+    pointed the other way. Accepted rows are what stay visible and gray.
     """
     from mammon import import_review
     from mammon.ui.import_review_widget import ImportReviewPanel
@@ -6231,7 +6248,7 @@ def test_review_panel_delete_key_discards_selected_row(qapp, conn, accounts):
 def test_review_panel_delete_key_removes_row_in_pending_only_mode(qapp, conn,
                                                                   accounts):
     """In "Pending only" there is nowhere for a discarded row to go, so it leaves
-    the list outright -- the pre-visibility-toggle behaviour, still correct for
+    the list outright -- the pre-visibility-toggle behavior, still correct for
     that one mode."""
     from mammon import import_review
     from mammon.ui import prefs
@@ -6471,7 +6488,7 @@ class _FakeProgress:
 
 
 def test_multi_file_import_reports_progress_per_file(qapp, conn, tmp_path, monkeypatch):
-    """The import runs on the GUI thread, so without this the window greys out
+    """The import runs on the GUI thread, so without this the window grays out
     with nothing to say for itself. Each file names itself and its position as it
     starts, and the dialog is closed when the run ends."""
     from PyQt5.QtWidgets import QFileDialog, QMessageBox
@@ -6541,7 +6558,7 @@ def test_autobackup_after_the_first_is_an_incremental_delta(qapp, tmp_path,
     bdir = tmp_path / "backups"
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
     path = tmp_path / "mammon_2026.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     sample_data(conn)
     win = MainWindow(conn, db_path=str(path))
 
@@ -7802,7 +7819,7 @@ def test_editing_a_share_move_keeps_its_price_and_value(qapp, conn):
     txn = investments.get_investment_txn(conn, txn_id)
 
     dlg = D(conn, acct, txn=txn)
-    # storage normalises the Decimal text (28.50 -> 28.5), so compare as numbers
+    # storage normalizes the Decimal text (28.50 -> 28.5), so compare as numbers
     assert Decimal(dlg.price.text()) == Decimal("28.50")
     v = dlg.values()
     assert Decimal(str(v["quantity"])) == Decimal("0.045")
@@ -7831,8 +7848,8 @@ def test_dark_tabs_are_legible():
     import re
     from mammon.ui import style
 
-    def luminance(hex_colour):
-        r, g, b = (int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    def luminance(hex_color):
+        r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
         def chan(c):
             return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
         r, g, b = chan(r), chan(g), chan(b)

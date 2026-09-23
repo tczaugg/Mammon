@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QApplication
 from mammon import db, ledger
 from mammon.ui import prefs
 from mammon.ui.projection_dialogs import ALL_SPENDING, AccountSlots, CalendarPanel
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 
@@ -33,7 +34,7 @@ def _isolated_settings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "slots.db")
+    c = fresh_db(tmp_path / "slots.db")
     yield c
     c.close()
 

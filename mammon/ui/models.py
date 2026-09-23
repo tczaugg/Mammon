@@ -30,7 +30,7 @@ _WARNING_ICON = None
 def warning_triangle_icon():
     """The app's ONE warning mark: a small amber triangle with an exclamation.
 
-    Drawn in exactly one place so every use is the same shape in the same colour.
+    Drawn in exactly one place so every use is the same shape in the same color.
     Two callers, and they assert the same thing -- "this number is not the whole
     story":
 
@@ -610,7 +610,7 @@ class RegisterModel(QAbstractTableModel):
 
     def account_currency(self) -> str:
         """This register's account native currency ('USD' when unset -- the base).
-        Read through :mod:`mammon.fx` so the normalisation lives in the domain
+        Read through :mod:`mammon.fx` so the normalization lives in the domain
         layer, not here."""
         from mammon import fx
         return fx.get_account_currency(self.conn, self.account_id)
@@ -2277,14 +2277,14 @@ class CryptoRegisterModel(QAbstractTableModel):
     trade; a wallet transfer renders as ``[Other Wallet]`` (the mirror model, in
     coin).
 
-    BEHAVIOURAL PARITY WITH THE CASH REGISTER. Events still arrive mostly by
+    BEHAVIORAL PARITY WITH THE CASH REGISTER. Events still arrive mostly by
     import, but the register is no longer read-only: a trailing BLANK quick-entry
     row (:meth:`commit_blank`) enters a new event by hand through
     :mod:`mammon.crypto`, the correctable posted columns edit inline, and the
     widget's context menu edits/deletes a row through :meth:`apply_edit` /
     :meth:`delete_txn`. Only the CONTENT differs from the cash register (coin
     quantities as Decimal text, not USD cents; a wallet has no price/amount/cash
-    column); the behaviour is the same, and every write still funnels through
+    column); the behavior is the same, and every write still funnels through
     :mod:`mammon.crypto`, the sole writer of the ``crypto_*`` tables.
 
     THE COLUMN SET DEPENDS ON THE ACCOUNT KIND, and that is the whole point of the
@@ -2547,7 +2547,7 @@ class CryptoRegisterModel(QAbstractTableModel):
                 crypto.update_event(self.conn, txn_id, payee=text or None)
             elif col == self.DATE:
                 # value is a QDate from the calendar editor (or typed text);
-                # _to_iso normalises both to ISO the domain layer stores.
+                # _to_iso normalizes both to ISO the domain layer stores.
                 iso = _to_iso(value)
                 if iso:
                     crypto.update_event(self.conn, txn_id, date=iso)

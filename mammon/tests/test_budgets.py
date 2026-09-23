@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from mammon import budgets, db, ledger
+from mammon.tests import fresh_db
 
 
 def test_budgets_is_importable_first_no_circular_import():
@@ -26,15 +27,17 @@ def test_budgets_is_importable_first_no_circular_import():
     budget_vs_actual that breaks it."""
     for first in ("import mammon.budgets",
                   "from mammon.ui import budget_widget"):
+        # timeout= is mandatory: a child interpreter that wedges on import would
+        # otherwise block the whole suite forever with no output to say why.
         r = subprocess.run([sys.executable, "-c", first + "; print('ok')"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, f"{first!r} failed:\n{r.stderr}"
         assert "ok" in r.stdout
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "budgets.db")
+    c = fresh_db(tmp_path / "budgets.db")
     yield c
     c.close()
 
@@ -59,7 +62,7 @@ def test_schema_version_tracks_migrations():
 
 def test_init_db_idempotent_fresh_and_existing(tmp_path):
     path = tmp_path / "idem.db"
-    c1 = db.init_db(path)
+    c1 = fresh_db(path)
     assert c1.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     # budget tables exist on a fresh DB
     names = {r["name"] for r in c1.execute(
@@ -68,7 +71,7 @@ def test_init_db_idempotent_fresh_and_existing(tmp_path):
     c1.close()
 
     # Re-opening an existing, already-migrated DB is a no-op that still works.
-    c2 = db.init_db(path)
+    c2 = fresh_db(path)
     assert c2.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     names2 = {r["name"] for r in c2.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

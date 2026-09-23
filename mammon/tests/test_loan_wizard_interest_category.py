@@ -28,6 +28,7 @@ import pytest
 
 from mammon import db, loans, loans_schedule
 from mammon.ui.loan_wizard import LoanSetupWizard
+from mammon.tests import fresh_db
 
 # Repo-root/data/mammon_2026.db  (mammon/tests/<this file> -> parents[2] == repo root)
 # Acceptance tests run against a real ledger, and ONLY when one is named
@@ -78,7 +79,7 @@ def real_conn(tmp_path):
     """A writable connection to a COPY of a real DB (migrated forward)."""
     copy = tmp_path / "mammon_copy.db"
     shutil.copy2(REAL_DB, copy)
-    c = db.init_db(copy)            # applies the interest_category migration
+    c = fresh_db(copy)            # applies the interest_category migration
     yield c
     c.close()
 

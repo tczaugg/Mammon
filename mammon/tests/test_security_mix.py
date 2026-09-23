@@ -18,11 +18,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, investments, ledger, portfolio, rebalance, security_mix
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mix.db")
+    c = fresh_db(tmp_path / "mix.db")
     yield c
     c.close()
 
@@ -156,6 +157,36 @@ def test_split_value_is_exact_to_the_cent():
 # ---------------------------------------------------------------------------
 # storage
 # ---------------------------------------------------------------------------
+def test_a_whole_percentage_prints_as_a_number_not_in_exponent_form():
+    """Reported: the Mix column showed "1E+2% Bonds".
+
+    Decimal.normalize() strips trailing zeros on BOTH sides of the point, so a
+    whole 100.00 becomes Decimal('1E+2') and str() of it is exponent notation.
+    The fix is the 'f' presentation type, which forces fixed-point -- and still
+    shortens 58.50 to 58.5.
+    """
+    assert security_mix.describe({"bond": Decimal("100.00")}) == "100% Bonds"
+    assert "E+" not in security_mix.describe({"cash": Decimal("100.00")})
+    mixed = security_mix.describe({"domestic_stock": Decimal("58.50"),
+                                   "bond": Decimal("40.00"),
+                                   "cash": Decimal("1.50")})
+    assert mixed == "58.5% Domestic stock / 40% Bonds / 1.5% Cash"
+    # A hundredth still survives, so the trim never costs precision.
+    assert security_mix.describe({"crypto": Decimal("0.25"),
+                                  "cash": Decimal("99.75")}) == (
+        "99.75% Cash / 0.25% Crypto")
+
+
+def test_a_fund_may_hold_crypto(conn):
+    """crypto joined ASSET_CLASSES on 2026-09-21. A spot-crypto ETF could not
+    describe itself before: the class existed only in the projection, so a
+    mixture naming it was refused."""
+    security_mix.set_mixture(conn, "ZZBTC", {"crypto": 100})
+    assert security_mix.get_mixture(conn, "ZZBTC") == {"crypto": Decimal("100.00")}
+    security_mix.set_mixture(conn, "ZZMIX", {"crypto": 20, "domestic_stock": 80})
+    assert security_mix.get_mixture(conn, "ZZMIX")["crypto"] == Decimal("20.00")
+
+
 def test_mixtures_round_trip_and_clear(conn, world):
     security_mix.set_mixture(conn, "VTHRX",
                              {"domestic_stock": 58.43, "bond": 39.8, "cash": 1.66,
@@ -177,7 +208,7 @@ def test_mixtures_round_trip_and_clear(conn, world):
     assert security_mix.mixture_meta(conn, "VTHRX") is None
 
     with pytest.raises(ValueError):
-        security_mix.set_mixture(conn, "VTHRX", {"crypto": 100})
+        security_mix.set_mixture(conn, "VTHRX", {"tulips": 100})
     with pytest.raises(ValueError):
         security_mix.set_mixture(conn, "  ", {"bond": 100})
 

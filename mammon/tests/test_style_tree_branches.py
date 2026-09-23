@@ -18,6 +18,7 @@ import pytest
 
 from mammon import db, ledger
 from mammon.ui import style
+from mammon.tests import fresh_db
 
 # The four standard branch states Qt distinguishes. All of them must be styled,
 # or a tree's first/last row keeps the invisible native glyph.
@@ -45,7 +46,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "branches.db")
+    c = fresh_db(tmp_path / "branches.db")
     yield c
     c.close()
 

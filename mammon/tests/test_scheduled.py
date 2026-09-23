@@ -7,11 +7,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, importers, ledger, loans, scheduled
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -64,6 +65,26 @@ def test_advance_date_by_frequency():
     assert scheduled.advance_date("2026-01-31", "monthly") == "2026-02-28"
     with pytest.raises(ValueError):
         scheduled.advance_date("2026-01-15", "hourly")
+
+
+def test_gap_classification_tells_semimonthly_from_biweekly():
+    # Twice a month gaps by 13 (the 16th to the 1st across February) to 16 (the
+    # 15th to a 31-day month's last day); every other Friday gaps by exactly 14.
+    assert scheduled._classify_gaps([16, 15, 13, 15, 16, 15, 15, 15]) == "semimonthly"
+    assert scheduled._classify_gaps([15, 16, 15, 13, 15, 16]) == "semimonthly"
+    assert scheduled._classify_gaps([14] * 8) == "biweekly"
+    assert scheduled._classify_gaps([14, 14, 15, 14, 13, 14]) == "biweekly"
+    assert scheduled._classify_gaps([7] * 6) == "weekly"
+    assert scheduled._classify_gaps([30, 31, 28, 31, 30]) == "monthly"
+
+
+def test_semimonthly_back_inverts_advance_date():
+    for iso in ("2026-01-15", "2026-01-31", "2026-02-28", "2026-03-01",
+                "2026-03-16", "2026-04-01", "2026-12-31", "2027-01-15"):
+        assert scheduled.advance_date(
+            scheduled._semimonthly_back(iso), "semimonthly") == iso
+    assert scheduled._semimonthly_back("2026-02-28") == "2026-02-15"
+    assert scheduled._semimonthly_back("2026-03-15") == "2026-02-28"
 
 
 # ---------------------------------------------------------------------------

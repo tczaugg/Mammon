@@ -28,6 +28,7 @@ from mammon import categorize, db, ledger
 from mammon.ui import prefs, widgets
 from mammon.ui.models import RegisterModel
 from mammon.ui.widgets import RegisterWidget, SearchDialog
+from mammon.tests import fresh_db
 
 R = RegisterModel
 
@@ -47,7 +48,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "batch.db")
+    c = fresh_db(tmp_path / "batch.db")
     yield c
     c.close()
 

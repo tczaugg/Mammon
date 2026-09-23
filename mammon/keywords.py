@@ -197,7 +197,7 @@ def match_rule(desc: str, rules, *, context=None) -> Optional[dict]:
     ``context`` is optional transaction context (a mapping/object exposing
     ``account_id``, ``amount_cents`` and/or ``memo``). When ``None`` -- the
     default, and what every pre-existing caller passes -- rule conditions are
-    NOT consulted and matching is byte-identical to the keyword-only behaviour.
+    NOT consulted and matching is byte-identical to the keyword-only behavior.
     When supplied, a candidate rule additionally has to satisfy each of its
     non-NULL conditions (:func:`_conditions_hold`); a rule that fails a condition
     is skipped and matching continues, so a narrowly-conditioned keyword can fall

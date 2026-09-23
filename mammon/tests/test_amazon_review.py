@@ -29,6 +29,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, import_review, ledger
+from mammon.tests import fresh_db
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ def _two_item_gift_card_file(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

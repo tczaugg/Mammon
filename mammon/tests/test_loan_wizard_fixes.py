@@ -42,6 +42,7 @@ from mammon.ui import prefs
 from mammon.ui.delegates import date_edit_iso
 from mammon.ui.models import fmt_date
 from mammon.ui.loan_wizard import LoanSetupWizard, _FUNDING_UNSET, _NEW_ACCOUNT
+from mammon.tests import fresh_db
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "wizfix.db")
+    c = fresh_db(tmp_path / "wizfix.db")
     yield c
     c.close()
 

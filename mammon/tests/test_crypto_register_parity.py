@@ -1,8 +1,8 @@
-"""Behavioural parity between the CRYPTO register and the cash register.
+"""Behavioral parity between the CRYPTO register and the cash register.
 
 The crypto register must FEEL like the cash register -- a per-row context menu
 with Edit/Delete, a blank quick-entry row at the bottom that records a brand-new
-transaction, single-click editing with the same Tab/click focus behaviour, and a
+transaction, single-click editing with the same Tab/click focus behavior, and a
 review list that auto-renames the payee from learned corrections -- while keeping
 the CONTENT differences a coin register genuinely needs (coin quantities as
 Decimal text rather than USD cents; on a wallet, no price / amount / cash-balance
@@ -45,6 +45,7 @@ from mammon.ui.delegates import (DateDelegate, FocusSelectDelegate,
 from mammon.ui.models import CryptoRegisterModel, RegisterModel
 from mammon.ui.widgets import (CryptoRegisterWidget, CryptoTransactionDialog,
                                RegisterWidget)
+from mammon.tests import fresh_db
 
 WALLET_ADDR = "0x1111111111111111111111111111111111111111"
 COUNTERPARTY = "0x2222222222222222222222222222222222222222"
@@ -67,7 +68,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "parity.db")
+    c = fresh_db(tmp_path / "parity.db")
     yield c
     c.close()
 

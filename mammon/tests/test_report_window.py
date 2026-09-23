@@ -22,6 +22,7 @@ from mammon.ui.report_window import (
     report_rows_to_csv,
     report_rows_to_html,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -148,7 +149,7 @@ def test_cash_flow_rows_omits_empty_transfers_section():
 
 def test_report_window_constructs_offscreen(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "cf.db")
+    conn = fresh_db(tmp_path / "cf.db")
     sample_data(conn)
 
     win = ReportWindow(conn)
@@ -172,7 +173,7 @@ def test_report_window_constructs_offscreen(qapp, tmp_path):
 
 def test_report_window_export_csv_matches_serializer(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "cf.db")
+    conn = fresh_db(tmp_path / "cf.db")
     sample_data(conn)
 
     win = ReportWindow(conn)
@@ -191,7 +192,7 @@ def test_report_window_export_csv_matches_serializer(qapp, tmp_path):
 
 def test_report_window_refresh_reflects_filter_range(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "cf.db")
+    conn = fresh_db(tmp_path / "cf.db")
     sample_data(conn)
 
     win = ReportWindow(conn)
@@ -209,7 +210,7 @@ def test_report_window_refresh_reflects_filter_range(qapp, tmp_path):
 
 def test_report_window_export_html_matches_serializer(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "cf.db")
+    conn = fresh_db(tmp_path / "cf.db")
     sample_data(conn)
 
     win = ReportWindow(conn)
@@ -230,7 +231,7 @@ def test_report_window_export_html_matches_serializer(qapp, tmp_path):
 
 def test_report_window_print_to_pdf_writes_pdf(qapp, tmp_path):
     from mammon.app import sample_data
-    conn = db.init_db(tmp_path / "cf.db")
+    conn = fresh_db(tmp_path / "cf.db")
     sample_data(conn)
 
     win = ReportWindow(conn)

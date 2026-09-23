@@ -18,11 +18,12 @@ import pytest
 
 from mammon import crypto, db, investments, ledger
 from mammon.investments import Quote
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto.db")
+    c = fresh_db(tmp_path / "crypto.db")
     yield c
     c.close()
 

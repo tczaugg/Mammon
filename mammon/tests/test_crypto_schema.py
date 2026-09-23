@@ -13,6 +13,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from mammon import crypto, db, ledger
+from mammon.tests import fresh_db
 
 
 def _columns(conn, table: str) -> set[str]:
@@ -25,14 +26,14 @@ def test_schema_version_matches_migration_list():
 
 def test_init_db_is_idempotent(tmp_path):
     path = tmp_path / "mammon.db"
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     v1 = conn.execute("PRAGMA user_version").fetchone()[0]
     tables1 = db.table_names(conn)
     conn.close()
 
     # A second init on the same file must be a no-op: no migration re-runs,
     # version and tables unchanged.
-    conn2 = db.init_db(path)
+    conn2 = fresh_db(path)
     v2 = conn2.execute("PRAGMA user_version").fetchone()[0]
     tables2 = db.table_names(conn2)
 
@@ -43,7 +44,7 @@ def test_init_db_is_idempotent(tmp_path):
 
 
 def test_crypto_transactions_columns(tmp_path):
-    conn = db.init_db(tmp_path / "mammon.db")
+    conn = fresh_db(tmp_path / "mammon.db")
     assert _columns(conn, "crypto_transactions") == {
         "id", "account_id", "date", "action", "symbol", "quantity", "price",
         "amount", "basis", "fee_symbol", "fee_quantity", "fee_amount",
@@ -58,14 +59,14 @@ def test_crypto_transactions_columns(tmp_path):
 
 
 def test_crypto_holdings_columns(tmp_path):
-    conn = db.init_db(tmp_path / "mammon.db")
+    conn = fresh_db(tmp_path / "mammon.db")
     assert _columns(conn, "crypto_holdings") == {
         "id", "account_id", "symbol", "name", "quantity", "cost_basis",
     }
 
 
 def test_crypto_holdings_checkpoints_columns(tmp_path):
-    conn = db.init_db(tmp_path / "mammon.db")
+    conn = fresh_db(tmp_path / "mammon.db")
     assert _columns(conn, "crypto_holdings_checkpoints") == {
         "account_id", "year", "symbol", "quantity", "cost_basis", "income",
         "realized", "ever_held", "lots",
@@ -73,7 +74,7 @@ def test_crypto_holdings_checkpoints_columns(tmp_path):
 
 
 def test_crypto_account_round_trips_via_module(tmp_path):
-    conn = db.init_db(tmp_path / "mammon.db")
+    conn = fresh_db(tmp_path / "mammon.db")
     # Synthetic wallet address -- not a real one.
     aid = crypto.create_account(conn, "Cold Wallet",
                                 wallet_address="0xABCDEF0000000000000000000000000000000001")
@@ -91,7 +92,7 @@ def test_crypto_account_round_trips_via_module(tmp_path):
 
 
 def test_crypto_account_is_classified_investment_like(tmp_path):
-    conn = db.init_db(tmp_path / "mammon.db")
+    conn = fresh_db(tmp_path / "mammon.db")
     crypto_id = crypto.create_account(conn, "Hot Wallet")
     checking_id = ledger.create_account(conn, "Checking", "checking")
 

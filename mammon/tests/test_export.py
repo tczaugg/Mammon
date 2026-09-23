@@ -10,11 +10,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, export, importers, investments, ledger, portfolio
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "source.db")
+    c = fresh_db(tmp_path / "source.db")
     yield c
     c.close()
 
@@ -124,7 +125,7 @@ def test_qif_export_imports_back_into_the_same_ledger(conn, world, tmp_path):
     assert "NStkSplit\nYNVDA\nQ20" in text and "O4.95" in text
     assert "XXXX1234" not in text and "bank.example" not in text
 
-    fresh = db.init_db(tmp_path / "fresh.db")
+    fresh = fresh_db(tmp_path / "fresh.db")
     try:
         res = importers.import_file(fresh, out)
         assert res.errors == 0
@@ -188,7 +189,7 @@ def test_qif_export_by_year_writes_one_file_per_year_that_round_trips(conn, worl
     assert "Old Co" in y25 and "Old Co" not in y26 and "US Bank" in y26
     assert "!Type:Invst" not in y25 and "!Type:Invst" in y26              # no activity in 2025
     assert (counts["transactions"], counts["investment_transactions"]) == (13, 5)
-    fresh = db.init_db(tmp_path / "fresh2.db")
+    fresh = fresh_db(tmp_path / "fresh2.db")
     try:
         for f in counts["files"]:
             assert importers.import_file(fresh, f).errors == 0

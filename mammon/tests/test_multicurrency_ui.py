@@ -6,7 +6,7 @@ non-base currency, and `ledger.create_account` -- the sole account writer -- had
 way to set it, so a currency chosen at creation was silently lost. These tests
 cover the UI:
 
-* `ledger.create_account` accepts and persists a native currency (normalised),
+* `ledger.create_account` accepts and persists a native currency (normalized),
   read back through the domain layer -- currency is chosen ONCE, at creation.
 * the New Account dialog offers a currency (default = base) that flows to the
   ledger; the Account Details dialog shows it READ-ONLY (immutable property).
@@ -30,11 +30,12 @@ from mammon.ui.models import (
     AccountsModel, RegisterModel, currency_symbol, fmt_amount_ccy, fmt_cents,
     fmt_money,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mc_ui.db")
+    c = fresh_db(tmp_path / "mc_ui.db")
     yield c
     c.close()
 
@@ -60,7 +61,7 @@ def test_create_account_defaults_to_base_currency(conn):
     assert fx.get_account_currency(conn, aid) == fx.BASE_CURRENCY == "USD"
 
 
-def test_create_account_normalises_currency(conn):
+def test_create_account_normalizes_currency(conn):
     lower = ledger.create_account(conn, "Sterling", "savings", currency="  gbp ")
     assert fx.get_account_currency(conn, lower) == "GBP"
     blank = ledger.create_account(conn, "Blank Ccy", "cash", currency="")

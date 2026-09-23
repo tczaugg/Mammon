@@ -4,7 +4,7 @@
 delimited file's column map, but nothing ever ASKED the user -- ``apply_wizard_answers``
 had no caller outside its own test. These drive the dialog headlessly.
 
-The behaviour that matters most here is that the preview names the SOURCE COLUMN
+The behavior that matters most here is that the preview names the SOURCE COLUMN
 behind each role. A mapping that picked the wrong column still produces
 plausible-looking values (a running-balance column parses as money exactly like an
 amount column), so the parsed values alone cannot tell a user whether the mapping
@@ -20,6 +20,7 @@ import pytest
 
 from mammon import db, ledger
 from mammon.importers import tabular
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -31,7 +32,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "m.db")
+    c = fresh_db(tmp_path / "m.db")
     yield c
     c.close()
 
@@ -371,7 +372,7 @@ def test_idle_session_writes_no_autobackups(qapp, tmp_path, monkeypatch):
     from mammon import backup, db
     from mammon.ui.widgets import MainWindow
     p = tmp_path / "m.db"
-    c = db.init_db(p)
+    c = fresh_db(p)
     bdir = tmp_path / "backups"
     monkeypatch.setattr(backup, "DEFAULT_BACKUP_DIR", bdir)
     win = MainWindow(c, db_path=str(p))
@@ -387,12 +388,12 @@ def test_idle_session_writes_no_autobackups(qapp, tmp_path, monkeypatch):
 def test_autobackup_fires_once_per_change_not_per_tick(qapp, tmp_path, monkeypatch):
     """Counts CALLS, not files: auto-backup names are timestamped to the second,
     so two snapshots inside one second share a filename and the second silently
-    overwrites the first. The behaviour under test is whether a snapshot is
+    overwrites the first. The behavior under test is whether a snapshot is
     attempted at all."""
     from mammon import backup, db
     from mammon.ui.widgets import MainWindow
     p = tmp_path / "m.db"
-    c = db.init_db(p)
+    c = fresh_db(p)
     win = MainWindow(c, db_path=str(p))
     calls = []
     monkeypatch.setattr(backup, "create_backup",

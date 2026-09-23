@@ -935,7 +935,7 @@ CREATE TABLE reconcile_drafts (
 # Bank accounts need no such bound: there the beginning covers only reconciled
 # rows, so an older still-unreconciled item is genuinely outstanding and must
 # keep appearing. The column is nullable, and a NULL period start means the
-# unbounded behaviour (everything through the statement date).
+# unbounded behavior (everything through the statement date).
 # ---------------------------------------------------------------------------
 _V31 = """
 ALTER TABLE reconcile_drafts ADD COLUMN period_start TEXT NOT NULL DEFAULT '';
@@ -1058,7 +1058,7 @@ ALTER TABLE loan_params ADD COLUMN funding_account_id INTEGER
 """
 
 # Tax lots (roadmap item 7). ``accounts.lot_method`` names how a disposal is
-# costed (average | fifo | lifo; NULL = average, the behaviour every earlier
+# costed (average | fifo | lifo; NULL = average, the behavior every earlier
 # figure was computed under). ``holdings_checkpoints.lots`` carries the open
 # lots at each year end as JSON, so the snapshot+delta replay reproduces the
 # from-inception lot state exactly; the existing snapshots hold no lots and are
@@ -2078,6 +2078,141 @@ CREATE TABLE IF NOT EXISTS allocation_target_accounts (
 );
 """
 
+# 75 -- a saved REPORT DEFINITION is data the user owns, so it lives in the
+# ledger and not in QSettings: it must ride the backups and snapshots, move with
+# the .db to another machine, appear in export.py's dump, and cascade when a
+# category or an account is deleted. A report is a `report_defs` header (name,
+# kind, the stored date range) plus ordered `report_items`, each of one KIND
+# (SOSC = signed net of the selected categories, EDAB/SDAB = end/start display
+# account balance, HOLDVAL/RGAIN/NETGAIN and COMPUTED arriving in later phases).
+# The selections are SEPARATE child tables keyed by INTEGER ID, never by name --
+# `ledger.rename_category` keeps the id, so a name-keyed mapping would evaporate
+# the moment the user tidied a category name (SRD 5.9c records that failure for
+# the report filter bar; a tax report losing its Schedule E mapping is the worst
+# version of it). `include_subtree` is stored as a FLAG, not as an expanded id
+# list, so a child category added next year is picked up with no edit.
+# Securities are the one name-keyed child, because `securities` is keyed by
+# `symbol TEXT PRIMARY KEY` and identity across a ticker change is protected by
+# `security_aliases` (migration 64) instead. Report item tags are ORDINARY tags:
+# there is deliberately no report_tags table, because two tag vocabularies would
+# mean two things to type and two things to rename.
+_V75 = """
+CREATE TABLE IF NOT EXISTS report_defs (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'custom',   -- 'custom' | 'tax'
+    definition_id TEXT,                             -- e.g. 'us-1040-2025', or NULL
+    range_kind    TEXT NOT NULL DEFAULT 'fixed',    -- 'fixed'|'calendar_year'|'preset'
+    range_start   TEXT,                             -- ISO YYYY-MM-DD
+    range_end     TEXT,
+    range_year    INTEGER,
+    range_preset  TEXT,
+    notes         TEXT,
+    created_at    TEXT NOT NULL,
+    UNIQUE(name)
+);
+
+CREATE TABLE IF NOT EXISTS report_items (
+    id          INTEGER PRIMARY KEY,
+    report_id   INTEGER NOT NULL REFERENCES report_defs(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    name        TEXT NOT NULL,
+    label       TEXT,
+    group_label TEXT,
+    kind        TEXT NOT NULL,                      -- SOSC|EDAB|SDAB|HOLDVAL|RGAIN|NETGAIN|COMPUTED
+    sign        INTEGER NOT NULL DEFAULT 1,         -- +1 or -1
+    tag_enabled INTEGER NOT NULL DEFAULT 0,
+    options     TEXT,                               -- small JSON, kind-specific
+    expr        TEXT,                               -- COMPUTED only
+    txf_refnum  INTEGER,                            -- export metadata, NULL for non-tax
+    txf_copy    INTEGER NOT NULL DEFAULT 1,
+    txf_format  INTEGER,
+    UNIQUE(report_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_report_items_report ON report_items(report_id);
+
+CREATE TABLE IF NOT EXISTS report_item_categories (
+    item_id         INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    category_id     INTEGER NOT NULL REFERENCES categories(id)   ON DELETE CASCADE,
+    include_subtree INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (item_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_report_item_categories_cat
+    ON report_item_categories(category_id);
+
+CREATE TABLE IF NOT EXISTS report_item_accounts (
+    item_id    INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id)     ON DELETE CASCADE,
+    PRIMARY KEY (item_id, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS report_item_securities (
+    item_id INTEGER NOT NULL REFERENCES report_items(id)   ON DELETE CASCADE,
+    symbol  TEXT    NOT NULL REFERENCES securities(symbol) ON DELETE CASCADE,
+    PRIMARY KEY (item_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS report_item_refs (
+    item_id     INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    ref_item_id INTEGER NOT NULL REFERENCES report_items(id) ON DELETE CASCADE,
+    PRIMARY KEY (item_id, ref_item_id)
+);
+"""
+
+
+# An ACCOUNT's own asset mixture: the exact analogue of security_mixtures.
+#
+# accounts.asset_class could hold only ONE class, so "this sleeve is a
+# conservative 30/70" was unsayable -- the user had to pick one class and be
+# wrong about the rest, or leave it unclassified. An account holding no
+# securities at all (a stable-value sleeve, a managed account reported as a
+# single balance) had no way to say anything. A security has been able to say
+# it since security_mixtures; an account could not.
+#
+# Same shape on purpose: the normalize/split_value code in mammon.security_mix
+# serves both, so the two cannot drift apart.
+_V76 = """
+CREATE TABLE account_mixtures (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    asset_class TEXT NOT NULL,
+    pct         TEXT NOT NULL,             -- Decimal text, percent of the balance
+    source      TEXT,
+    as_of       TEXT,
+    UNIQUE(account_id, asset_class)
+);
+CREATE INDEX idx_account_mixtures_account ON account_mixtures(account_id);
+"""
+
+
+# A target's weights stated PER FUND inside an account, the way a broker's
+# auto-rebalance is actually set up.
+#
+# allocation_target_lines states a weight per ASSET CLASS, which is not a
+# tradeable unit: a blended fund moves three classes at once, so "sell $30,000
+# of domestic stock" cannot be executed without decomposing it across holdings
+# whose mixes differ. The user's own career practice was the other way round --
+# pick funds, give each a target percent, rebalance the funds -- which is
+# directly executable, produces the buy-low/sell-high effect by construction,
+# and restores the class mix as a CONSEQUENCE.
+#
+# So a target may state its weights in funds instead, and the class mix becomes
+# a computed read-out to check against rather than an instruction to follow.
+# Percent is of the ACCOUNT, because an account is the unit you can trade
+# within: money does not move between a 401(k) and a taxable account.
+_V77 = """
+CREATE TABLE allocation_target_funds (
+    id         INTEGER PRIMARY KEY,
+    target_id  INTEGER NOT NULL REFERENCES allocation_targets(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    symbol     TEXT NOT NULL,
+    pct        TEXT NOT NULL,             -- Decimal text, percent of the ACCOUNT
+    UNIQUE(target_id, account_id, symbol)
+);
+CREATE INDEX idx_allocation_target_funds_target
+    ON allocation_target_funds(target_id);
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -2154,6 +2289,9 @@ MIGRATIONS: list[str] = [
     _V72,
     _V73,
     _V74,
+    _V75,
+    _V76,
+    _V77,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

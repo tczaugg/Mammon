@@ -1,6 +1,6 @@
 """Generic tabular-import engine (mammon.importers.tabular).
 
-Locks in the behaviour the user asked for: a downloaded/scraped delimited file whose
+Locks in the behavior the user asked for: a downloaded/scraped delimited file whose
 structure the alias guesser can't read (a preamble above the header, a footer
 below the data, unfamiliar column names, split From/To counterparties, ``+ $`` /
 ``- $`` money) now imports correctly -- real transactions with correct signed
@@ -18,11 +18,12 @@ import pytest
 
 from mammon import db, import_review, importers, ledger
 from mammon.importers import csvimp, tabular
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

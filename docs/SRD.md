@@ -26,7 +26,7 @@ compartment is not sequential - do not renumber to tidy it.
 | **G** Learned rules | The five cooperating engines that turn bank gobbledygook into a payee and a category. Payee is resolved FIRST, category BELOW it. Nothing is seeded from history; all five learn only from what the user accepts. |
 | **H** Scheduled pre-entries, reminders and the calendar | Recurring bills and loan payments pre-entered as placeholder rows before the bank transaction arrives, and the forward-looking views built on them. A pre-entry matches on TOLERANCE, not exact cents. |
 | **I** Reconciliation | Reconciling a register against a paper or downloaded statement, and the audit trail for anything that changes a row after it is reconciled. |
-| **J** Reports, charts and customization | Read-only aggregations and how they are presented: the shared customization bar, chart behaviour, saved filter sets, export and print, and budgets. |
+| **J** Reports, charts and customization | Read-only aggregations and how they are presented: the shared customization bar, chart behavior, saved filter sets, export and print, and budgets. |
 | **K** Database, backups and encryption | The canonical schema, how it migrates, how balances stay fast over 40 years, and how the file is snapshotted. The database is one SQLite file the user owns. Encryption is its own document: `docs/encryption.md`. |
 | **L** Downloads, webSlinger and the MCP server | How transactions arrive from institutions, and the read-only tool surface an LLM sees. The app holds NO credentials: login and secrets belong entirely to the webSlinger/keyCocoon side. |
 | **M** Platform, architecture and open items | Non-functional requirements, the resolved technology decisions, and what is still open. |
@@ -170,7 +170,7 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   (date, id -- or date, time, id for crypto), so a same-day buy and sale of one
   security are never replayed as a short. **Balance
   keeps each row's date-ordered running value whatever the sort** (Quicken's
-  behaviour): sorting by payee never recomputes a balance. Num sorts numbers
+  behavior): sorting by payee never recomputes a balance. Num sorts numbers
   numerically, then text, blanks last; the money columns sort by magnitude;
   Clr ranks blank < c < R. An open editor is committed before the reset.
 - **Filter bar** (gear ▸ Filter Register, Ctrl+Shift+F): text over payee /
@@ -222,7 +222,7 @@ Code: `mammon/ledger.py` (the ONLY writer of transaction rows),
   batch edits via `update_investment_fields`, so no second write path opens and
   a cash-only transfer leg shown here is skipped rather than mis-resolved against
   the shared id space. Only the CONTENT differs (shares/price columns, an action
-  verb, no cash-only payee/category cells); the behaviour matches.
+  verb, no cash-only payee/category cells); the behavior matches.
 - **Tags** (the register's Tag column): a transaction carries any number of tags,
   entered and edited as ONE comma-separated string in the single Tag cell -- a
   free-text slot, NOT a multi-widget picker (explicit UX choice). Commas separate;
@@ -535,7 +535,7 @@ Code: `mammon/ledger.py`, `mammon/loans.py`.
   other. This is register-kind-blind in both directions: the cash/loan, the
   investment (5.8) and the crypto (5.8j) registers all OFFER it, and all three
   are valid destinations. A row that is not a transfer leg offers nothing -- the
-  entry is absent, not greyed. One entry per distinct counterpart account (a
+  entry is absent, not grayed. One entry per distinct counterpart account (a
   split touching the same account twice does not repeat it), the account itself
   is never offered, and a leg whose counterpart account no longer exists offers
   nothing rather than an unnamed jump.
@@ -701,7 +701,7 @@ floats and no money math in the UI layer.
 - **Currency is chosen at CREATION and is immutable.** The New Account dialog
   offers a currency selector (an editable ISO-4217 combo, defaulting to the base
   so the all-USD case needs no thought). Creation funnels through the sole account
-  writer `ledger.create_account`, which takes and normalises a `currency`
+  writer `ledger.create_account`, which takes and normalizes a `currency`
   argument — there is no second write path. Changing an account's currency after
   it holds transactions would silently reinterpret every past amount, so the
   Account Details dialog shows the currency **read-only** and never writes it back.
@@ -834,13 +834,13 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   package covers a source.
 - The investment register offers the same register toolkit as the cash register
   -- sort, filter, column chooser, multi-row batch edit, find-and-replace and
-  Void -- over the investment columns; see §5.1b for the shared behaviour and the
+  Void -- over the investment columns; see §5.1b for the shared behavior and the
   investment-specific Void.
 - Its row context menu carries **"Go to [account]" on a transfer leg**, the same
   entry the cash register has (5.2): it names the counterpart account and jumps to
   the mirror row. Both shapes this register shows are covered -- an XIn/XOut
   carrying a `transfer_account_id`, and a backfilled cash leg -- and the entry is
-  absent, not greyed, on a row that is not a transfer. `investment_transactions`
+  absent, not grayed, on a row that is not a transfer. `investment_transactions`
   has no pair-id column at all, so `investments.transfer_targets` locates the
   counterpart by (date, counter-account, |amount|); the register keeps no SQL of
   its own.
@@ -1110,15 +1110,15 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   matching category type, transfers excluded, splits honored), so the
   threshold/rollup/drill-down/percentage logic lives in exactly one place rather
   than being re-implemented per chart.
-- **Distinct wedge colours, with `Other` pinned** (`ui/charts.wedge_colors`,
+- **Distinct wedge colors, with `Other` pinned** (`ui/charts.wedge_colors`,
   `_PIE_PALETTE`). The palette carries enough visually separated hues for the
   worst realistic pie -- ~19 divisions, which happens when every real category is
   roughly 5% of the period and the sub-10% tail rolls up into an `Other` that is
   itself >=10%. The `Other` wedge always takes the palette's FINAL entry (a
-  neutral gray), so it stays a stable, recognizable colour no matter how many
-  real categories precede it. The old ten-colour list wrapped with `i % len`, so
+  neutral gray), so it stays a stable, recognizable color no matter how many
+  real categories precede it. The old ten-color list wrapped with `i % len`, so
   an 11th category reused -- and became indistinguishable from -- the `Other`
-  wedge's colour.
+  wedge's color.
 - **Net Worth Over Time reads against both axes** (`ui/charts.NetWorthCanvas`).
   The cumulative curve draws BOTH horizontal and vertical grid lines, the
   vertical ones aligned to the x-axis date ticks, at the crisp weight/opacity of
@@ -2152,7 +2152,147 @@ note.**
   the multiplier applied.
 
 
+### 5.8f-1 Targets stated PER FUND (SRD 5.8f-1)
+- **This REPLACED the class-based editor.** User, 2026-09-21: "I don't want the
+  old interface at all. Just the new one." `ui/rebalance_dialog.py` and its two
+  test files are gone; the dashboard's bottom-right corner and Reports ▸
+  Rebalance by fund… both open `FundTargetWindow`. The domain's class targets,
+  bands and locks stay -- `rebalance.drift` still serves the MCP tool and the
+  Investment Center card -- but nothing in the UI sets a class weight any more.
+- **The Investment Center's drift card must NOT read a fund target as class
+  lines.** A fund-stated target has no class lines at all, so `rebalance.drift`
+  reads every class as targeting 0% and tells the user to liquidate (verified
+  before the removal). The card detects `has_fund_lines` and shows the implied
+  blend instead -- current versus what the fund weights produce -- with no
+  action and no band verdict, because a class is not something you trade and
+  the user stated no goal for it.
+- **A weight per asset class is not a tradeable instruction.** A blended fund
+  moves three classes at once, so "sell $30,000 of domestic stock" has to be
+  decomposed across holdings whose mixes differ, using preferences the app does
+  not have. User, 2026-09-21: "when I sell that much in a fund that is 70/25/5
+  I've also sold bonds ... we could use some linear algebra ... and now we are
+  becoming too prescriptive. So I don't want to go there."
+- **So a target may state its weights per FUND, inside an account**
+  (`allocation_target_funds`, migration 77). That is the user's own career
+  practice: "I chose funds and came up with a target percent that each fund
+  would be in my portfolio. Then rebalancing was easy ... That had the correct
+  buy-low/sell-high effect and restored my asset class balance." The
+  instruction is then directly executable ("ZZBAL is 70%, target 60%, sell
+  $10,000"), the buy-low/sell-high effect falls out of holding the weights
+  fixed rather than from any rule, and the class mix is restored as a
+  CONSEQUENCE.
+- **The class mix becomes the CHECK, not the instruction.** `fund_target`
+  computes, forward and exactly, what the weights imply; nothing is solved for
+  and nothing is recommended beyond "this fund is N% and you said M%". The
+  class figures are there to be compared against the user's stated intent so
+  the weights can be nudged, which is what makes the loop work.
+- **Percent is of the ACCOUNT**, because an account is the unit you can trade
+  within -- money does not move between a 401(k) and a taxable account -- and
+  because that is how a broker's auto-rebalance is configured, so the same
+  numbers can be typed there.
+- **The whole-portfolio effect is the feature, not a footnote.** A target set in
+  one account says nothing about what the other accounts drifted to, and
+  "balanced" is a claim about everything owned. So the report carries
+  `portfolio_before` and `portfolio_after` over EVERY investment account, with
+  the accounts outside the target left exactly as they are: only the chosen
+  ones move, because proposing trades in an account the user did not select
+  would be a different thing entirely.
+- **Cash is a residue, not a target line.** A fund's own small cash holding is
+  part of its published mix and arrives through `security_mix`. The user holds
+  no cash deliberately in a retirement account -- theirs is un-reinvested
+  dividends -- so weights summing to 100 spend it, and weights summing to less
+  leave the remainder VISIBLE as cash rather than being scaled up to fill the
+  account, which is how a user notices they meant 100.
+
+- **The window: accounts with their composition, expandable into funds**
+  (`ui/fund_target_window.py`). Every investment account is a row with its own
+  stacked composition bar; opening one reveals its funds, each with the percent
+  it is of the account, a target percent to type, the drift and the resulting
+  buy/sell. Two bars at the foot, both over EVERYTHING owned: what you hold
+  now, and what you would hold with the open accounts at their targets.
+- **Expanding an account IS selecting it.** A closed account's target is
+  ignored, so with everything closed the two bars are identical and each
+  account opened moves the lower one (reported). That avoids a second selection
+  control saying the same thing -- the row being worked on is the row whose
+  target counts -- and it makes the mechanic self-evident on first open.
+- **A closed account's funds show no drift and no trade**, because its target is
+  not in the projection and those figures would describe a plan the lower bar
+  is not making.
+- **A segment is labelled only when its label fits** (`ClassBar(show_labels=)`).
+  Reported: "with the percentages in the bars or via tooltip for small bars". A
+  percentage clipped to "4" is worse than none, and the tooltip carries every
+  figure regardless. Ink over a segment is black or white by that segment's own
+  luminance, since the class palette spans pale gold to mid blue.
+- **Opening an untargeted account SEEDS it from the last mix the user stated**
+  (`rebalance.suggest_fund_lines`). Every fund starts at zero, which is the one
+  weight that is certainly wrong, and typing eight of them from memory is how a
+  target never gets set at all. User, 2026-09-22: "A useful default for the
+  target values could be the initial percentages, the contribution percentages.
+  Those can change over the life of the investments, as can the populated
+  funds." Three shapes of statement are read, and the MOST RECENT wins:
+  a REALLOCATION (funds bought and sold the same day -- the seed is the mix it
+  left behind), a CONTRIBUTION (several funds bought, nothing sold, funded by
+  money that came INTO the account -- the seed is how the new money was split),
+  and the OPENING purchase (the first day the account bought anything, used only
+  when there is nothing else, since an opening balance is a column rather than a
+  row anything can find).
+- **The statement is read from the SHAPE of the rows, never from memo text.** A
+  "CONTRIBUTION" memo survives only from some plan imports, and the accounts
+  being rebalanced today may carry no memos at all.
+- **Three things are deliberately NOT statements.** A share-class conversion --
+  one fund out, one in, the same money, the old position emptied and the new
+  name never held before -- is the plan renaming a holding, and its weights are
+  just yesterday's; a weight instead FOLLOWS the money into the fund's new name,
+  which is the only reason a plan that has renamed a fund twice can be seeded at
+  all. Dividends swept back into the funds that paid them are a split of what
+  each fund paid, not of what the user wants. And an exchange too small to be an
+  allocation decision (under `SEED_EXCHANGE_MIN_PCT` of the account) is
+  housekeeping -- closing out a residual across several funds is about 1% of an
+  account where a real rebalance is several times that.
+- **A statement that misses a fund now held is STALE, not partial**, and no seed
+  is offered: seeding the funds it names would leave the others targeted at
+  zero, which reads as "sell all of it". The other direction is safe -- a fund
+  named then but since sold is dropped and the rest rescaled to 100 -- because
+  not holding something is not an instruction to buy it. Weights are quantized
+  by largest remainder so they total exactly 100 at the window's own resolution.
+- **An account already carrying weights is NEVER re-seeded.** Suggesting over a
+  statement the user typed is the one way this could destroy their own work. The
+  note under the bars says which statement a seed came from, so a stale
+  suggestion is visible rather than silent.
+- **The window has the dashboard's account gear** (`CustomizeDialog` restricted
+  to `INVESTMENT_LIKE_TYPES`). Reported: "I need the same account picker
+  customization for the rebalance report as we have in the dashboard so I can
+  exclude some accounts." It narrows BOTH the accounts offered for rebalancing
+  and the two bars at the foot (`fund_target(scope_ids=)`), because money held
+  for someone else is not part of the mix at all. Its scope is remembered
+  separately from the dashboard's: "what am I looking at" and "what is mine to
+  rebalance" are different questions.
+- **Enter must not close the window.** Reported: "If I hit Enter while editing a
+  target amount the dialog should not close." A `QDialogButtonBox` promotes its
+  button to the dialog default and a spin box IGNORES Return once it has read
+  the typed value, so the keystroke meaning "I have finished this number"
+  arrived at Close as a click. The button is un-defaulted AND the key is
+  swallowed in `keyPressEvent`; there is nothing to accept, since weights are
+  stored as they are typed.
+- **The window is a separate window, not a mode on the old dialog**: the two
+  stated the target in different units and a target is one or the other, so one
+  dialog holding both would offer two statements of intent that can disagree.
+  (The old dialog is gone; see the first bullet.)
+
 ### 5.8f Target asset mix and drift (SRD 5.8f)
+- **The editor lists EVERY class; a read-only drift does not.** Setting a class
+  to zero DELETES its target line, which is deliberate: a line left at zero
+  rejoins the unlocked pool in `apply_target_edit`, so the next edit of another
+  class could proportionally hand weight back to the class the user had just
+  refused -- the same reasoning `set_line` already applies to a LOCKED zero,
+  which it keeps because it is a decision rather than an empty field. But
+  `drift`'s rows were `lines | current`, so a zeroed class the user holds none
+  of was in neither and its row vanished with no way to bring it back
+  (reported). `drift(include_empty_classes=True)` pads the rows out to
+  `portfolio.ASSET_CLASSES` and the Target & Drift dialog asks for it; every
+  other caller (the Investment Center card, the MCP tool) keeps the unpadded
+  rows, because a column of zeros is noise where nothing can be typed. Padding
+  adds rows, never cents.
 - `mammon/rebalance.py` holds a **target mix** and measures the real one against
   it. `portfolio.allocation` answers "where is my money"; this answers "is it
   where I meant it to be", which is the question an allocation view exists to
@@ -2177,6 +2317,12 @@ note.**
     bonds, and the two are rebalanced apart because they are taxed apart. An
     account with no treatment set may still be chosen -- saying what it is, is a
     separate decision.
+    The same column is the ONLY answer to "does this account pay capital gains"
+    (`rebalance.is_capital_gains_exempt`, `CAPITAL_GAINS_EXEMPT_TREATMENTS` =
+    everything but `taxable`), consumed by the Capital Gains report (J). One
+    column, two consumers, deliberately: a second retirement flag would ask the
+    user to say the same thing twice and the two copies would drift. Unset reads
+    as taxable, so a file that never said keeps its old report exactly.
   - *"There is no customization for accounts. I wouldn't want to include the
     [529] accounts here as those are for my kids."* `allocation_target_accounts` is the
     target's own account list, picked from a check-list grouped by treatment. No
@@ -2304,11 +2450,61 @@ note.**
   is an invitation to confusion. Target percent editable in place (through
   `set_line_balanced`, which redraws every row, not just the edited one),
   current percent, signed drift in points and relative, and a Buy/Sell figure per class (cash reads Invest/Raise, never Sell);
-  out-of-band rows coloured (red overweight, blue underweight -- they must not
+  out-of-band rows colored (red overweight, blue underweight -- they must not
   both be red, since they mean opposite actions). MCP: `allocation_drift`.
 
 
 ### 5.8g Asset-class mixture per security (SRD 5.8g)
+- **An ACCOUNT may hold a mixture too** (`account_mixtures`, migration 76,
+  2026-09-21). `accounts.asset_class` held one class, so a conservative sleeve
+  or a managed account reported as a single balance had to pick one and be wrong
+  about the rest -- and an account holding no securities at all could say
+  nothing. Same table shape as `security_mixtures` so `normalize` and
+  `split_value` serve both. An account mixture governs only what the account
+  contributes ITSELF: a non-investment account's whole value, and an investment
+  account's idle CASH. It never touches the securities inside, which say what
+  they are for themselves. `allocation` also honors an INVESTMENT account's
+  explicit single class now, which it previously never read at all -- that
+  balance was cash whatever the user set.
+- **`crypto` is an assignable class** (2026-09-21). It lived only in
+  `forecast.PROJECTION_CLASSES`, so the projection knew it was four times as
+  volatile as equity while nothing upstream could emit it: a spot-crypto ETF or
+  a wallet could not be described as crypto at all, and `set_mixture`,
+  `set_security` and `set_account_asset_class` each refused the word.
+  `PROJECTION_CLASSES` is now exactly `ASSET_CLASSES`.
+- **A mixture can be typed by hand** (`ui/asset_allocation.MixEditor`).
+  `set_mixture` had existed since mixtures did and only `fetch_mixtures` ever
+  called it, so a 401(k) fund -- which has no public ticker for a provider to
+  look up -- could not be described at all. Percentages are scaled to 100 on
+  save, because 60/30/5 is plainly a ratio; all zeros clears the mixture and
+  returns the security to its single class.
+
+### 5.8g-1 The Asset Allocation report (`ui/asset_allocation.py`)
+- **Accounts, expandable into their securities, with a stacked bar each.** A pie
+  shows one grouping at a time and cannot compare two things, so "is my 401(k)
+  more aggressive than my taxable account?" -- the question that decides what to
+  buy next -- had no answer on screen. Bars over a shared class-to-color scale
+  answer it. Segments are ordered by `ASSET_CLASSES`, never by size, so bonds
+  are in the same place in every bar; the color map is one definition
+  (`class_colors`) so a class cannot change color between accounts.
+- **A legend, because the bars share one color map.** One legend serves every
+  bar on the page (reported), listing only the classes actually held -- a legend
+  naming classes nobody holds is one the eye learns to skip. It wraps by hand:
+  Qt has no flow layout, and a single row silently clips its tail at a narrow
+  window rather than saying so.
+- **INVESTMENTS ONLY.** Property, vehicles and other owned assets are out of
+  scope (reported): the dashboard's ring already excludes them, `forecast` has
+  no (mu, sigma) for them so they can never join a projection, and here they
+  bought nothing but a wedge. The older `AllocationDialog` keeps the wider
+  scopes and stays reachable from the register's gear.
+- **Amber triangles, not a silent bucket.** A holding with neither a mixture nor
+  a class lands in `unclassified`, which the old view reported as one more wedge
+  and left the user to trace. Every undefined row is marked AND so is every
+  rollup above it, so an account with one unallocated fund says so on its own
+  line. Same rule as `options_note` and `position_discrepancies`: state what is
+  missing rather than averaging it in. `unclassified` is drawn in the theme's
+  muted gray, never a class color -- the absence of an answer must not look like
+  one.
 - **The equity slice follows the class the security carries NOW**
   (`security_mix._settle_stock_slice`, read-time, 2026-09-15). A provider states
   what fraction of a fund is stock, bond and cash but never the domestic/overseas
@@ -2357,7 +2553,7 @@ note.**
 - **Preferred and convertible holdings map to `other`**, not to bonds or equity:
   they are hybrids, routinely under 0.5% of a fund, and Mammon has no class
   meaning either. `other` is the honest bucket rather than a guess about
-  behaviour.
+  behavior.
 - **Two rounding rules are load-bearing.** `normalize` forces the weights to
   total exactly 100 (a provider's own fractions sum to 99.98 or 100.01, and a
   mixture over 100 would allocate more than the position is worth), with the
@@ -2509,6 +2705,46 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
   with DO-NOTHING precedence so a single trade never stomps a market close. Unlike
   equities there is no name-to-ticker guess to confirm -- a coin symbol IS its
   ticker.
+
+**Editing price history (§5.5g).** A price is an OBSERVATION -- what the market
+closed at on a day -- so the editor's repertoire is deliberately narrow:
+BACKFILL a close nobody downloaded, and DELETE one that is wrong.
+`investments.delete_price` is the only removal verb; there is no "correct it to
+the right number", because offline the app is in no position to know what that
+number was, and an absent price is a state every valuation already reports
+honestly (an unpriced holding says so) while an invented one is not. Changing a
+price in place is offered only because a typo in a hand-entered backfill is real.
+
+Three properties are load-bearing:
+- **What is shown is what is STORED.** `investments.price_history` divides each
+  close by the splits dated after it so the chart reads in today's units;
+  `investments.stored_prices` does not, and the editor reads that. An editor
+  showing adjusted numbers would write one back as as-traded and a single
+  round-trip would silently restate the history. The SOURCE column is shown for
+  the same reason -- `SPLIT_ADJUSTED_SOURCES` treats a provider's closes and a
+  hand-entered one differently, so a backfill is written as `manual` and never
+  mislabelled as a download.
+- **A zero close is refused.** It reads exactly like a real collapse; the way to
+  say a day is not known is to delete the row.
+- **A moved price is an add plus a delete.** The date is the series key, so
+  editing one onto another date would otherwise leave a ghost at the old date.
+
+It is reached from a corner button on every price chart (`ChartDialog(on_edit=)`
+-- the chart is where a wrong or missing close is NOTICED, so it is where the fix
+belongs) and from the holdings context menu in both the securities and crypto
+windows. "No recorded price history" now offers the editor instead of being a
+dead end: that message names exactly the case a backfill exists to fix, and there
+was previously nowhere in the app to add the price it was complaining about.
+
+- **A coin's price series is reachable from its holding, and editable.** A coin
+  is filed under `{SYM}-USD` and a security under its own ticker, so a lookup by
+  the holding's symbol found nothing for every coin and the app reported "no
+  recorded price history" for a coin whose prices were in the table.
+  `price_symbol_for` is the one mapping both entry points use (an unpriced coin
+  still resolves to the pair, or a backfill would be filed where nothing reads
+  it). `CryptoHoldingsDialog` gained the double-click and context menu its
+  securities twin already had; without both halves a coin's prices were
+  unreachable at all.
 - **Net worth breaks out per coin AND per currency, USD applied only at this
   layer (the wallet's rule).** `fx.net_worth_by_asset` returns one line per coin
   (its NATIVE quantity and its USD-converted market value, coin x latest
@@ -2870,7 +3106,7 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
   crypto id lives in the overlapping id space of `crypto_transactions`, so
   forwarding it could let an unrelated cash row's payee masquerade as the label —
   storing the label directly sidesteps that collision.
-- **The crypto register FUNCTIONS like the cash register (behavioural parity),
+- **The crypto register FUNCTIONS like the cash register (behavioral parity),
   differing only where the content requires it.** The gaps closed:
   - a per-row **context menu** (right-click) offering New / Edit / Delete. Edit
     opens `CryptoTransactionDialog` — the crypto twin of the cash
@@ -2880,7 +3116,7 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
   - **"Go to [account]" on a transfer leg**, the same entry the cash register has
     (5.2): it names the counterpart account and jumps to the mirror row. It covers
     both shapes a crypto link takes — a crypto↔crypto pair, and a cash leg living
-    in an ordinary account — and it is absent, not greyed, on a row that is not a
+    in an ordinary account — and it is absent, not grayed, on a row that is not a
     transfer. `crypto.transfer_targets` locates the counterpart, so the register
     keeps no SQL of its own.
   - **Every field a posted crypto row legitimately has is editable — inline AND
@@ -2924,7 +3160,7 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
     (`FocusSelectDelegate` → `_FocusSelectLineEdit`: Tab replaces the value, a
     mouse click appends), with the calendar `DateDelegate` on Date.
   Only the CONTENT differs (coin quantities as Decimal text, a coin-denominated
-  fee, and a wallet's absent Price / Amount / Cash Bal); the behaviour is the same.
+  fee, and a wallet's absent Price / Amount / Cash Bal); the behavior is the same.
   `show_review` must re-fire the selection handler AFTER revealing the panel:
   `set_entries` selects row 0 and emits while the panel is still hidden, so the
   first row — the one already selected, whose re-click changes no selection and
@@ -2974,6 +3210,332 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
   `NetWorthByAssetModel` over `fx.net_worth_by_asset`, which splits exactly the two
   halves `display_balance` already sums, so a crypto holding is counted EXACTLY
   once and the Total equals the sidebar's Net Worth strip.
+
+### 5.8k Investment Dashboard and projection
+- **The dashboard is a PICTURE of the portfolio, not another table.** The
+  Investment Center (SRD 5.8d) already owns the tabular views -- allocation,
+  per-account performance, top holdings, drift -- so `InvestmentDashboardPage`
+  draws only things no table states: a donut ring of the portfolio, arrows for
+  money coming in, one line of numbers, two charts, and a projection. Anything
+  that wants a table is a CORNER LAUNCHER that opens the window already owning
+  that table. It adds no money arithmetic of its own: every figure is composed
+  from `investments`, `portfolio` and `forecast`.
+- **The securities ring carries a CASH wedge, and a single security's value
+  does not.** `allocation.by_security` is built from priced holdings, so the
+  securities ring once summed to less money than the accounts ring while the
+  center block showed the account-based total in both -- the difference, cash,
+  appeared on screen nowhere. It is a wedge now, last in the ring so it reads as
+  the remainder, and drawn only when there is some. Selecting it scopes the page
+  to cash, which has a value and deliberately nothing else: no gain, no
+  dividends and no rate, because inventing columns of zeros would claim
+  otherwise. Its key is a sentinel rather than the string `CASH`, since a real
+  security may be that ticker.
+- **A dividend paid in CASH is in the rates but not in the value, and the value
+  says so.** Both kinds are income and both count in a scope's dividend figure
+  and in every return percentage: `security_performance` treats a cash dividend
+  as money BACK, so it lands in the gain exactly as a reinvested one lands in
+  the ending value -- two positions earning the same $300 a year show the same
+  gain by either route, differing only in rate, because money returned sooner
+  earns more per dollar-year. What differs is the VALUE. A reinvested dividend
+  bought shares and is inside the position; a cash one went to the account's
+  cash, and there is no honest way to attribute that cash back to the security
+  that paid it, least of all once the position is sold. So a single security's
+  Total is asterisked when it has paid dividends in cash, the asterisk reading
+  "dividends not reinvested" (`portfolio.cash_dividends` decides, from the same
+  `_CASH_DIVIDENDS` set the flow classification uses, so the two cannot drift).
+  A whole-portfolio total is never asterisked: its cash is already in it.
+- **The thermometer follows the SELECTION, not just the account scope.** It
+  reads `current_mix`, whose scope used to be expressed only as account ids --
+  so a security selection measured the whole portfolio and a bond fund and an
+  equity fund in the same account put the needle in the same place (reported).
+  A security's mix is its own (its stated mixture, else its single class), and
+  an asset class is all of itself.
+- **The ring has a THIRD mode: by asset class** (reported, 2026-09-21).
+  `allocation().by_class` is the same composition the Asset Allocation report
+  draws as a bar, so the slices need no arithmetic here -- and the palette is
+  that report's `class_colors`, so bonds are the same hue in the ring as in the
+  report. Two pictures of one fact that disagreed about color would be worse
+  than one picture. This mode needs no cash wedge of its own: `by_class` already
+  counts cash and splits every mixture. An unallocated slice is labelled
+  "Unallocated", not `unclassified`: in a picture of the portfolio the word has
+  to say something is MISSING rather than name a category.
+- **A class scope states a VALUE and nothing else**, like the cash wedge. A
+  class is a property OF holdings, not one of them, and a gain is not a
+  difference of endpoints -- it is that difference less the money put in, and
+  money is put into HOLDINGS. Attributing a purchase to the classes its security
+  happens to be made of would invent flows the user never made, and a rate
+  solved on invented flows is worse than no rate.
+- **A class DOES have a history, and the plot draws it** (`class_series`,
+  2026-09-21). The user's formulation: `V = H @ C`, where H's columns are each
+  security's value history and C's rows are that security's class weights, so
+  V's columns are the classes' histories. It is computed by asking
+  `portfolio.allocation` for each sample date rather than by assembling the two
+  matrices, because that is the same arithmetic done by the ONE implementation
+  that already splits a holding -- a second one would be a second thing to keep
+  in step with mixtures, account mixtures, the sweep and the option exclusion,
+  and the first time it drifted the plot would disagree with the ring above it.
+  A test asserts the classes' curves sum to the portfolio's at every sample,
+  which is the identity C's rows summing to 1 guarantees. **C is held at
+  TODAY's weights**: `security_mix` stores one mixture per security with no
+  date, so this is what the current classification says the past looked like,
+  not what the funds actually held then.
+- **The CASH wedge still does not reach the plots**: its key is a sentinel, so
+  `value_series` would price it at zero and draw a flat line on the floor -- a
+  picture of a scope worth nothing rather than one that cannot be charted that
+  way.
+- **The mode switch NARROWS before it sinks.** Its distance above the top plot's
+  title is capped by the inner circle, which narrows as it rises; a third button
+  made the row half again as wide and sinking it to fit collapsed the reported
+  gap from 39px to 1. It now gives up width down to `MODE_ROW_MIN_WIDTH` to keep
+  the height, and only sinks when even a minimal row will not fit.
+- **One gear sets the page's account scope, and it is the application's
+  EXISTING customization widget.** A gear at the top of the ring area, just left
+  of the Performance Report corner (reported), opens the report bar's
+  `CustomizeDialog` -- not a second account picker invented for this page, which
+  would be one more place for the user's idea of "which accounts" to drift. Its
+  selection is the page's universe: the ring's wedges in both modes, both hole
+  charts, the center line, the inflow arrows and the projection all read it. No
+  selection means EVERY investment account, and a non-investment account ticked
+  in the dialog never enters the scope -- the scope is intersected with the
+  dashboard's own account set, so the gear narrows that set and can never widen
+  it into accounts this page has no valuation for.
+  The dialog **offers only the investment-like accounts** (`investment` and
+  `crypto`), all ticked, so it opens stating the page's actual universe
+  (reported: "default the customization picker to have only selected the
+  investment accounts"). It listed the whole roster before, all ticked, and the
+  intersection above then discarded the cash accounts silently -- checkboxes
+  that could not change anything. The restriction is an opt-in `account_types`
+  argument on `ReportFilterBar`/`CustomizeDialog`; every other report window
+  omits it and keeps the all-accounts, all-checked picker (§5.9).
+- **The ring reads in two modes, and a wedge is a filter.** "Accounts" gives one
+  wedge per investment account (`investments.account_valuation`); "Securities"
+  gives one wedge per security held across all of them
+  (`portfolio.allocation(...).by_security`). Zero and negative values are
+  omitted, and there is NO "Other" grouping in either mode -- folding small
+  slices would make exactly the holdings the user is hunting for unclickable.
+  Colors are assigned in sorted-key order, so a wedge keeps its color as
+  values move beneath it and across the mode toggle. Clicking a wedge filters
+  the whole page to it (`filterChanged` carries `("account", id)` or
+  `("security", symbol)`); clicking it again clears the filter, as does
+  switching mode, and the payload is then `None`. The selected wedge slides out
+  by a SMALL fraction of the radius (`SELECTED_EXPLODE`), enough to read as
+  picked and no more: the ring's view limit is `1.0 + SELECTED_EXPLODE`, so
+  every pixel of displacement is paid for by shrinking the whole donut, and a
+  showy explode makes the picture smaller for no information.
+- **The center line is the one line of numbers.** Inside the ring's hole, for
+  whichever subject is selected (or "All investments"): total market value, the
+  trailing-year gain, trailing-year dividends, and the annualized return at 1,
+  3, 5 and 10 years. A horizon with too little history is ABSENT -- never shown
+  as `0.0%` or a dash, which would assert a return the ledger cannot support.
+  It gets its OWN rectangle, laid over the charts' rectangle rather than sitting
+  as a row inside it, spanning the inner circle's full width: the charts' rect
+  is inscribed in the hole and so is narrower than the circle at its widest, and
+  a line of eight numbers held to that narrower width was being cut off. It is
+  ON TOP OF EVERYTHING in the area -- raised last by every path that places the
+  children, not once at construction -- and it is NOT mouse-transparent. It was
+  transparent at first, so that it could not swallow the clicks belonging to
+  the chart underneath it; but the attribute makes Qt skip the widget's whole
+  subtree when it decides what is in front, which is exactly what "the center
+  line is invisible" turned out to mean, twice. Nothing is lost by taking the
+  mouse there: the charts' rect reserves a blank strip the height of the line,
+  so what the line covers is blank.
+- **The value-history chart shows what the subject has been worth**, sampled
+  across a period the user picks (1, 2, 3, 5, 8, 10 years or Max, default 1
+  year; Max is discovered from the ledger and capped at 40 years). It is drawn
+  in the selected wedge's color, so the ring and the chart cannot be read as
+  describing different things; with no wedge selected it falls back to the
+  palette's accent rather than keeping the ex-selection's color. Both hole
+  charts take every color they draw with -- series, bands, ticks, labels,
+  spines, grid -- from the ACTIVE theme's palette, and both carry gridlines
+  behind the data, because a chart tuned for a white page is unreadable on a
+  dark one. They share one rectangle inside the hole, and that rectangle is not
+  the inscribed SQUARE: it is widened (`HOLE_WIDTH_SCALE`) to the widest
+  rectangle whose corners still lie on or inside the inner circle, buying chart
+  width -- the scarce axis, since these are time series -- at the cost of
+  height. The corners-inside-the-circle rule is the binding constraint for the
+  right edge and the height, so no amount of widening can push a plot out from
+  under the ring; the LEFT edge is then stretched a further
+  `HOLE_LEFT_STRETCH` (10%) of that width, bounded by the ring's OUTER radius
+  rather than its inner one -- the near corners end up behind the annulus,
+  which paints in front of them, and still never reach the left band.
+- **Each hole chart is CAPTIONED, on one row with its own period selector.**
+  The caption is to the left of the selector, and the selector is the chart's
+  own control moved into that row, not a second copy. The top chart's caption
+  names the current scope -- "Total Performance", "<account> Performance",
+  "<TICKER> Performance" -- because the curve is the same shape whichever of
+  the three it is drawing, and a wedge-scoped curve read as the whole
+  portfolio's is the misreading a title is cheapest at preventing; it is
+  refreshed wherever the scope is, so it can never name a curve that is no
+  longer drawn. Captions are as wide as the chart they caption and no wider.
+- **The projection is a percentile FAN, and it is labelled as an estimate.**
+  Below the center line, over a horizon of 5/10/20/30/40/50 years (default 20),
+  `forecast.fan` projects today's value forward from three stated inputs: the
+  current market value, the annual contribution implied by the inflow arrows,
+  and the risk level. It draws the 5-95% and 25-75% bands with a median line --
+  a fan, not a single curve, because a single curve reads as a promise. It is
+  closed-form, not simulated, so it is reproducible. The bands are NAMED on the
+  plot -- "5th-95th pct (model)", "25th-75th pct", "median (50th pct)" -- never
+  as standard deviations, which they are not, and the legend naming them is set
+  a size UP from the plot's base type, because prose needs more type than a
+  number to be read at the same distance. Its caption reads "Projected Future
+  Value", and directly under that row, full width and a size down, is the
+  disclaimer: "projections show estimated future performance ranges based on
+  risk models, but no model can predict the actual future." A fan read as a
+  forecast is the failure this page is most exposed to, so the sentence is part
+  of the chart, not a tooltip.
+- **The projection's contributions are SCOPED to the selection.** An inflow is
+  measured per account, so a fan drawn for one wedge carries only that account's
+  own stream and an account with no arrow projects ZERO contributions; the
+  unfiltered portfolio view carries the sum. A SECURITY selection also projects
+  zero: an inflow arrives in an account, not in a holding, so charging one
+  security with its account's whole stream would inflate that security's fan
+  with money that mostly buys something else, and splitting it by share would
+  invent a contribution policy the user never stated.
+- **The inflow arrows COUNT contributions; they do not infer a cadence.** An
+  investment account with at least 4 positive external flows in the trailing 365
+  days gets an arrow entering the ring from the left, inscribed with the ACTUAL
+  SUM of those flows over that window -- never an annualized extrapolation of a
+  guessed schedule. No cadence is detected, stored or named anywhere.
+- **The thermometer is the mix, stated in plain percentages.** A vertical cold
+  (all cash) to hot (all stocks) ladder that sets the mix behind the projection,
+  captioned with the stocks/bonds/cash split it currently means. It starts on
+  the rung matching the portfolio's REAL mix and follows it on every refresh, so
+  its resting position is a measurement rather than a default. It is read-only
+  until What If is on. The handle is an OVAL painted on the colored bar
+  itself -- one widget, driven by click, drag and the arrow/page keys -- not a
+  separate slider beside it, which read as a cross rather than a thermometer.
+  It takes only a FRACTION of an even share of the left
+  band's height (`THERMOMETER_HEIGHT_SCALE`, half): it is a selector, and at
+  full stretch it read as the page's main subject, which it is not.
+- **The arrows and the thermometer share a left band, clear of the ring.** They
+  are stacked in a fixed-width column whose right edge is the ring's left outer
+  tangent LESS a gap of `BAND_RING_GAP` (50px) -- aligned to the tangent so the
+  band reads as one column, and held off it by the gap so an arrow head does not
+  appear to touch the donut. The band is an OVERLAY placed against the ring
+  area, never a cell of the page layout: the tangent is a function of the ring
+  area's width, which would be a function of the band if the band were a cell.
+  The layout reserves its column as a left margin only.
+- **What If never writes anything.** Toggling it makes the arrow amounts
+  editable and unlocks the thermometer, and overlays a second fan on a dashed
+  outline of the measured baseline. Measured values are what the database says
+  and what-if values are what the user is imagining; NOTHING moves from the
+  second set into the first, and Reset restores the measured inflows and mix
+  without leaving the mode.
+- **What If is SCOPED to the selection, and it is never disabled.** It follows
+  the ring wedge exactly as the rest of the page does: with an account selected,
+  the starting value, the measured contribution, the measured mix and the
+  editable inflow are all that account's, so a $100 change to a $5,000 account
+  visibly moves that account's curve. It used to gray itself out whenever a
+  wedge was selected, and turning it on cleared the filter, which made the only
+  question it is good for unanswerable (reported: "I want to be able to do what
+  if on an individual account. Otherwise being able to change the inflow is
+  meaningless as a tiny inflow in a small account can't move the needle vs a
+  large total"). Two rules keep a scoped fan honest. Both fans are ALWAYS on the
+  same subject -- the measured baseline is re-measured for the scope on every
+  refresh, never left portfolio-wide underneath a one-account What If fan -- and
+  the What If control NAMES its scope in words ("All investments" or the
+  selected account or security), because a scoped fan misread as the portfolio's
+  is a worse failure than the gray button was. Selecting or clearing a wedge
+  while What If is on re-scopes the projection live rather than turning it off.
+  Contributions follow SRD 5.8k's scoping rule above, so a SECURITY selection
+  projects zero contributions and only the mix and horizon are in play.
+- **Every inflow arrow that is DRAWN is editable and clickable while What If is
+  on** -- no arrow is ever silently read-only or covered by something else.
+  Editing an arrow for an account outside the current selection is allowed and
+  RE-SCOPES the page to that account's own wedge (or, where there is no such
+  wedge to select -- securities mode -- back out to the whole portfolio), so the
+  typed number always visibly moves a fan. The earlier rule refused those edits
+  on the grounds that they could not move the drawn fan; the arrows then sat
+  there painted and inert whenever any wedge was selected, which reads as a
+  broken control rather than as a scope. The clickability half is a placement
+  requirement on the left band: the band is positioned by hand under overlays
+  that are raised above it, so no arrow may be laid out underneath a corner
+  launcher or the mode buttons -- the furniture below gives way instead.
+- **The four corners are launchers, one per quadrant, fixed by the user.** Top
+  left "Capital Gains and Taxes" (the report below); top right "Performance
+  Report"; bottom left "Set Asset Categories", which opens Asset Allocation ON
+  ITS BY-SECURITY TAB -- the tab where a security is actually given its asset
+  class (SRD 5.8g); bottom right "Explore Rebalancing", the target-and-drift
+  window (SRD 5.8f). They are overlays inside the ring area's corners, which a
+  circle inscribed in a square can never reach, so they cost the ring no height.
+  They sit in the MIDDLE of a three-level stack -- left band at the back, corner
+  launchers over it, ring canvas over both (reported: "the left side corner
+  boxes need to be in front of the arrow and thermometer panels but behind the
+  ring segments") -- so an exploded wedge paints over a corner box rather than
+  under it. A corner click still reaches its button because the ring canvas is
+  masked to an ANNULUS from the inner radius out to the view limit: only the
+  drawn band, plus the room an exploded wedge needs, is opaque to the mouse, and
+  the corners fall outside it. Each is one small page method
+  (`open_capital_gains`, `open_performance_report`, `open_asset_categories`,
+  `open_rebalancing`) funnelling through two seams -- one modeless, one modal --
+  so a test can assert what a corner aimed at without entering a modal loop.
+- **Each launcher is a prominent title over a themed graphic it paints itself.**
+  Four identical gray boxes of small text gave no clue which was which
+  (reported: "Replace the Explore Rebalancing box with a graphic showing two pie
+  charts with different proportions of the same colors in each with an arrow
+  between them and the title Explore Rebalancing. Similarly, replace the other
+  boxes with themed graphics and prominant titles"). So the bottom-right corner
+  draws two pies -- the SAME wedge colors in different proportions, today's
+  drifted mix on the left and the target on the right, an arrow between them --
+  and the other three draw what they open: a gain with the taxed share bitten
+  out of it (twice, a short lot against a long one), a rising series under a
+  trend arrow, a legend of colored swatches against named classes. The four
+  share one layout -- same box, same padding, title on top, graphic in what is
+  left -- because they are seen together and per-corner tuning would show. The
+  title word-wraps (a plain `QPushButton` clips "Capital Gains and Taxes" at any
+  realistic width) and steps down through a FINITE list of sizes until its block
+  fits, so the fit cannot loop; below a minimum the graphic is dropped and the
+  title keeps the whole box, an unreadable caption being the worse outcome.
+  Everything is painted with `QPainter` from palette NAMES resolved at paint
+  time -- no image files, no hex literals (reported before, of the plots: "poor
+  contrast in both dark and light mode") -- and the category hues are the ring's
+  own wedge colors, so the pies are recognisably the ring's. The frame is still
+  drawn by the style and the widget is still an ordinary `QPushButton`: hover,
+  focus, `childAt()` hit-testing and `clicked` are unchanged, and so is the
+  z-order above.
+- **Capital Gains and Taxes answers "what does selling this cost me?", one line
+  per OPEN TAX LOT.** The holding period is a property of the lot, not of the
+  position: the same ticker can hold a long-term lot and a short-term one at
+  once, so a per-position report cannot state it. Each line gives the account,
+  the ticker with its share count, the acquisition date, whether the lot is
+  **long-term or short-term**, the **date a short-term lot turns long-term** and
+  how many days away that is, the **tax consequence of selling before that
+  date** in prose, and then shares, cost basis, market value and unrealized
+  gain. A lot whose acquisition date is unknown is reported as such rather than
+  assumed long or short. The totals split the book into long-term gain, long-term
+  loss, short-term gain and short-term loss, and price the difference: the EXTRA
+  tax owed if the short-term book were sold today instead of held to term, at
+  the stated long-term and ordinary rates.
+- **It is a report in the shared window, not a bespoke dialog**, so it inherits
+  the filter bar, the saved filter sets, column sorting and CSV/HTML/PDF export
+  for free. **It has TWO entry points and must keep both**: the dashboard's
+  top-left corner launcher (`open_capital_gains`) and `Reports > Capital Gains
+  and Taxes (Window)…` (`widgets._capital_gains_window`), which open the same
+  `CAPITAL_GAINS_SPEC` through their respective `_open_report` /
+  `_open_report_window` seams -- exactly the dual wiring Investment Performance
+  has. A report reachable only from a page the user has to know to visit first
+  is, for that user, not there. **Two ways in, one window**:
+  `_open_report_window` raises an already-open window on the same spec rather
+  than stacking a second copy over it, so the second trip returns the user to
+  the report they already have, date range and sorting intact; a window the
+  user has CLOSED is dropped and reopened fresh, since the retention list only
+  exists to keep a modeless window alive while it is on screen. It is a snapshot as of the bar's "To" date -- a lot's term depends on
+  when it was bought and what day it is, not on a reporting window, so the
+  "From" date is ignored rather than silently dropping older lots. The prose
+  column sits BEFORE the money columns because the trailing column is always
+  right-aligned, and a right-aligned paragraph is unreadable; sorting is offered
+  on account, ticker, acquisition date, term, the becomes-long date, market
+  value and unrealized gain, but not on the prose.
+- **Staleness follows the shared contract.** The page takes an optional as-of
+  date (today by default) that every query keys off, and `mark_stale()` refreshes
+  at once when the page is visible and defers to the next show when it is not.
+  A refresh rebuilds the ring, the arrows, the center line and both charts, and
+  disturbs neither the current filter nor What If. The filter is DERIVED from
+  the ring after every rebuild rather than remembered beside it: whatever the
+  ring says is selected is the filter, and a refresh that drops the selected key
+  -- a security sold, an account narrowed away by the gear -- leaves no filter
+  at all. Holding the two independently let the page go on filtering, and now
+  projecting, a subject no wedge was showing as picked.
 
 
 ## Compartment F. Import and the review queue
@@ -3660,7 +4222,7 @@ from **Tools ▸ Rules Manager…**. Rules are app-learned and never imported, a
 money movement.
 
 - **A condition narrows WHEN a keyword rule fires; all-NULL is the old
-  behaviour.** A rule may carry any subset of `account_id` (scope to one
+  behavior.** A rule may carry any subset of `account_id` (scope to one
   account), `amount_min_cents` / `amount_max_cents` (an inclusive SIGNED
   integer-cent range, negative = money out), and `memo_contains` (a
   case-insensitive substring). `keywords.match_rule(desc, rules, *,
@@ -3999,7 +4561,7 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   reminder, the projection and the calendar. A manual definition's standing
   pre-entry is a plain register row: edit it there; the definition's next date
   is a stored counter edited in the manager, and deleting a posted bill does
-  not roll it back (Quicken's behaviour too).
+  not roll it back (Quicken's behavior too).
 - **The projection learns what is regular only from the user.** It projects
   entered rows, defined reminders and loan schedules, and never guesses from
   history on its own. The manager's Suggest… (`scheduled.suggest_recurring`)
@@ -4085,7 +4647,7 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
   sub-stream predictions are ordinary predictions — they pass through the same
   merge, the same entered-row and reminder dedup above, and the same per-payee
   dismissal (dismissing the payee dismisses all of its streams).
-- **The calendar colours what it shows**, in both themes: scheduled payment
+- **The calendar colors what it shows**, in both themes: scheduled payment
   red, scheduled deposit green, predicted payment yellow (amber on white),
   predicted deposit blue, pending pre-entry muted, entered row plain; a legend
   sits under the grid. Today's highlight comes from the theme: a fixed light
@@ -4407,12 +4969,32 @@ number — missing shares of one fund say nothing about another:
 ## Compartment J. Reports, charts and customization
 
 Read-only aggregations and how they are presented: the shared
-customization bar, chart behaviour, saved filter sets, export and print,
+customization bar, chart behavior, saved filter sets, export and print,
 and budgets.
 
 Code: `mammon/reports/` (pure functions returning plain data),
 `mammon/ui/report_filters.py`, `mammon/ui/widgets.py`.
 
+- **Long-term lots COMBINE; short-term ones do not** (`combine_long_term`,
+  2026-09-21). Reported: "all the lots that are long-term already should be
+  combined ... that is fine for short-term capital gains, as the time to become
+  long-term could vary." The columns that earn a short lot its own row are dead
+  on a long one -- `long_term_on` is past, `days_to_long` is 0, there is no
+  deadline to price, and every long lot taxes at the same rate. Reinvested
+  dividends make it acute: each reinvestment opens a lot, and a real position in
+  the user's ledger carries 92 open lots, 88 of them long.
+- **The grouping is per account, security AND SIGN.** Summing a long lot at a
+  loss into one at a gain nets them, and the harvestable loss -- the thing a
+  December report exists to surface -- disappears into a figure that is true
+  about the position and useless for deciding what to sell. `unknown`-term lots
+  are never folded in either: a lot whose acquisition date was never recorded is
+  a question, not a long holding. Totals are unchanged by construction, which is
+  asserted, because this report has to tie to the Holdings window.
+- **A combined row states its SPAN**, oldest to newest acquisition plus the lot
+  count ("2019-03-04 - 2021-11-12 (88 lots)"). The oldest lot's date alone would
+  read as a single acquisition and misdate the rest; blank would look like the
+  unknown-term line, which means something else. `group_long_term=False` gives a
+  row per lot, which is what a specific-identification sale needs.
 ### 5.9 Reporting
 - Priority: a spending report itemized by category over a selectable time
   period (month/quarter/year/custom).
@@ -4805,6 +5387,71 @@ each populated cell at `Qt.UserRole`, so a re-sort can never chart the holding t
 used to occupy that row, and a Portfolio total line or a click over empty space —
 carrying no symbol — pops up no menu at all rather than an empty one.
 
+- **Capital Gains and Taxes reports the holding-period clock, one row per open
+  tax lot.** `reports.capital_gains(conn, as_of=None, *, account_ids=None,
+  include_hidden=False, prices=None, long_term_rate=…, short_term_rate=…) ->
+  CapitalGainsReport` answers "which of my shares are long-term, which are short,
+  and what does selling early cost". Each `LotTaxRow` carries the account, symbol,
+  acquisition date, shares (Decimal), cost basis and market value (cents),
+  unrealized gain/loss, `term`, the date the lot turns long (`long_term_on`) and
+  `days_to_long`; the report totals long and short gains and losses in SEPARATE
+  buckets — a short-term loss is a benefit, not a smaller gain, and netting the
+  two hides the thing the user came to see. Three shapes are load-bearing:
+  - **One holding-period definition.** `investments.long_term_date(acquired)`
+    (anniversary + 1 day) is the date form of the rule `RealizedGain.term`
+    already applies — long only when the sale falls strictly AFTER the
+    anniversary. The report calls both, so a countdown can never disagree with
+    the term the realized-gain rows report. Never restate the holding period.
+  - **Per-lot, not average cost.** `compute_holdings` answers "how much and what
+    did it cost" and structurally cannot say WHEN the shares were acquired.
+    `investments.open_lots(conn, account_id, as_of=None) -> {symbol: [OpenLot]}`
+    is a read-only projection of the SAME `_replay_positions` replay behind the
+    Holdings window, so per symbol the lots sum to that position's quantity and
+    cost basis whatever the account's lot method (`average`/`fifo`/`lifo`) did to
+    them. Non-positive lots are omitted: a negative lot is a written option's
+    premium, an obligation with no holding period to run. Per-lot market value is
+    allocated pro-rata from the position's own value, last slice absorbing the
+    rounding, so lot values sum exactly to the Holdings figure; shares the replay
+    cannot date (restored from a pre-lot-tracking snapshot) become one
+    `acquired=None` / `term='unknown'` residue row rather than being dropped,
+    so the totals still tie out.
+  - **Tax rates are the caller's, always.** `DEFAULT_LONG_TERM_RATE` (0.15) and
+    `DEFAULT_ORDINARY_INCOME_RATE` (0.24) are documented ASSUMPTIONS and
+    parameters, never read from the database and never inferred: the app does not
+    know the user's bracket and must not pretend to. Each short-term row carries
+    the same gain taxed at both rates and `extra_tax_if_sold_now` (the difference
+    of the two ROUNDED figures, so the three numbers on screen add up), plus a
+    plain-language `annotation`. A short-term LOSS is annotated the other way —
+    it offsets short-term gains and then ordinary income, so it is worth MORE
+    before the lot turns long — and its figures are negative, a benefit.
+  - **A sheltered account is not in this report at all.** *"401K, IRA and
+    Roth IRA do not pay capital gains. But then you only have the name of the
+    account to go by."* (2026-09-19.) The answer is the account's own
+    `tax_treatment` (B, migration 74) through
+    `rebalance.is_capital_gains_exempt` — NEVER the account name, because "IRA"
+    appears in taxable rollover-named accounts and a 401(k) can be called
+    anything. The first build showed those lots with a blank term; the user
+    rejected it — *"if they're not taxed, don't put them in the report. That is
+    just a lot of clutter."* (2026-09-19) — so an exempt account is now SKIPPED
+    WHOLE: no lot rows, and not one cent in any total or subtotal, including
+    `total_cost_basis`, `total_market_value` and `total_unrealized`. There is no
+    `sheltered` term and no sheltered bucket. The single trace is
+    `CapitalGainsReport.excluded_accounts` (the names) rendered as the one-line
+    `exclusion_note` ("Excluded (not subject to capital gains): …") in the
+    footnote, never as row data — so the omission is stated, not silent. The
+    consequence is accepted: this report deliberately does NOT tie to the
+    Holdings window, which is where sheltered money is read.
+  - **The tax consequence is a verdict in the cell and a sentence on hover.**
+    *"the tax consequences field is way to long and unreadible without expanding
+    the report to full screen."* (2026-09-19.) The `If Sold Now` cell is bounded
+    by `ui/report_window.IF_SOLD_NOW_MAX_CHARS` ("+$412 tax", "LT loss",
+    "Term unknown") and must stand on its own, because CSV/HTML/PDF export
+    carries `cells` and cannot show a tooltip; the full `annotation` is the
+    cell's tooltip, and the whole-report caveats — the assumed rates, and which
+    accounts were left out as tax-sheltered — are one wrapping `footnote`
+    line under the table (`capital_gains_footnote`). The spec sizes the window
+    and fits the columns ONCE on populate, so ten columns are readable unmaximized
+    and still draggable afterwards.
 - **One money chokepoint feeds table, CSV, HTML and PDF.** A `ReportRow`
   carries `section`, `label`, and `amount` as **signed integer cents** (negative
   = out) and does no arithmetic; every surface renders that amount through the
@@ -4876,6 +5523,577 @@ carrying no symbol — pops up no menu at all rather than an empty one.
   injectable QSettings store (the test seam), matching how `ui/prefs.py` is
   exercised. The name prompt (`ReportWindow._prompt_filter_name`) is an
   overridable seam so headless tests never block on a modal.
+
+
+### 5.9r Taxes and custom reports
+The reports of §5.9a/§5.9b are fixed aggregations: the code decides what a row
+means and the user only chooses a period and some accounts. A tax return is the
+other shape. Its lines are decided outside Mammon, they are stable for a year
+and then change, and which of the user's categories feeds which line is a fact
+only he knows. **A custom report is therefore a STORED DEFINITION the user
+edits, not a computation the code names** — a named list of report ITEMS, each
+of which says how to produce one signed amount, evaluated against a date range
+on demand. Nothing computed is ever stored: re-pointing a definition at a
+different year changes every number with no edit to the definition, which is what
+makes "last year's return, this year's numbers" a two-second operation instead of
+a rebuild.
+
+**The model.** `mammon/reports/custom.py` is the domain layer (UI-free, read-only
+against the ledger's transaction rows; it owns its own definition tables and
+nothing else). A `report_defs` row is one report: a unique name, a `kind` of
+`tax` or `custom`, an optional `definition_id` naming the year definition it was
+built from (§below), and a range binding. Its `report_items` rows are ordered by
+`seq` and unique by `name` within the report; each carries a `label` (what the
+user wants printed, defaulting to the name), an optional `group_label`, a `kind`,
+a `sign` of +1 or -1, and a `tag_enabled` flag. An item's selections live in
+side tables keyed by INTEGER ID — `report_item_categories(item_id, category_id,
+include_subtree)`, `report_item_accounts(item_id, account_id)` — so renaming a
+category or an account cannot silently empty a report line. The one exception is
+`report_item_securities(item_id, symbol)`, keyed by symbol text because
+`securities` has no integer id; symbol renames are already handled by
+`security_aliases` and `investments.resolve_symbol`.
+
+**A category selection stores a RULE, not a snapshot.** `include_subtree = 1`
+means "this category and everything under it, as the tree stands at evaluation
+time", so a subcategory created next March is picked up by the tax line that
+already covers its parent. `include_subtree = 0` means that one category alone.
+The user expresses this with the ordinary tri-state `CategoryTree` (§5.9c): a
+fully ticked parent saves as a subtree rule and its children are not enumerated;
+a partially ticked parent saves as itself alone plus whatever is ticked beneath
+it. Because a merge or a delete in Categories… moves the id a report line points
+at, that dialog now reports how many report items reference the doomed category
+before it asks for confirmation (`ui/categories_dialog._report_item_note`,
+`custom.items_using_category`). It is a warning and never a veto — tidying the
+tree before a merge is the normal case — but it is the one consequence the user
+cannot see from the category tree itself.
+
+**Item kinds.** All seven the schema admits are evaluated
+(`custom.ALL_KINDS == custom.IMPLEMENTED_KINDS`); the two tuples stay separate
+anyway, because a definition file may name a kind a future build drops, and the
+refusal in `evaluate` has to SAY so rather than silently reading zero — a tax
+line that reads 0.00 when it means "unimplemented" is the worst possible failure
+here.
+- `SOSC`, sum of selected categories: the signed net of every register LINE — an
+  unsplit transaction or one split leg — whose category is in the item's
+  selection, over the range.
+- `EDAB`, end-date account balance: `investments.display_balance` at the range
+  end, summed over the selected accounts.
+- `SDAB`, start-date account balance: the same, taken as of the day BEFORE the
+  start, so that `SDAB` plus the range's flows equals `EDAB` with no off-by-one
+  at the boundary.
+- `HOLDVAL`, holdings value at the range end over the selected accounts, narrowed
+  to the selected securities. An EMPTY security selection means every symbol
+  held, not none: "what is this account worth" would otherwise go stale the day a
+  new holding is bought.
+- `RGAIN`, realized gain booked by disposals dated in range
+  (`portfolio.capital_gains`), filtered by `options["term"]` — `short`, `long`,
+  or `all`. `all` is the default and counts a lot whose holding period could not
+  be determined, because dropping it would understate the total silently.
+- `NETGAIN`, `(EDAB − SDAB) − (money in − money out)`: what the selected accounts
+  gained that was not contributed. Flows come from `portfolio.external_flows`,
+  which reconciles ledger transfer legs against the `XIn`/`XOut` rows recording
+  the same movement, so a contribution is subtracted once; a transfer between two
+  SELECTED accounts cancels, which is what "net of the set" has to mean.
+- `COMPUTED`, arithmetic over the other items of the same report — see §5.9t.
+
+`EDAB`, `SDAB`, `HOLDVAL` and `NETGAIN` are `PRICED_KINDS`: their number depends
+on a security price, and so can come back incomplete (§5.9t).
+
+**The tag override.** Category selection is right for most lines and wrong for
+the handful a user argues with his accountant about, so an item's NAME doubles as
+a Mammon tag when `tag_enabled` is set. These are ordinary tags in the existing
+`tags`/`transaction_tags`/`splits.tag_id` machinery of §5.6 — no parallel
+vocabulary, and the tag row is created lazily on first real use, not when the
+item is created. `ledger.validate_report_item_tag_name` forbids a comma and a
+leading `!`, and enforces case-insensitive uniqueness ledger-wide among
+tag-enabled item names, because `tags.name` is `COLLATE NOCASE`. Precedence is
+fixed and deliberately one-directional:
+1. **Exclusion wins absolutely.** `!Name` on a line beats `Name` on that same
+   line and beats category selection. There is no way back in.
+2. **Inclusion beats category selection.** `Name` pulls a line in even though
+   its category is not selected.
+3. **Category selection is the default, and only on `SOSC`.** The balance kinds
+   have no category selection to override, so a tag on them does nothing.
+
+**`tag_enabled` gates INCLUSION only; exclusion is always honoured.** Rule 2 is a
+standing promise about a whole vocabulary — *any* line tagged `Name`, now or in
+future, joins this item — and an item has to opt into that. Rule 1 is not that
+promise reversed: `!Name` names one posting the user is looking at, it can drag
+nothing in, and there is nothing to opt into. Gating both on the flag was a
+defect: the drill-down's exclusion gesture (§5.9u) wrote the tag and 67 of a real
+report's 68 lines ignored it — the number did not move, the row was not struck
+through, and the ledger's tag vocabulary silently collected an entry that meant
+nothing. A `!Name` tag is therefore matched against every `SOSC` item's name,
+tag-enabled or not.
+
+**A comma in an item's name makes it unexcludable, and that is refused up
+front.** `transactions.tag` is a comma-joined cache parsed back by `parse_tags`,
+so `!Schedule B:Div inc., non-taxable` would store and read back as two tags —
+an exclusion matching nothing, plus junk in the vocabulary. This is the same
+constraint `validate_report_item_tag_name` already imposes on a tag-ENABLED
+name, applied to the other half of the mechanism; the packaged Quicken tax
+definition has fourteen such names, so it is the common case rather than a
+corner. `ledger.toggle_report_exclusion` raises before writing anything, and the
+drill-down's menu shows the entry DISABLED with the reason rather than a
+working-looking one that fails on click.
+
+On a split, tagging the parent pulls in every leg at its own amount and tagging
+one leg pulls in only that leg; a parent `Name` with `!Name` on one leg carves
+that leg out and leaves its siblings in, because a leg's effective tag set is the
+parent's union its own and rule 1 then applies.
+
+**A transfer has no category, so an `SOSC` item reaches one by TAG or by
+selecting the account at its far side** — rule 4, and in both cases it is that
+leg only, at that leg's own sign. The selection exists because a tax line is
+routinely stated NET of money that merely moved: W-2 box 1 wages are gross pay
+less the 401(k) deferral, and that deferral is a transfer leg of the paycheck
+carrying no category at all, so an item summing categories could not express the
+figure the form asks for. (The same arithmetic is what a tithing report wants of
+the same paycheck.) Matching on the FAR side is what makes it single-sided: a
+transfer contributes two rows to `signed_lines`, and only the one sitting outside
+the selected account points AT it, so selecting `[401k]` picks up the paycheck's
+leg and not its mirror. Selecting BOTH accounts of one transfer does match both
+rows — a real double count, reported through `transfer_double_counted` exactly as
+tagging both legs is, never silently halved.
+
+The selection is stored in `report_item_accounts`, the table the balance kinds
+already use for "which accounts to value". The reuse needs no migration
+(migrations are append-only and an `SOSC` item never had a row there) and cannot
+collide, because an item has exactly one kind; `custom._selected_transfer_ids` is
+a separate accessor from `item_accounts` so that a reader lands on the meaning
+its kind gives the rows rather than on whichever accessor came to hand. Tags are also what an item can be SUBTOTALED by, one
+sub-line per tag value, which is §5.9u.
+
+**Coverage is computed, and shown AT the number it is about.** `evaluate`
+returns an `Evaluation` (report id, name, resolved start and end, the rows, a
+`Coverage`, and — with `detail=True` — the lines each item saw), and the report
+always renders, whatever Coverage found. Four things are computed because each is
+invisible otherwise and none is safely auto-fixable:
+- `multi_claimed` — lines claimed by two or more items. Expected and allowed: one
+  category legitimately feeds several tax lines. It is also why the items of a
+  report do not necessarily sum to anything meaningful.
+- `unclaimed` — lines inside the union of the report's category selections that
+  no item ended up claiming, reachable only by an exclusion tag on every item
+  that selected the category. On a tax report this is money left on the table.
+- `transfer_double_counted` — both legs of one transfer pulled into the same item
+  by inclusion tags, which is a guaranteed double count. Detection is deliberately
+  conservative (a mutually linked `transfer_pair_id` whose amounts cancel exactly)
+  and it is warned about, never silently de-duplicated, since an
+  external-looking pair can be legitimate.
+- `ignored_tags` — an item that is tag-enabled but whose kind cannot honor a tag.
+
+`Coverage.clean` is true only when all four are empty.
+
+**There is no Coverage PANEL, and that is the requirement.** One existed: a text
+block under the report listing every finding. It printed EVIDENCE — one line per
+transaction, with its date and amount — where the user needed FINDINGS, and on a
+real tax report that meant eighty entries standing for thirteen facts, thirty-six
+near-identical rows for two of them, and a forty-four-name comma run-on for the
+setup list. Worse, it ordered them by category rather than by consequence, so the
+two findings that mean a figure is WRONG printed below the wall of the one that
+means "this is normal", and on a report where both of those were clean it said
+nothing at all. A user cannot act on that, and a warning surface nobody reads is
+worse than none, because it looks like diligence.
+
+Every finding is therefore attached to the row it is about, in the drill-down
+(§5.9u):
+- `multi_claimed` and `transfer_double_counted` become an amber warning triangle
+  ON each item involved — the app's one warning mark (`ui.models.warning_triangle_icon`) —
+  carrying the explanation as a tooltip. The tooltip text is built in the DOMAIN
+  layer (`custom.DrillMark`) because it is a statement about the arithmetic, and a
+  rule the user can only reach through a tooltip is still a rule that must be
+  testable without Qt.
+- A line an exclusion tag removed is drawn struck through in place, carrying its
+  real amount. `Coverage.unclaimed` answers a report-wide question and is a
+  different set from "lines THIS item lost"; the latter is `ItemDetail.excluded`,
+  and it holds only lines that would otherwise have been admitted — never every
+  line in the ledger carrying a `!tag`.
+- `ignored_tags` and the "nothing selected yet" list are not surfaced. A line with
+  no selection reads `0.00` with no children, which is the same shape as a line
+  that genuinely came to zero. This is a known and accepted loss of signal.
+
+**Year definitions, Create and Update.** A tax year's line-up is data, not code.
+`mammon/reports/report_defs.py` loads definition FILES — JSON canonically, YAML
+if the optional parser happens to be present — from `paths.report_defs_dir()`
+first and the shipped `mammon/report_defs` second, so a user's own definition
+shadows a shipped one of the same id. A definition names its `version`, `id`,
+`family`, `title`, `kind`, `year`, a `default_range`, and its `items`, and each
+item may carry `migrated_from` naming its predecessor line. **Create**
+(`create_from_definition`) builds the report and its items with NO selections at
+all: it evaluates to zeros on purpose, and `unassigned_items` is the resulting
+to-do list. If item insertion fails partway the whole report is deleted, so a
+form is never left half-built. **Update** (`update_report`) never mutates the
+source: it builds a fresh report from the new definition and then, for each new
+item with a `migrated_from` pointer, copies the predecessor's category, account
+and security selections, plus `sign` and `tag_enabled` only where the new
+definition left them unstated — the definition wins on anything it states
+explicitly. A kind change between the two is a refusal, not a coercion; nothing
+is copied and the item is reported. The returned `MigrationResult` spells out
+`carried`, `new_lines`, `dropped` (with the old selections written out by NAME so
+they can be reassigned by hand), `kind_changed` and `unresolved`, and is `clean`
+only when nothing needs attention. Many-to-one merges are not supported in this
+version and raise rather than guessing.
+
+**Ranges.** A definition binds one of three `range_kind`s: `fixed` (explicit ISO
+`range_start`/`range_end`), `calendar_year` (`range_year`, resolved to Jan 1
+through Dec 31), or `preset` (a Period preset name from the customization bar of
+§5.9c, resolved against today). `custom.resolve_range` is the single dispatch and
+raises on a kind whose supporting field is missing. `evaluate` accepts an explicit
+start and end that override the binding without touching it, which is what lets
+one definition be evaluated across several years for comparison without copying
+it.
+
+**The window.** Reports ▸ Taxes and Custom Reports…
+(`ui/custom_report_window.CustomReportWindow`) is a modeless `QDialog` like the
+other report windows, shown and never `exec_()`-ed, because a user assigning
+fifty tax lines needs his register beside him. It is a thin projection in the
+usual sense — no SQL and no money math, every number from `custom.evaluate` and
+every string from `fmt_cents` — and it has three shapes worth stating as
+requirements:
+- **The item table never edits in place.** It is read-only; selecting a row loads
+  that item into a sibling editor panel holding the name, label and group fields,
+  the kind and sign combos, the tag checkbox, and a stacked picker of THREE
+  pages: the `CategoryTree` for `SOSC`, the account list for every account kind
+  (`EDAB`, `SDAB`, `HOLDVAL`, `RGAIN`, `NETGAIN`) and the formula page for
+  `COMPUTED`. The third page was specified from the start and missing in
+  practice — `COMPUTED` fell through to the account list, so the window offered
+  a list of accounts to an item that sums other ITEMS and no way to type the
+  formula at all, leaving a kind the evaluator fully supports unreachable. This
+  is
+  structural, not stylistic: an in-place delegate would have to open a picker
+  from `setModelData`, which is the documented way to corrupt the heap in this
+  codebase. The tag checkbox disables itself, with a tooltip saying why, on the
+  kinds that ignore tags.
+- **The `COMPUTED` page offers the report's other lines, it does not ask for
+  them to be retyped.** A brace name must match another item EXACTLY, and a
+  formula naming a line the report has not got is refused — correct, and useless
+  if the names are `W-2:Soc Sec tax withhld, spouse` and the only way in is to
+  transcribe one. Double-clicking a line inserts `{its name}` at the cursor
+  (`insert_expr_name`, public because that is what the gesture means and a test
+  should drive the verb). An item is never offered its OWN name: that is a cycle,
+  caught at save either way, but an editor that offers the mistake invites it.
+  The formula is written through only when the kind IS `COMPUTED`, so a formula
+  left in the box cannot survive a kind change and reappear later as a stored
+  contradiction nobody typed.
+- **The `SOSC` picker carries a "Transfers" branch** listing every account as
+  `[Name]` — Quicken's convention, and the notation the register and the
+  drill-down already use for a transfer. It is one list because that is where the
+  user looks: the gap it closes was reported as "transfers are not on the list".
+  Those rows arrive UNTICKED while categories arrive ticked, for the same reason
+  `build_account_picker` unticks everything — "every category" is the filter bar
+  saying no filter, but "every transfer in the ledger" is never what someone
+  adding a tax line meant. A transfer row carries `account_id` and not
+  `category_id`, so every existing walker (all of which test `category_id is not
+  None`) steps over it rather than counting an account as a category, and
+  `set_item_selections` restores both halves in ONE pass because they share a
+  widget and either restore alone would clear the other.
+- **Every user choice goes through an overridable seam** (`_prompt_text`,
+  `_confirm`, `_warn`), and an evaluation FAILURE — an empty or cyclic
+  `COMPUTED` expression, an unresolvable range, a kind this build cannot
+  evaluate — is rendered into the status line under the report rather than thrown
+  at a modal, so the window stays usable long enough to fix the item that caused
+  it.
+- **What the tree shows and what the CSV contains come from one pure
+  projection.** `drill_tree_rows(tree)` produces the drill-down rows (§5.9u) and
+  `report_def_to_csv` writes exactly those under a
+  `Line item / Tag / Category,Date,Payee / Memo,Amount` header, following the
+  Export CSV convention of §5.9b. Export is a dialog-free `export_csv_to(path)`
+  seam with the file chooser layered above it, so the exact bytes are testable.
+
+Duplicating a report copies its items and all their selections but forces
+`tag_enabled` off on every copy, since a tag-enabled item name must be unique
+ledger-wide and the duplicate would otherwise collide with its source.
+
+
+### 5.9t Computed items, multi-year comparison and export
+
+**A `COMPUTED` item is a restricted expression, not code.** Item names in braces,
+`+ - * /`, parentheses and numeric literals — and nothing else. No `eval`, no
+attribute access, no function calls, because a definition file (§5.9r) is data a
+user may have downloaded and must never be executable. Arithmetic runs on integer
+cents through `Decimal`, never a float, and every DIVISION rounds `ROUND_HALF_UP`
+to whole cents immediately, so "a tenth of the increase" is a number the user can
+check by hand. A brace name refers to its referent's PRESENTED amount — after
+that item's `sign` — because that is the number he reads off the row he is adding
+up. Names resolve to item IDs at SAVE time and are stored as edges in
+`report_item_refs`, so a rename cannot break a formula and the dependency graph
+is inspectable without re-parsing anything; a forward reference (a definition
+file listing a total above its parts) resolves as soon as the referent exists,
+since every write re-syncs that report's edges. **Cycles are rejected at save AND
+re-checked at evaluate** — not redundant, because edges are ordinary table rows a
+hand-written `UPDATE` can corrupt, and the failure being prevented is an
+evaluation that recurses until the interpreter dies. Detection and evaluation are
+both iterative, and the error names the loop. An empty expression is allowed on
+CREATE and refused at evaluation: the editor adds the row before the formula is
+typed, and a half-built report must not be unsaveable. Item totals deliberately
+do not add up to a grand total (§5.9r, `multi_claimed`); a `COMPUTED` item naming
+the lines the user wants added is the only meaningful total.
+
+**Multi-year comparison is a domain verb with no window on it.**
+`custom.compare(conn, report_id, ranges)` evaluates the SAME report over several
+`(start, end, label?)` ranges and aligns rows by item in `seq` order — the payoff
+of storing a range as a binding rather than baking two dates into the items
+(§5.9r, Ranges): a column cannot disagree with the single-range report about what
+the definition MEANS. A label defaults to the year when the range is exactly a
+calendar year. A column missing a row gets an explicit zero rather than a gap.
+The definition itself, including its stored range, is untouched by comparing.
+This is deliberately framed as ARBITRARY multi-range comparison, which subsumes
+the two named comparisons other programs offer as separate features: a
+**prior-period** comparison is this mechanism given the current and the preceding
+range, and a **year-over-year** comparison is it given one range per year — no
+extra machinery, and the same rows aligned the same way in both.
+
+The WINDOW no longer offers it. The report panel is a drill-down (§5.9u), and a
+tree whose leaves are individual transactions has no honest multi-column form:
+one transaction does not appear in three years at once. `compare` is retained as
+a computation — it is the only thing that justifies storing a range as a binding,
+and the MCP surface can answer a year-over-year question with it — but the window
+shows one range at a time. The per-column coverage badge, the `*` no-data marker
+and the `?` incomplete marker went with the grid; `ReportRow.no_data` and
+`ReportRow.unpriced` still carry both facts for any caller that renders columns
+again.
+
+**Export.** Two files, both behind a dialog-free seam with the file chooser
+layered above it, so the exact bytes are testable headlessly:
+- **Print** — `Print…` sits beside the exports and goes through a SETUP window
+  first (`ui/report_print_dialog.py`), because a drill-down is as wide as its
+  deepest open branch and does not fit a page by default. Four choices:
+  orientation, font family, size, and **which column gives way** when neither
+  orientation nor type size is enough. Amount and Date are not on that list —
+  **the numbers always show**, since a clipped figure still reads as a number and
+  is worse than no page at all. Auto-fit measures each column from its content
+  (the hierarchy column WITH its indent, which is what makes a drill-down wide);
+  what is left goes to the hierarchy and Payee columns, and a shortfall cuts the
+  user's chosen one first, to an ellipsis, down to `MIN_FLEXIBLE` before the
+  other gives way at all.
+
+  **The page prints the tree AS IT STANDS** — `visible_drill_rows()` walks only
+  expanded branches. Expansion state is already the user's statement of what he
+  wants on paper, so there is no "print all levels" option: the tree is one. The
+  PREVIEW in the setup window is the real fitted output over the real rows, not a
+  mock-up, so a payee about to be cut is seen there rather than discovered on
+  paper. Fitting is pure arithmetic on CHARACTERS (`ui/report_print.py`), with
+  the page budget the one measured quantity: font metrics and page rect are both
+  taken against the PRINTER, since measuring the font alone yields screen pixels
+  against a page in points and reported US Letter as 45 characters wide.
+- **CSV** — `export_csv_to(path)` writes whatever is on screen: the drill-down,
+  flattened by `drill_tree_rows` under
+  `Line item / Tag / Category,Date,Payee / Memo,Amount` (§5.9u), with the first
+  column indented two spaces per level so the hierarchy survives. The tree and
+  the file walk ONE row list, so an export cannot disagree with the screen. An
+  excluded row reaches the file marked `[excluded]` in words: a strike-through is
+  a screen effect, and a spreadsheet receiving a number that looks included is
+  the misreading the strike exists to prevent.
+- **TXF v042** — `export_txf_to(path)` over `mammon/reports/custom_export.py`.
+  Only items with a non-NULL `txf_refnum` are emitted, one summary record
+  (`TS`) each, numbered from 1 within each `(refnum, copy)` pair so that adding
+  an unrelated line above employer two does not renumber it. **A `COMPUTED` item
+  never emits**, even if someone puts a refnum on one: TXF's only aggregation
+  concept is summary-over-detail (transactions into one form line), no record
+  format holds another refnum, and emitting a computed total as an independent
+  form line would double-count it against its parts. A report carrying no
+  refnums at all is caught in the UI BEFORE the file chooser — a `_warn` saying
+  so, and no file written — while the writer itself still answers honestly with a
+  header-only file if called directly. Conversions happen at this boundary and
+  nowhere else: cents become plain decimal strings with no `$` and no comma, ISO
+  dates become `MM/DD/YYYY`, records are separated by `^` on its own line, lines
+  end CRLF, and the file is written with `newline=""` so Windows does not turn
+  that into CRCRLF. TXF always describes ONE tax year — whatever the window's
+  date fields hold, because a tax form has no column for last year.
+
+
+### 5.9u Per-tag breakdown of a report item
+
+**The case.** Several rental properties, each carrying its own tag on every line
+that belongs to it (`7344 Muirfield`, `6054 Mapleview`), and a Schedule E that
+needs one COPY of the same set of lines per property. Maintaining one item per
+property per line is the thing to avoid: four properties times six lines is
+twenty-four definitions to keep in step, and adding a property means editing all
+six. Instead ONE item — "Property tax", pointed at the category the way any
+`SOSC` item is — says *subtotal me by tag*, and answers with one sub-line per
+property.
+
+**It is per item and ON BY DEFAULT, with an opt-out.** Nobody should have to type
+the names of his own properties to see them subtotalled, and typing them was also
+how a property got silently left out of its own report; so an item that says
+nothing subtotals by EVERY tag its matched lines carry, and the only setting the
+editor offers is "do not". The opt-out is `options["no_tag_breakdown"] = true`
+(`ReportItem.break_by_tag` then reads `None`). It rides the `options` blob because
+an item's per-kind settings already live there and a definition file written by an
+older build must keep loading — and it is a SEPARATE key from `break_by_tag`
+rather than `break_by_tag: false` because "off" is now the unusual state and
+deserves to be the one written down, leaving `break_by_tag` free to go on carrying
+the restrict LIST of a definition that has one. A list of tag names still
+restricts and orders the buckets, and a listed tag is emitted **even in a range
+with no activity**, so a property's TXF copy number cannot shift under it between
+years; the editor has no way to write a new list, but a stored one is honoured.
+`ReportItem.break_by_tag` reads back `None` (opted out), `()` (discover every tag
+— the default, and what junk in the blob degrades to) or the tuple of names.
+
+**Discovery with nothing to discover emits NO sub-rows** — not a lone
+`(untagged)` row restating the item's total. That rule is what makes the default
+safe: the overwhelming majority of items in the overwhelming majority of reports
+match lines that carry no tags at all, and they render exactly the single row they
+always did (in TXF, one record rather than two saying the same thing). An explicit
+LIST still emits its rows, zeros included, because the user named those buckets.
+
+**The row shape: sub-rows, then the untagged remainder, then the item's own
+total.** The total row is bit-for-bit the number the item produced before any
+breakdown existed — the breakdown re-cuts money the item already matched and
+NEVER changes selection, since a line is bucketed only after §5.9r's precedence
+rules have already admitted it. Sub-rows PRECEDE their total in
+`Evaluation.rows` (the parts, then the sum) and are flagged
+`ReportRow.is_breakdown` with the tag in `tag_value` and in `label`
+(`UNTAGGED_LABEL` = `(untagged)` for the remainder). `Evaluation.by_name` and
+`compare` (§5.9t) deliberately see the TOTAL only, so nothing that existed before
+the breakdown moves.
+
+Which tags are BUCKETS: every tag on the line except ones beginning with `!` (an
+exclusion marker is not a property) and, in discovery mode, except THIS item's own
+inclusion tag when it is tag-enabled (§5.9r) — that tag is how the line was
+admitted, so bucketing by it would answer "all of it" and dress that up as a
+property. **No OTHER item's name is suppressed.** A report-wide set of every
+tag-enabled item's name once was, on the theory that report machinery is not a
+property; in the rental shape those names ARE the property tags, and every sub-row
+came out 0.00 while the whole amount fell into `(untagged)`. A tag that carries
+money on the item's own lines is never rerouted into the remainder. With a
+restrict list, an unlisted tag does not bucket at all and its line falls to the
+remainder, so the sub-rows still account for every line the item matched, and a
+LISTED tag is never dropped for any reason. **A line carrying
+TWO breakdown tags is counted ONCE UNDER EACH** — nothing in the data could split
+that money between them, and "first tag wins" would be a silent answer to a real
+ambiguity. The total stays the un-duplicated sum, so the sub-rows are allowed to
+over-sum it; that gap IS the report of the double tag.
+
+**Each sub-row carries its own TXF copy number** — `item.txf_refnum`'s copy is
+`item.txf_copy` plus the tag's 0-based position, with the untagged remainder
+taking the copy after the last tag. That is precisely TXF's mechanism for the
+second and third Schedule E property, and `custom_export` emits one record per
+sub-row (§5.9t, Export).
+
+**A `COMPUTED` item over broken-down referents computes PER TAG VALUE too**, over
+the UNION of its referents' tag values, so "interest + property tax + maintenance
++ utilities" comes out once per property as well as in total. A referent with no
+breakdown of its own contributes to the TOTAL only and reads as zero in every
+per-tag cell. A brace name still resolves to the referent's TOTAL, as it always
+did.
+
+**In the window** (`ui/custom_report_window.py`) the breakdown is ONE widget: a
+single unchecked box, "Do not subtotal by tag (one total line only)". There is no
+tag-entry field — the tags come from the lines. (Quicken's own report
+customization says "Subtotal by", with Tag among the things it subtotals by; the
+familiar phrasing survives inverted, because here it is the default rather than a
+choice.) The box is offered only for the kinds that have lines to bucket (`SOSC`,
+`COMPUTED`) and is grayed elsewhere rather than accepted and quietly ignored.
+
+**The report panel is a DRILL-DOWN: line item → tag → category → transaction.**
+`custom.drill_down` builds it and `drill_tree_rows` projects it into depth-tagged
+rows for both the tree and the CSV. It replaced a flat summary table, which could
+show a number but never why it was that number, and it is the destination for
+everything the Coverage panel used to say (§5.9r).
+
+**There is no grand-total row, and `DrillTree` does not carry the number.** The
+lines of a tax report share money by design — one category legitimately feeds
+several of them, which is the same fact `multi_claimed` reports from the other
+side — so adding them up measures nothing, and no tax form asks for the figure:
+a return is filed line by line. Rendering it anyway was worse than leaving the
+space blank, because a bold `TOTAL` under the last row is trusted BECAUSE it is
+bold. It is not computed rather than merely not shown, so nothing can render it
+back by reaching for a field that is already there. A report that wants the sum
+of particular lines names them with a `COMPUTED` item (§5.9t), which is the only
+total on this report that means anything.
+
+- **It is built on ONE evaluation.** `drill_down` calls `evaluate(detail=True)`;
+  the flag retains the lines each `SOSC` item admitted and the ones an exclusion
+  removed, inside the existing loop. It is not a second walk of the ledger,
+  because a drill-down that disagreed with the total it sits under would leave
+  the user with two numbers and no way to tell which one the tax form gets.
+- **No node sums its children.** Every node reports what the domain computed for
+  it, and an ITEM node is `evaluate`'s row verbatim. A line wearing two of an
+  item's tags is counted under each (above), so tag rows may legitimately exceed
+  the item; a tree that rolled children up would invent a total that is not the
+  filed one.
+- **The tag level appears only when it means something.** Opted out: categories
+  sit directly under the item. Discovery with no tags found: likewise, which is
+  what keeps the default quiet. An explicit LIST always shows its buckets,
+  including empty ones — an empty bucket is how a property with no rent booked to
+  it this year announces itself, and it was invisible in the flat table.
+- **An excluded line is shown, struck through**, carrying its real amount and
+  contributing nothing above it. Dropping it would restore exactly the silence
+  that makes a wrong total look like a right one.
+- **A transfer leg** appears under its bracketed counterparty account, the label
+  the register uses; an uncategorized line under `(uncategorized)`.
+- Amounts carry the item's `sign` at EVERY level, so a deduction reads positive
+  on the leaf exactly as on the line above it.
+
+**Right-click on a transaction toggles its exclusion**, which is how a user
+carves one transaction out of a tax line without leaving the report he is
+checking. Only a transaction row offers it: "exclude this category" would have to
+write a tag onto every line underneath, a much larger promise than the gesture
+makes. WHERE an exclusion may live is a fact about tag storage, so the rule is
+`ledger.toggle_report_exclusion` and the window only asks it:
+
+| Target | | Why |
+|---|---|---|
+| any line whose item name has a comma | refused | `!item` would store as two tags; the menu entry is disabled with the reason |
+| transaction | allowed | many tags per transaction; `!item` joins the comma list and displaces nothing |
+| split leg, no tag | allowed | `splits.tag_id` is free; excludes that leg alone |
+| split leg, tagged | refused | a leg holds ONE tag, and overwriting the property tag would destroy the attribution that put the line in the report |
+| parent, any leg tagged | refused | the parent's tags reach every leg, so `!item` would drop lines a per-leg tag deliberately pulled in |
+| parent, no leg tagged | allowed | nothing to displace |
+
+Both refusals raise `ValueError` naming the tag in the way, and the window prints
+it in the status line under the tree. **A refusal is not a choice and never
+becomes a modal**, the same rule an evaluation failure follows.
+
+**The window carries minimize/maximize hints**, which a `QDialog` does not get by
+default. It is a workspace, not a question: a four-level tree beside a category
+picker in a fixed-size letterbox is unusable. Expansion state survives a refresh,
+keyed by the path down the tree rather than by row number, so toggling an
+exclusion does not collapse the branch the user is reading.
+
+
+### 5.9v Building a report FROM a definition file, and updating over one
+
+**The case.** §5.9r's year definitions are the whole point of the compartment —
+sixty-eight Quicken tax lines are not something a user retypes — and until this
+existed there was no way to reach them from the window: "New…" made an EMPTY
+report and the only file chooser in the window was a Save dialog. The two verbs
+are therefore requirements of the WINDOW, not just of the library.
+
+**"From definition…"** sits on the report row beside New/Duplicate/Delete. It
+asks WHICH definition and hands the answer to
+`report_defs.create_from_definition` — this window parses nothing and writes no
+report row of its own. The chooser lists every definition on the search path
+(`paths.report_defs_dir()` first, then the shipped `mammon/report_defs`), each
+labelled with its title, year, id **and which root it came from**, because a
+user's own file shadows a shipped one of the same id and a chooser that hid that
+would make the shadowing look like the shipped file changing by itself. A file
+that will not parse is left OUT of the list rather than breaking the chooser.
+The list also carries a **Browse…** entry over `QFileDialog.getOpenFileName`
+filtered to `*.yaml *.yml *.json`, so a definition file **anywhere on disk** —
+one a user wrote this morning, one mailed to him, one that was never installed —
+is exactly as usable as a shipped one. The offered report name defaults to the
+definition's title plus its year; the created report is then SELECTED and its
+items shown, so the to-do list of unassigned lines (§5.9r) is on screen
+immediately.
+
+**"Update from definition…"** takes the currently selected report to a newer
+definition through `report_defs.update_report`, which builds a fresh report and
+leaves the source untouched — last year's filed report keeps existing. What the
+migration did is a RESULT, not a choice, so it is shown afterwards: carried
+lines, renames written `old -> new`, lines added with nothing selected yet,
+lines **dropped with their old selections spelled out by name**, kind changes
+that refused to copy, and `migrated_from` pointers that resolved to nothing. An
+update that silently dropped a line the user spent an evening pointing at
+categories is the one failure he must not have to go looking for.
+
+**Both choices are single overridable seams**, per §5.9r's rule: `_choose_definition`
+(which delegates the Browse entry to the one-line `_browse_definition_file`) and
+`_inform` for the result, with the migration report itself produced by a pure
+`migration_text(MigrationResult)`. Nothing on this path builds and `exec_()`s a
+dialog of its own, so the whole life cycle — choose, create, see the items,
+update, read the report — is drivable headless in tests.
 
 
 ### 5.10d Full-ledger export (roadmap item 8)
@@ -5922,6 +7140,15 @@ own payload before it will write a ZIP. `installer/README.md` has the details.
   the transaction list - decided one at a time as we reach each (Section 7).
 - Reconciliation acceptance test for the migration: match Mammon per-account
   balances to Quicken's - confirm this is the bar you want.
+- OPEN (deferred 2026-09-21, dashboard ring): with option contracts held, the
+  securities ring can still total less than the accounts ring. `allocation`
+  excludes contracts outright (SRD 5.8e-2d/5.8e-9) while
+  `account_valuation.securities` counts their premium, so the cash wedge closes
+  only the CASH half of the gap. `allocation.options_note` already renders the
+  sentence; nothing on the dashboard shows it. Decide whether the page states
+  the excluded premium, gives contracts their own wedge, or leaves it to the
+  Investment Center. Not a wrong number -- an unexplained one, and only for a
+  portfolio holding options.
 - Project NAME - RESOLVED: Mammon (Section 11).
 - Sample Quicken export (a few accounts incl. one investment) - needed to build
   and validate the QIF importer (Task 5a) and the direct-read spike.

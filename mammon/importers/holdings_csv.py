@@ -111,7 +111,7 @@ def _norm(cell) -> str:
 
 def _find_col(header: list, names) -> Optional[int]:
     """Index of the first header cell that IS one of ``names`` (exact after
-    normalisation), else the first that CONTAINS one. Exact-first keeps a
+    normalization), else the first that CONTAINS one. Exact-first keeps a
     "Price" column from losing to "Price Date" and vice versa."""
     norms = [_norm(h) for h in header]
     for want in names:

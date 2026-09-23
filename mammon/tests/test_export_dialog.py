@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import QApplication
 
 from mammon import db, ledger
 from mammon.ui.export_dialog import ExportDialog, perform
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -21,7 +22,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "exp.db")
+    c = fresh_db(tmp_path / "exp.db")
     chk = ledger.create_account(c, "Checking", "checking", opening_balance=0)
     sav = ledger.create_account(c, "Savings", "savings", opening_balance=0)
     ledger.add_transaction(c, chk, "2026-01-05", -10_00, payee="Coffee")

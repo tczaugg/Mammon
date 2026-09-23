@@ -43,6 +43,7 @@ from mammon.ui import import_review_widget as irw
 from mammon.ui.models import CryptoRegisterModel
 from mammon.ui.widgets import (CryptoHoldingsDialog, CryptoRegisterWidget,
                                MainWindow, NetWorthByAssetDialog)
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etherscan_eth_2020.csv"
 # The SAME export shape under Etherscan's current column names.
@@ -69,7 +70,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "wallet.db")
+    c = fresh_db(tmp_path / "wallet.db")
     yield c
     c.close()
 
@@ -102,7 +103,7 @@ def _import(win, account_id, path=FIXTURE):
 # 0. the wallet's own address is asked for at creation
 # ---------------------------------------------------------------------------
 def test_new_account_dialog_captures_the_wallet_address(qapp, conn):
-    """A wallet's on-chain address is its identity, and two behaviours need it: a
+    """A wallet's on-chain address is its identity, and two behaviors need it: a
     move between two of the user's OWN accounts is recognised by matching the
     counterparty against a registered address, and gas is attributed to the user
     only on a row the user sent. Asking only in the after-the-fact properties

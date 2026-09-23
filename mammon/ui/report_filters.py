@@ -102,9 +102,24 @@ class CategoryTreeItem(QTreeWidgetItem):
     renders or sorts the row. The virtual ``data()`` is deliberately left alone.
     """
 
-    def __init__(self, name, category_id=None):
+    def __init__(self, name, category_id=None, account_id=None):
         super().__init__([str(name)])
         self.category_id = None if category_id is None else int(category_id)
+        # A TRANSFER row: an account, not a category, shown as ``[Name]`` the way
+        # the register and the drill-down already write one. It rides in the same
+        # tree because that is where the user looks for it (Quicken lists
+        # transfer accounts at the foot of the same category list), and it is a
+        # SEPARATE attribute rather than a negative category id so that every
+        # existing walker -- all of which test ``category_id is not None`` --
+        # steps over it untouched instead of quietly counting an account as a
+        # category.
+        self.account_id = None if account_id is None else int(account_id)
+        # THIS ROW'S OWN tick, which is not the same question as the checkbox.
+        # The checkbox shows a ROLLUP: a parent reads PartiallyChecked when some
+        # descendant is ticked, whether or not the user asked for the parent's
+        # own postings. Three states cannot say both things, so the own tick is
+        # kept beside the display state -- see ``category_tree_selections``.
+        self.own_checked = True
         if self.category_id is not None:
             super().setData(0, CATEGORY_ID_ROLE, self.category_id)
         self.setFlags(self.flags() | Qt.ItemIsUserCheckable)
@@ -174,6 +189,7 @@ class CategoryTree(QTreeWidget):
         self._syncing = True
         try:
             for it in self.iter_items():
+                it.own_checked = state == Qt.Checked
                 QTreeWidgetItem.setCheckState(it, 0, state)
         finally:
             self._syncing = False
@@ -190,6 +206,7 @@ class CategoryTree(QTreeWidget):
             for it in self.iter_items():
                 on = wanted is None or (getattr(it, "category_id", None) is not None
                                         and int(it.category_id) in wanted)
+                it.own_checked = bool(on)
                 QTreeWidgetItem.setCheckState(
                     it, 0, Qt.Checked if on else Qt.Unchecked)
             for i in range(self.topLevelItemCount()):
@@ -233,16 +250,23 @@ class CategoryTree(QTreeWidget):
         the tax-reporting split this picker exists to express. So a parent goes
         fully Unchecked only when its own tick is already gone.
 
-        The one thing this encoding cannot say is "my children but NOT my own
-        postings": ticking a lone child rounds the parent up to ticked. Three
-        states per row is the whole vocabulary, and over-including a parent's own
-        line is the visible, correctable direction to err in.
+        The DISPLAY cannot say "my children but NOT my own postings" -- ticking a
+        lone child rounds the parent up to PartiallyChecked, because three states
+        per row is the whole vocabulary. That is a limit on the picture, not on
+        the selection: the own tick is tracked beside it (``own_checked``) and is
+        what ``category_tree_selections`` reads, so a report item can say exactly
+        which of the two the user meant.
         """
-        own_on = QTreeWidgetItem.checkState(item, 0) != Qt.Unchecked
+        own_on = bool(getattr(item, "own_checked", False))
+        if not own_on:
+            # Ticking every child does NOT round the parent up to fully ticked:
+            # the user asked for the children, not for the parent's own postings,
+            # and a full tick here would draw a picture the selection does not
+            # match. Partial is the honest mark for "something under me, not me".
+            return (Qt.Unchecked if all(s == Qt.Unchecked for s in kid_states)
+                    else Qt.PartiallyChecked)
         if all(s == Qt.Checked for s in kid_states):
             return Qt.Checked
-        if all(s == Qt.Unchecked for s in kid_states):
-            return Qt.PartiallyChecked if own_on else Qt.Unchecked
         return Qt.PartiallyChecked
 
     def _rollup(self, item):
@@ -263,6 +287,7 @@ class CategoryTree(QTreeWidget):
         try:
             state = QTreeWidgetItem.checkState(item, 0)
             if state != Qt.PartiallyChecked:
+                item.own_checked = state == Qt.Checked
                 self._push_down(item, state)
             parent = item.parent()
             while parent is not None:
@@ -277,6 +302,7 @@ class CategoryTree(QTreeWidget):
     def _push_down(self, item, state) -> None:
         for i in range(item.childCount()):
             kid = item.child(i)
+            kid.own_checked = state == Qt.Checked
             QTreeWidgetItem.setCheckState(kid, 0, state)
             self._push_down(kid, state)
 
@@ -298,6 +324,234 @@ def _build_category_tree(tree, forest) -> None:
         add(forest, None)
     finally:
         tree._syncing = False
+
+
+# -- embeddable pickers for the custom-report editor (§5.9r) ------------------
+# The custom-report window edits ONE item at a time and needs the same two
+# pickers the filter bar carries, minus the bar. These factories exist so it can
+# have them without reaching into ``ReportFilterBar``'s private construction
+# helpers: one place still decides what a category picker IS, and a fix there
+# reaches both callers.
+
+#: The branch transfer rows hang under, and how one is labelled. Brackets are
+#: the register's own notation for "the other side is an account", and the
+#: drill-down already writes a transfer row that way.
+TRANSFERS_BRANCH = "Transfers"
+
+
+def transfer_row_label(account_name) -> str:
+    return "[%s]" % account_name
+
+
+def build_category_picker(conn, kind=CATEGORY_KIND_BOTH, *,
+                          include_hidden=False,
+                          transfers=False) -> CategoryTree:
+    """A populated, all-ticked :class:`CategoryTree` for ``kind``.
+
+    ``transfers=True`` appends a "Transfers" branch listing every account as
+    ``[Name]``, for the one caller that can act on it: a custom report's ``SOSC``
+    item, which sums selected categories AND transfers whose far side is a
+    selected account (SRD 5.9r). It is opt-in because nothing else can -- the
+    filter bar's picker filters postings by category, and an account row there
+    would be a tick that silently did nothing.
+
+    Those rows come back UNTICKED even though the tree ticks categories by
+    default. The defaults mean opposite things for the same reason
+    :func:`build_account_picker` unticks everything: "every category" is the
+    filter bar saying no filter, while "every transfer in the ledger" is never
+    what someone adding a tax line meant.
+    """
+    tree = CategoryTree()
+    tree.setMaximumWidth(260)
+    _build_category_tree(tree, category_picker_tree(conn, kind,
+                                                    include_hidden=include_hidden))
+    if transfers:
+        _build_transfer_branch(tree, conn, include_hidden=include_hidden)
+    return tree
+
+
+def _build_transfer_branch(tree, conn, *, include_hidden=False) -> None:
+    """Hang the "Transfers" branch, unticked, under an existing picker."""
+    accounts = ledger.list_accounts(conn, include_closed=True,
+                                    include_hidden=include_hidden)
+    if not accounts:
+        return
+    tree._syncing = True
+    try:
+        root = CategoryTreeItem(TRANSFERS_BRANCH)
+        tree.addTopLevelItem(root)
+        for acct in accounts:
+            row = CategoryTreeItem(transfer_row_label(acct["name"]),
+                                   account_id=int(acct["id"]))
+            row.own_checked = False
+            root.addChild(row)
+            QTreeWidgetItem.setCheckState(row, 0, Qt.Unchecked)
+        root.own_checked = False
+        QTreeWidgetItem.setCheckState(root, 0, Qt.Unchecked)
+    finally:
+        tree._syncing = False
+
+
+def transfer_tree_selections(tree) -> list:
+    """The checked TRANSFER rows as account ids -- what
+    ``reports.custom.set_item_accounts`` stores for an ``SOSC`` item.
+
+    Flat and id-only: an account has no subtree, so there is no rule to store the
+    way a category's ticked parent stores one."""
+    out = []
+    for it in tree.iter_items():
+        if getattr(it, "account_id", None) is not None and \
+                it.checkState(0) == Qt.Checked:
+            out.append(int(it.account_id))
+    return out
+
+
+def set_item_selections(tree, selections, transfer_ids=()) -> None:
+    """Restore BOTH halves of an ``SOSC`` item's picker in one pass.
+
+    One function rather than two because the two ticks share a widget:
+    :meth:`CategoryTree.set_checked_ids` clears every row it does not recognize
+    as a wanted category, so a second call to restore the transfers would undo
+    the categories, and the reverse order would undo the transfers. Doing both
+    before the one rollup also means a half-restored tree is never rolled up.
+    """
+    set_category_tree_selections(tree, selections)
+    wanted = {int(i) for i in transfer_ids or ()}
+    tree._syncing = True
+    try:
+        for it in tree.iter_items():
+            aid = getattr(it, "account_id", None)
+            if aid is not None:
+                it.own_checked = int(aid) in wanted
+                QTreeWidgetItem.setCheckState(
+                    it, 0, Qt.Checked if it.own_checked else Qt.Unchecked)
+        for i in range(tree.topLevelItemCount()):
+            tree._rollup(tree.topLevelItem(i))
+    finally:
+        tree._syncing = False
+
+
+def build_account_picker(conn, *, include_closed=True,
+                         include_hidden=False) -> QListWidget:
+    """A checkable account list, everything UNchecked.
+
+    Unchecked is the right default here and checked is the right default in the
+    filter bar, because the two mean opposite things: a filter with every box
+    ticked is "no filter", while a balance item with every box ticked would be
+    "every account in the ledger", which is never what the user meant to add.
+    """
+    lst = QListWidget()
+    lst.setMaximumWidth(260)
+    for acct in ledger.list_accounts(conn, include_closed=include_closed,
+                                     include_hidden=include_hidden):
+        item = QListWidgetItem(acct["name"])
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Unchecked)
+        item.setData(Qt.UserRole, int(acct["id"]))
+        lst.addItem(item)
+    return lst
+
+
+def _subtree_all_own(item) -> bool:
+    """True when this row AND every descendant carry their own tick -- the shape
+    that stores as one subtree rule instead of a list of ids."""
+    if not getattr(item, "own_checked", False):
+        return False
+    return all(_subtree_all_own(item.child(i)) for i in range(item.childCount()))
+
+
+def category_tree_selections(tree) -> list:
+    """The tree's ticks as ``(category_id, include_subtree)`` pairs -- the shape
+    ``reports.custom.set_item_categories`` stores.
+
+    It reads each row's OWN tick, never the tri-state checkbox. The checkbox is a
+    rollup, and a rollup cannot tell "I want this parent's own postings" from "a
+    child of this parent is ticked": both render PartiallyChecked. Reading the
+    picture instead of the intent is what put a whole parent category into an
+    item that had only one sub-category selected -- ticking
+    ``Gradient Research:Donations`` silently added every Gradient Research
+    posting that was not in some other sub-category, which on a real ledger was
+    most of the expenses.
+
+    Three shapes come out of it:
+
+    * a row whose whole subtree is ticked is ONE pair with ``include_subtree=1``,
+      and its descendants are not walked -- storing the subtree as a rule rather
+      than a list of ids is what makes a category added later get picked up
+      without anyone re-editing the report;
+    * a row ticked itself but not throughout contributes ``include_subtree=0`` --
+      its own postings only -- and the walk continues into its children, so
+      "this parent plus that one child" is expressible;
+    * a row that is not ticked contributes nothing, however its checkbox looks.
+    """
+    out = []
+
+    def walk(item):
+        cid = getattr(item, "category_id", None)
+        own = bool(getattr(item, "own_checked", False))
+        if own and cid is not None and _subtree_all_own(item):
+            out.append((int(cid), 1))
+            return
+        if own and cid is not None:
+            out.append((int(cid), 0))
+        for i in range(item.childCount()):
+            walk(item.child(i))
+
+    for i in range(tree.topLevelItemCount()):
+        walk(tree.topLevelItem(i))
+    return out
+
+
+def set_category_tree_selections(tree, selections) -> None:
+    """Restore ticks from stored ``(category_id, include_subtree)`` pairs --
+    the inverse of :func:`category_tree_selections`, so an edited item
+    round-trips through the database unchanged.
+
+    A stored subtree rule is expanded against the tree as it is TODAY, which is
+    the point of storing the rule: a category created since the item was saved
+    comes back ticked.
+    """
+    by_id = {}
+    for it in tree.iter_items():
+        cid = getattr(it, "category_id", None)
+        if cid is not None:
+            by_id[int(cid)] = it
+    wanted = set()
+    for sel in selections or ():
+        if isinstance(sel, (tuple, list)):
+            cid, sub = int(sel[0]), int(sel[1])
+        else:
+            cid, sub = int(sel), 0
+        wanted.add(cid)
+        it = by_id.get(cid)
+        if it is not None and sub:
+            stack = [it.child(i) for i in range(it.childCount())]
+            while stack:
+                kid = stack.pop()
+                kcid = getattr(kid, "category_id", None)
+                if kcid is not None:
+                    wanted.add(int(kcid))
+                stack.extend(kid.child(i) for i in range(kid.childCount()))
+    tree.set_checked_ids(wanted)
+
+
+def account_picker_ids(lst) -> list:
+    """The checked account ids, in list order."""
+    out = []
+    for i in range(lst.count()):
+        it = lst.item(i)
+        if it.checkState() == Qt.Checked:
+            out.append(int(it.data(Qt.UserRole)))
+    return out
+
+
+def set_account_picker_ids(lst, ids) -> None:
+    """Tick exactly ``ids`` in an account picker."""
+    wanted = {int(i) for i in ids or ()}
+    for i in range(lst.count()):
+        it = lst.item(i)
+        it.setCheckState(Qt.Checked if int(it.data(Qt.UserRole)) in wanted
+                         else Qt.Unchecked)
 
 
 # Ordered (label, key) pairs for the ONE report period dropdown shared by every
@@ -489,10 +743,20 @@ class ReportFilterBar(QWidget):
     applied = pyqtSignal()
 
     def __init__(self, conn, start, end, *, show_accounts=True,
-                 categories=None, category_kind=None, show_hidden_toggle=True,
-                 parent=None):
+                 account_types=None, categories=None, category_kind=None,
+                 show_hidden_toggle=True, parent=None):
         super().__init__(parent)
         self._conn = conn
+        # OPT-IN account restriction. None (the default, and what every report
+        # window passes) keeps the historical behavior: the picker lists the
+        # whole roster, all ticked, meaning "no filter". A caller that can only
+        # ever honor some account TYPES -- the Investment Dashboard, which
+        # values holdings and cannot draw a checking account -- passes the types
+        # it can draw, and then the picker offers exactly those and nothing
+        # else. Restricting here rather than at the host keeps the checkboxes
+        # honest: the dashboard used to show ticks for accounts its own scope
+        # dropped on the way back in.
+        self._account_types = None if account_types is None else tuple(account_types)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 8)
         row = QHBoxLayout()
@@ -640,7 +904,11 @@ class ReportFilterBar(QWidget):
         Ticks are preserved by account id across the rebuild -- toggling "include
         hidden" to glance at the roster must not silently undo a selection the
         user has already made. Accounts appearing for the first time arrive
-        checked, matching the all-checked-means-no-filter default."""
+        checked, matching the all-checked-means-no-filter default.
+
+        When the caller declared ``account_types``, rows of any other type never
+        reach the list at all, so the dialog opens with exactly those accounts
+        and exactly those ticked."""
         if self.account_list is None:
             return
         previous = {}
@@ -650,6 +918,9 @@ class ReportFilterBar(QWidget):
         self.account_list.clear()
         for acct in ledger.list_accounts(self._conn, include_closed=True,
                                          include_hidden=self.include_hidden()):
+            if (self._account_types is not None
+                    and acct["type"] not in self._account_types):
+                continue
             item = QListWidgetItem(acct["name"])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(previous.get(int(acct["id"]), Qt.Checked))
@@ -708,6 +979,12 @@ class ReportFilterBar(QWidget):
         accounts excluded, an all-checked list is a REAL filter -- returning None
         there let a report quietly include the accounts the user had just
         excluded, since a report that receives None goes on to query them all.
+
+        Under ``account_types`` None stays correct and stays preferable: the
+        picker is then showing every account the HOST can use (the dashboard's
+        None already means "every investment account"), and naming the ids
+        instead would pin the scope, so a brokerage opened tomorrow would not
+        join a dashboard whose gear had once been marked all.
         """
         ids = self._checked(self.account_list, Qt.UserRole, cast=int)
         if ids is None and not self.include_hidden() and self.account_list is not None:
@@ -812,12 +1089,13 @@ class CustomizeDialog(QDialog):
     applied = pyqtSignal()
 
     def __init__(self, conn, start, end, *, show_accounts=True,
-                 categories=None, category_kind=None, show_hidden_toggle=True,
-                 parent=None):
+                 account_types=None, categories=None, category_kind=None,
+                 show_hidden_toggle=True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Customize Report")
         self.filters = ReportFilterBar(conn, start, end,
                                        show_accounts=show_accounts,
+                                       account_types=account_types,
                                        categories=categories,
                                        category_kind=category_kind,
                                        show_hidden_toggle=show_hidden_toggle)

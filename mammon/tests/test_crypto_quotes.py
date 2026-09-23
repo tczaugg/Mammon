@@ -27,6 +27,7 @@ import pytest
 
 from mammon import crypto, db, mcp_tools
 from mammon.investments import Quote
+from mammon.tests import fresh_db
 
 # A synthetic, obviously-fake wallet address (no PII) -- stored in the protected
 # account_number column, so it must never appear in the MCP surface.
@@ -35,7 +36,7 @@ WALLET = "0xTESTWALLET0000000000000000000000000000FAKE"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "crypto_quotes.db")
+    c = fresh_db(tmp_path / "crypto_quotes.db")
     yield c
     c.close()
 

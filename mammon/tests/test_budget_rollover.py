@@ -23,6 +23,7 @@ import pytest
 
 from mammon import budgets, db, ledger
 from mammon.reports.budget import budget_vs_actual_range, budget_vs_actual_ytd
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +37,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rollover.db")
+    c = fresh_db(tmp_path / "rollover.db")
     yield c
     c.close()
 

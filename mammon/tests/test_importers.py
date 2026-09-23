@@ -15,11 +15,12 @@ from mammon.importers.record import (
     normalize_payee,
     parse_date,
 )
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -2303,7 +2304,7 @@ def test_security_master_qif_without_an_account_block_needs_the_fallback(tmp_pat
 
     # Without the fallback the same file silently imports nothing.
     from mammon import db as _db
-    other = _db.init_db(tmp_path / "bare.db")
+    other = fresh_db(tmp_path / "bare.db")
     ledger.create_account(other, "Brokerage", "investment", opening_balance=0)
     bare = importers.import_file(other, str(path))
     assert bare.added == 0, "regression guard: this is the bug being fixed"
@@ -2544,7 +2545,7 @@ def test_ofx_split_keeps_an_odd_ratio_exact(tmp_path):
     assert len(rows) == 1
     assert (rows[0].split_num, rows[0].split_den) == (4, 3)
 
-    conn = db.init_db(tmp_path / "ofx.db")
+    conn = fresh_db(tmp_path / "ofx.db")
     acct = ledger.create_account(conn, "Z1", "investment", opening_balance=0)
     investments.record_investment(conn, acct, "2026-01-05", "Buy", symbol="ABC",
                                   quantity="300", price="40", amount=-12_000_00)

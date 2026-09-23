@@ -39,6 +39,7 @@ from mammon import db, instruments, investments, ledger, securities
 from mammon.ui.securities_dialog import (
     SecuritiesDialog, INCLUDE, STATUS, STORED,
 )
+from mammon.tests import fresh_db
 
 # The stored spellings under test. Both roots are real listed tickers, which is
 # the entire danger: the underlying is genuinely in the file next door.
@@ -54,7 +55,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "legacyopts.db")
+    c = fresh_db(tmp_path / "legacyopts.db")
     yield c
     c.close()
 

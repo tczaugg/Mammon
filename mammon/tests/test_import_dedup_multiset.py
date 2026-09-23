@@ -23,6 +23,7 @@ import pytest
 
 from mammon import db, importers, import_review, ledger
 from mammon.importers.record import identity_key
+from mammon.tests import fresh_db
 
 # Acceptance tests run against a real ledger, and ONLY when one is named
 # explicitly via $MAMMON_ACCEPTANCE_DB. They deliberately do NOT fall back to
@@ -47,7 +48,7 @@ PROBE_MEMO = "multiset probe"
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 

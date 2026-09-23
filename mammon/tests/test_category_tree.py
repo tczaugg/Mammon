@@ -16,11 +16,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
 from mammon import category_tree as ct  # noqa: E402
 from mammon import db as mdb  # noqa: E402
 from mammon import ledger  # noqa: E402
+from mammon.tests import fresh_db
 
 
 @pytest.fixture()
 def conn(tmp_path):
-    c = mdb.init_db(str(tmp_path / "t.db"))
+    c = fresh_db(str(tmp_path / "t.db"))
     yield c
     c.close()
 
@@ -71,7 +72,7 @@ def test_a_third_shape_earns_its_own_answer_once_established(conn):
     :func:`test_a_stray_correction_does_not_capture_the_mainstream_branch` for
     why a one-vote node must not override its parent). Once the shape has
     MIN_COUNT corroboration it takes over, which is the "once counts get
-    established" behaviour: the tree does not need to be told that WWW is a
+    established" behavior: the tree does not need to be told that WWW is a
     different kind of Costco purchase, it works it out from how often it is
     corrected.
     """
@@ -304,7 +305,7 @@ def test_accepting_and_undoing_a_row_leaves_no_vote_behind(tmp_path):
     ARE the confidence gate, so a stale vote keeps pushing a rejected category."""
     from mammon import import_review
 
-    conn = mdb.init_db(str(tmp_path / "u.db"))
+    conn = fresh_db(str(tmp_path / "u.db"))
     acct = ledger.create_account(conn, "Card", "credit")
     groc = _cat(conn, "Groceries")
     entries = import_review.build_review(conn, acct, [
@@ -328,7 +329,7 @@ def test_a_supplied_payee_source_still_trains_the_tree(tmp_path):
     dead on that account -- it must train here."""
     from mammon import import_review
 
-    conn = mdb.init_db(str(tmp_path / "s.db"))
+    conn = fresh_db(str(tmp_path / "s.db"))
     acct = ledger.create_account(conn, "Costco Card", "credit")
     fuel = _cat(conn, "Auto:Fuel")
     for i in range(5):
@@ -355,7 +356,7 @@ def test_the_picker_promotes_the_payees_own_categories(tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from mammon.ui.models import RegisterModel
 
-    conn = mdb.init_db(str(tmp_path / "p.db"))
+    conn = fresh_db(str(tmp_path / "p.db"))
     acct = ledger.create_account(conn, "Card", "credit")
     fuel = _cat(conn, "Auto:Fuel")
     groc = _cat(conn, "Groceries")

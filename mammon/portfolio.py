@@ -30,7 +30,17 @@ from typing import Iterable, Optional
 from mammon import asset_values, crypto, investments, ledger, security_mix
 from mammon.investments import RealizedGain, _D, _HUNDRED, _cents
 
-ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "real_estate", "other")
+#: The classes a holding, a security mixture or an account may be assigned to.
+#:
+#: ``crypto`` joined them on 2026-09-21. It had lived only in
+#: ``forecast.PROJECTION_CLASSES`` -- the projection knew it was four times as
+#: volatile as equity while nothing upstream could EMIT it, so a spot-crypto
+#: ETF or a wallet could not be described as crypto in an allocation at all.
+#: forecast.py's own comment anticipated this ("ahead of the day
+#: portfolio.ASSET_CLASSES gains the column"), and PROJECTION_CLASSES is now
+#: exactly this tuple.
+ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "crypto",
+                 "real_estate", "other")
 # The one asset class that cannot be TRADED to its own weight: cash is raised by
 # selling securities and spent by buying them, so a rebalancer must never propose
 # "selling" it (see rebalance.ClassDrift.action). Named so that rule has a single
@@ -38,7 +48,8 @@ ASSET_CLASSES = ("domestic_stock", "intl_stock", "bond", "cash", "real_estate", 
 CASH_CLASS = "cash"
 ASSET_CLASS_LABELS = {
     "domestic_stock": "Domestic stock", "intl_stock": "International stock",
-    "bond": "Bonds", "cash": "Cash", "real_estate": "Real estate", "other": "Other",
+    "bond": "Bonds", "cash": "Cash", "crypto": "Crypto",
+    "real_estate": "Real estate", "other": "Other",
     "unclassified": "Unclassified",
 }
 SECURITY_TYPES = ("stock", "fund", "etf", "bond", "option", "cd", "other")
@@ -112,6 +123,33 @@ def scope_account_ids(conn, scope: str = "investments",
     return [int(a["id"]) for a in ledger.list_accounts(conn, include_closed=False,
                                                        include_hidden=include_hidden)
             if (a["type"] or "") in types]
+
+
+def account_valuation(conn, account_id: int, as_of: Optional[str] = None,
+                      prices: Optional[dict] = None, *,
+                      money_market_as_cash: bool = False):
+    """One account's :class:`investments.AccountValuation`, valued by the right
+    engine for its KIND -- the single dispatch every scope-wide caller must use.
+
+    A crypto account's money lives in ``crypto_transactions``, and the brokerage
+    valuation cannot see it: it reads the bank transfer legs alone and reported a
+    wallet whose own balance is zero as tens of thousands of NEGATIVE cash. The
+    mistake is easy to repeat because both engines return the SAME dataclass, so
+    calling the wrong one type-checks and merely produces a wrong number -- the
+    Investment Dashboard ring did exactly that and dropped a Coinbase account out
+    of the accounts ring entirely (its bogus total valued <= 0). Scope comes from
+    :func:`scope_account_ids`, whose ``investments`` scope is
+    ``ledger.INVESTMENT_LIKE_TYPES`` and therefore INCLUDES crypto; anything that
+    values those ids must come through here.
+
+    ``money_market_as_cash`` is a brokerage-only reporting choice and is ignored
+    for crypto, which has no sweep.
+    """
+    acct = ledger.get_account(conn, account_id)
+    if crypto.is_crypto_account(acct):
+        return crypto.account_valuation(conn, account_id, as_of, prices)
+    return investments.account_valuation(conn, account_id, as_of, prices,
+                                         money_market_as_cash=money_market_as_cash)
 
 
 # Actions that move money across the ACCOUNT's boundary (cash or shares
@@ -554,6 +592,51 @@ def holding_performances(conn, account_id: int, end: str, *,
     return out
 
 
+def cash_dividends(conn, account_ids, symbol: Optional[str] = None,
+                   end: Optional[str] = None, start: Optional[str] = None) -> int:
+    """Cents of income PAID OUT AS CASH, i.e. not reinvested.
+
+    :attr:`Performance.income` deliberately counts every dividend action, cash
+    and reinvested alike, because both are income earned. This answers the
+    narrower question the Investment Dashboard has to ask about a single
+    security: how much of what it earned LEFT it, and so is not in its market
+    value today. A reinvested dividend bought shares and is inside that value;
+    a cash one went to the account's cash and is not.
+
+    ``_CASH_DIVIDENDS`` is the authority on which is which -- the dividend
+    actions minus the five reinvest ones -- so this cannot drift from the flow
+    classification in :func:`security_performance`.
+
+    ``start`` defaults to the beginning of time: the question is asked about a
+    point-in-time VALUE, and every cash dividend ever paid is missing from it,
+    not merely this period's.
+    """
+    ids = [int(a) for a in account_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    sql = (f"SELECT action, amount, symbol FROM investment_transactions "
+           f"WHERE account_id IN ({placeholders})")
+    params = list(ids)
+    if end:
+        sql += " AND date <= ?"
+        params.append(end)
+    if start:
+        sql += " AND date >= ?"
+        params.append(start)
+    want = investments.resolve_symbol(conn, symbol) if symbol else None
+    total = 0
+    for row in conn.execute(sql, params):
+        if _action(row) not in _CASH_DIVIDENDS:
+            continue
+        if want is not None:
+            have = (row["symbol"] or "").strip()
+            if investments.resolve_symbol(conn, have) != want:
+                continue
+        total += abs(int(row["amount"] or 0))
+    return total
+
+
 def external_flows(conn, account_id: int, start: str, end: str) -> list:
     """Money that crossed the account's boundary in ``[start, end]`` as
     ``[(date, signed cents into the account)]``: ledger transfer legs (a cash
@@ -600,10 +683,18 @@ def account_performance(conn, account_id: int, start: str, end: str,
                         prices: Optional[dict] = None) -> Performance:
     """The account's money-weighted return over ``[start, end]``: its value
     the day before ``start`` is money put in, each external flow is money in
-    or out on its date, its value at ``end`` is money back."""
+    or out on its date, its value at ``end`` is money back.
+
+    Both endpoint values go through :func:`account_valuation`, so a crypto
+    wallet is valued by the crypto engine. Its FLOWS are still brokerage-only:
+    :func:`external_flows` reads ``investment_transactions``, which a crypto
+    account has none of, so a wallet's deposits are not recognised as money in
+    and its return reads as if the whole change in value were gain. That is a
+    known gap (it needs crypto sleeve events in ``external_flows``), but it is
+    strictly better than the endpoints themselves being wrong."""
     before = _day_before(start)
-    start_value = investments.account_valuation(conn, account_id, before, prices).total
-    end_value = investments.account_valuation(conn, account_id, end, prices).total
+    start_value = account_valuation(conn, account_id, before, prices).total
+    end_value = account_valuation(conn, account_id, end, prices).total
     flows = external_flows(conn, account_id, start, end)
     money_in = sum(c for _, c in flows if c > 0)
     money_out = -sum(c for _, c in flows if c < 0)
@@ -788,6 +879,11 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     # apportions by largest remainder so the parts sum to the position rather
     # than losing a cent per holding.
     mixtures = security_mix.all_mixtures(conn)
+    # An account may state its own mixture, which governs whatever balance the
+    # account contributes ITSELF: a non-investment account's whole value, and an
+    # investment account's idle CASH. It never touches the securities inside --
+    # those say what they are for themselves.
+    acct_mixtures = security_mix.all_account_mixtures(conn)
     by_class: dict = {}
     by_sec: dict = {}
     by_acct: dict = {}
@@ -811,30 +907,32 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
             value = asset_values.market_value(conn, aid, as_of)
             if value is None:
                 value = ledger.account_balance(conn, aid, as_of)
-            cls = account_asset_class(acct)
-            acct_classes[aid] = cls
+            amix = acct_mixtures.get(aid)
+            if amix:
+                # Stated outright, so it wins over the single class exactly as a
+                # security's mixture wins over its own.
+                acct_classes[aid] = security_mix.describe(amix)
+                for cls, part in security_mix.split_value(value, amix).items():
+                    by_class[cls] = by_class.get(cls, 0) + part
+            else:
+                cls = account_asset_class(acct)
+                acct_classes[aid] = cls
+                by_class[cls] = by_class.get(cls, 0) + value
             by_acct[aid] = (name, value)
-            by_class[cls] = by_class.get(cls, 0) + value
             total += value
             continue
-        if crypto.is_crypto_account(acct):
-            # A crypto account's money lives in crypto_transactions, and the
-            # brokerage valuation cannot see it: it read the bank transfer legs
-            # alone and reported a wallet whose own balance is zero as tens of
-            # thousands of NEGATIVE cash in the mix (and in the "no holdings
-            # recorded" note). One valuation per kind of account, the same one
-            # the accounts list and net worth show.
-            v = crypto.account_valuation(conn, aid, as_of, prices)
-        else:
-            v = investments.account_valuation(conn, aid, as_of, prices,
-                                              money_market_as_cash=money_market_as_cash)
+        # One valuation per KIND of account, the same one the accounts list and
+        # net worth show -- see account_valuation for what calling the brokerage
+        # engine on a wallet reported instead.
+        v = account_valuation(conn, aid, as_of, prices,
+                              money_market_as_cash=money_market_as_cash)
         # Option contracts come OUT before anything is totalled (SRD 5.8e-9).
         # An allocation answers "how much of what do I own", and a contract has
         # no honest answer: counting one as 100 shares of the underlying
         # overstates equity by the notional the premium did not buy, and
         # counting the premium as equity is a different thing again. Only an
         # EXPLICIT kind='option' is removed -- a NULL-kind row is UNCLASSIFIED,
-        # not "not an option", and keeps the pre-existing behaviour exactly.
+        # not "not an option", and keeps the pre-existing behavior exactly.
         opts = [h for h in v.holdings if investments.is_option(conn, h.symbol)]
         opt_symbols = {h.symbol for h in opts}
         opt_value = sum(int(h.market_value) for h in opts)
@@ -844,7 +942,23 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
         by_acct[aid] = (name, acct_total)
         total += acct_total
         if v.cash:
-            by_class["cash"] = by_class.get("cash", 0) + v.cash
+            # Idle cash is cash UNLESS the account says otherwise. A sleeve
+            # reported as one balance, or a stable-value fund that reaches the
+            # ledger as cash, could not say so before: the class of an
+            # investment account was never consulted at all, so its balance was
+            # cash whatever the user set (reported).
+            amix = acct_mixtures.get(aid)
+            if amix:
+                for cls, part in security_mix.split_value(int(v.cash), amix).items():
+                    by_class[cls] = by_class.get(cls, 0) + part
+            else:
+                own = account_asset_class(acct) if acct is not None else "cash"
+                if (acct["asset_class"] if acct is not None
+                        and "asset_class" in acct.keys() else None):
+                    # An explicit choice on an investment account is honored now.
+                    by_class[own] = by_class.get(own, 0) + v.cash
+                else:
+                    by_class["cash"] = by_class.get("cash", 0) + v.cash
             if not v.holdings:
                 cash_only.append((name, int(v.cash)))
         for h in v.holdings:
@@ -889,3 +1003,119 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
     out.by_account = [Slice(str(aid), name, v, pct(v))
                       for aid, (name, v) in sorted(by_acct.items(), key=lambda kv: -kv[1][1])]
     return out
+
+
+# ---------------------------------------------------------------------------
+# recent activity and price freshness (reads for a glance page)
+# ---------------------------------------------------------------------------
+@dataclass
+class ActivityRow:
+    """One investment transaction as a reader sees it: the account by NAME, the
+    quantity as Decimal, the amount in signed cents."""
+
+    id: int
+    date: str
+    account_id: int
+    account_name: str
+    action: str
+    symbol: str
+    quantity: Optional[Decimal]      # None for a cash-only row (a dividend)
+    amount: int                      # cents, signed (negative = money out)
+    memo: str = ""
+
+
+def recent_investment_activity(conn, account_ids: Optional[Iterable[int]] = None,
+                               limit: int = 25, include_hidden: bool = False) -> list:
+    """The ``limit`` most recent investment transactions across the given
+    accounts, newest first (:class:`ActivityRow`).
+
+    One ordered query, not one per account: a glance panel that asked per
+    account would then have to merge and re-sort in the presentation layer, and
+    the merge is exactly the part that gets the tie-break wrong. The order is
+    ``date DESC, id DESC`` -- the same tie-break the replay uses, so two rows
+    entered on one day read in the reverse of the order they were entered.
+
+    VOIDED rows are left out. A void keeps its row and zeroes its numbers
+    (:func:`investments.void_investment`), so including one would show a
+    0.00 "Buy" that the user cannot act on;
+    :func:`investments.is_void_investment` stays the authority on what a void
+    is, the SQL prefix filter only saving the rows from being fetched.
+
+    ``account_ids`` defaults to the investment scope
+    (:func:`scope_account_ids`, closed and hidden accounts excluded).
+    """
+    if account_ids is None:
+        ids = scope_account_ids(conn, "investments", include_hidden=include_hidden)
+    else:
+        ids = [int(a) for a in account_ids]
+    n = int(limit)
+    if not ids or n <= 0:
+        return []
+    marks = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT t.id AS id, t.date AS date, t.account_id AS account_id, "
+        "       a.name AS account_name, t.action AS action, t.symbol AS symbol, "
+        "       t.quantity AS quantity, t.amount AS amount, t.memo AS memo "
+        "FROM investment_transactions t "
+        "LEFT JOIN accounts a ON a.id = t.account_id "
+        f"WHERE t.account_id IN ({marks}) "
+        "  AND (t.memo IS NULL OR t.memo NOT LIKE ?) "
+        "ORDER BY t.date DESC, t.id DESC LIMIT ?",
+        list(ids) + [ledger.VOID_PREFIX + "%", n]).fetchall()
+    out = []
+    for r in rows:
+        if investments.is_void_investment(r):
+            continue
+        qty = r["quantity"]
+        out.append(ActivityRow(
+            id=int(r["id"]), date=r["date"] or "",
+            account_id=int(r["account_id"] or 0),
+            account_name=r["account_name"] or "",
+            action=r["action"] or "", symbol=r["symbol"] or "",
+            quantity=(_D(qty) if qty not in (None, "") else None),
+            amount=int(r["amount"] or 0), memo=r["memo"] or ""))
+    return out
+
+
+@dataclass
+class PriceFreshness:
+    """How current the price series behind one symbol's valuation is."""
+
+    symbol: str
+    latest: Optional[str]            # ISO date of the newest close, None if never priced
+    days: Optional[int]              # its age at the as-of date, None if never priced
+
+
+def price_freshness(conn, symbols: Iterable[str], as_of: Optional[str] = None) -> list:
+    """For each of ``symbols``, the newest ``price_history`` date and how old it
+    is at ``as_of`` -- worst first: never priced, then oldest, then by symbol.
+
+    The age is measured against ``as_of`` (defaulting to
+    :func:`investments.valuation_as_of`, the ledger's own latest known date) and
+    NOT against today's clock, so an archived file does not report every symbol
+    as months stale merely because time passed outside it. It never goes
+    negative: a close dated after ``as_of`` is current, not "-3 days old".
+
+    Each symbol is asked over its whole canonical identity
+    (:func:`investments._price_identity_clause`), the same rule
+    :func:`investments.latest_price` values it by -- one grouped
+    ``MAX(date)`` over the raw symbol column would call a renamed ticker
+    unpriced while the valuation happily prices it from the old spelling. No
+    price is rescaled here: this is a date, and a split does not move it.
+    """
+    when = as_of if as_of is not None else investments.valuation_as_of(conn)
+    out = []
+    for symbol in dict.fromkeys(s for s in symbols if s):
+        clause, params = investments._price_identity_clause(conn, symbol)
+        row = conn.execute(
+            "SELECT MAX(date) AS latest FROM price_history WHERE " + clause,
+            params).fetchone()
+        latest = row["latest"] if row is not None else None
+        days = None
+        if latest and when:
+            days = max(0, (_dt.date.fromisoformat(when)
+                           - _dt.date.fromisoformat(latest)).days)
+        out.append(PriceFreshness(symbol=symbol, latest=latest or None, days=days))
+    return sorted(out, key=lambda f: (f.latest is not None,
+                                      -(f.days if f.days is not None else 0),
+                                      f.symbol))

@@ -9,7 +9,7 @@ anyone who disagrees (ui/prefs.sound_enabled).
 Two decisions here are deliberate:
 
 **The sound is synthesized, not shipped.** A .wav in the repository would be a
-binary blob nobody can review in a diff, with a licence to keep track of, to
+binary blob nobody can review in a diff, with a license to keep track of, to
 carry roughly a second of two-tone chime. The waveform is generated on first use
 and cached next to the database, so it costs one small file per install and
 nothing in version control.

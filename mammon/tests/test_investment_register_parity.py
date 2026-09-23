@@ -45,6 +45,7 @@ import mammon.ui.widgets as W
 from mammon import db, investments, ledger
 from mammon.ui.models import InvestmentFilter, InvestmentRegisterModel
 from mammon.ui.widgets import InvestmentRegisterWidget
+from mammon.tests import fresh_db
 
 M = InvestmentRegisterModel
 
@@ -65,7 +66,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "inv_parity.db")
+    c = fresh_db(tmp_path / "inv_parity.db")
     yield c
     c.close()
 

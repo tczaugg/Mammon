@@ -18,6 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db, investments, ledger, portfolio
+from mammon.tests import fresh_db
 
 perf_report = importlib.import_module("mammon.reports.investment_performance")
 
@@ -31,7 +32,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "holding_perf.db")
+    c = fresh_db(tmp_path / "holding_perf.db")
     yield c
     c.close()
 

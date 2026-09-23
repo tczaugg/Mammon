@@ -5,7 +5,7 @@ tie-breaks, contested leaves), the four steps of ``suggest`` (candidates,
 tree, leaf matching, fill-or-offer), the corrections-only corpus, LIVE labels
 (register edit, undo, forget), survival of review retention, the applied /
 overridden tallies, the action domain, bootstrap, the v60 migration seed, and
-the end-to-end behaviour through ``import_review`` that the user specified:
+the end-to-end behavior through ``import_review`` that the user specified:
 the raw text shows until the same text has been corrected twice, then the
 rename fills; a leaf with several payees is a dropdown, never a fill.
 """
@@ -14,11 +14,12 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, import_review, ledger, rename_tree
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "mammon.db")
+    c = fresh_db(tmp_path / "mammon.db")
     yield c
     c.close()
 
@@ -554,12 +555,12 @@ def test_bulk_accept_records_an_applied_fill_but_not_a_kept_default(conn, accoun
 
 def test_learning_survives_restart(tmp_path):
     path = tmp_path / "persist.db"
-    c1 = db.init_db(path)
+    c1 = fresh_db(path)
     acct = ledger.create_account(c1, "Checking", "checking")
     for i in range(2):
         _accept(c1, acct, "POS DEBIT SPOTIFY USA 555", payee="Spotify")
     c1.close()
-    c2 = db.init_db(path)
+    c2 = fresh_db(path)
     assert rename_tree.suggest(c2, "POS DEBIT SPOTIFY USA 777").payee == "Spotify"
     c2.close()
 
@@ -689,7 +690,7 @@ def test_v60_seeds_examples_from_accepted_review_rows(tmp_path):
     c.commit()
     c.close()
 
-    conn = db.init_db(path)
+    conn = fresh_db(path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert "rename_nodes" not in db.table_names(conn)
     rows = conn.execute(

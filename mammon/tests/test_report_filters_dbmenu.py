@@ -14,6 +14,7 @@ from mammon import db, ledger
 from mammon.reports.spending import SpendingReport
 
 from PyQt5.QtCore import Qt
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -31,7 +32,7 @@ def _isolate_qsettings(tmp_path):
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "rf.db")
+    c = fresh_db(tmp_path / "rf.db")
     ledger.create_account(c, "Checking", "checking", opening_balance=100_00)
     ledger.create_account(c, "Savings", "savings", opening_balance=0)
     yield c
@@ -169,7 +170,7 @@ def _no_modal(monkeypatch):
 def _win_with_spending(tmp_path):
     from mammon.ui.widgets import MainWindow
     path = tmp_path / "win.db"
-    c = db.init_db(path)
+    c = fresh_db(path)
     chk = ledger.create_account(c, "Checking", "checking", opening_balance=500_00)
     groceries = ledger.resolve_category(c, "Groceries")
     salary = ledger.resolve_category(c, "Salary")
@@ -297,7 +298,7 @@ def _report_win(tmp_path, spec=None):
     # One fresh file per window: reusing the path would re-open a ledger that
     # already holds "Checking" and the seeding below would collide.
     path = tmp_path / f"rw_{spec.title.replace(' ', '_')}.db"
-    c = db.init_db(path)
+    c = fresh_db(path)
     chk = ledger.create_account(c, "Checking", "checking", opening_balance=500_00)
     ledger.add_transaction(c, chk, "2026-03-01", -40_00, payee="Store")
     return ReportWindow(c, spec=spec), c
@@ -419,7 +420,7 @@ def test_restore_from_backup_replaces_current(qapp, tmp_path, monkeypatch):
     target = win.db_path
     # a snapshot with DIFFERENT content
     snap = tmp_path / "snapshot.bak"
-    s = db.init_db(snap)
+    s = fresh_db(snap)
     ledger.create_account(s, "Solo", "checking", opening_balance=1_00)
     s.close()
 

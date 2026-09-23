@@ -210,7 +210,7 @@ class ImportReviewPanel(QWidget):
         head.addStretch()
         # How much already-actioned history to keep on screen. Accepting a row
         # used to make it disappear for good even though the row was kept in the
-        # database forever; the useful middle ground is greyed-out history, and
+        # database forever; the useful middle ground is grayed-out history, and
         # how much of it is a per-account habit, so the choice is remembered per
         # account and survives a restart (being interrupted mid-review is exactly
         # when it matters).
@@ -222,7 +222,7 @@ class ImportReviewPanel(QWidget):
         self.visibility.setToolTip(
             "How much of the review history to show.\n"
             "Pending only - hide anything already accepted or discarded.\n"
-            "This import - also show this import's actioned rows, greyed.\n"
+            "This import - also show this import's actioned rows, grayed.\n"
             "Past imports - also show earlier imports still retained.")
         mode = prefs.review_visibility(self.account_id)
         i = self.visibility.findData(mode)
@@ -390,7 +390,7 @@ class ImportReviewPanel(QWidget):
         """Re-read the persisted pending rows and show or hide accordingly."""
         self._load_pending_into_memory()
         # Show only when something still needs action: a list of nothing but
-        # greyed history is not a review waiting to be done.
+        # grayed history is not a review waiting to be done.
         if self.has_pending():
             self.show()
         else:
@@ -492,17 +492,17 @@ class ImportReviewPanel(QWidget):
             if self.is_crypto_wallet:
                 self._render_crypto_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
-                    self._grey_row(i)
+                    self._gray_row(i)
                 return
             if self.is_crypto_exchange:
                 self._render_exchange_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
-                    self._grey_row(i)
+                    self._gray_row(i)
                 return
             if self.is_investment:
                 self._render_investment_row(i, m, status, cell, actioned, merge_tip)
                 if actioned:
-                    self._grey_row(i)
+                    self._gray_row(i)
                 return
             st = cell(status)
             if merge_tip:
@@ -526,7 +526,7 @@ class ImportReviewPanel(QWidget):
             amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(i, AMOUNT, amt)
             if actioned:
-                self._grey_row(i)
+                self._gray_row(i)
         finally:
             self._suppress_num_edit = False
 
@@ -691,7 +691,7 @@ class ImportReviewPanel(QWidget):
         prefs.set_review_visibility(self.account_id, mode)
         self.visibility_changed.emit(mode)
 
-    def _grey_row(self, i: int) -> None:
+    def _gray_row(self, i: int) -> None:
         """Render an already-accepted / discarded row as inert history.
 
         Kept visible rather than deleted: it is the ground truth to compare
@@ -777,15 +777,15 @@ class ImportReviewPanel(QWidget):
         """Retire the acted-on entry ``i`` and advance to the next actionable row.
 
         In "pending only" the row leaves the list, as it always did. In a mode
-        that SHOWS actioned rows it must stay put and go grey instead -- dropping
+        that SHOWS actioned rows it must stay put and go gray instead -- dropping
         it made an accepted row vanish from a view whose whole purpose is to keep
         it visible, and it reappeared as soon as the user toggled the filter,
         because the reload re-queried what the in-memory list had thrown away.
 
         ``drop`` forces removal in EVERY mode. That is for DISCARD, which now
-        deletes its ``review_items`` row: greying a row the database no longer
+        deletes its ``review_items`` row: graying a row the database no longer
         holds puts the screen at odds with a re-query, which is the same
-        disagreement the greying was introduced to fix, pointed the other way.
+        disagreement the graying was introduced to fix, pointed the other way.
 
         Either way the selection advances to the next row still needing action,
         which is the classic auto-advance."""
@@ -899,7 +899,7 @@ class ImportReviewPanel(QWidget):
         # The user's edits from the pending row are passed to save_new as
         # ARGUMENTS, never written onto ``m``. That object is the review row's
         # ground truth -- what the bank sent -- and overwriting it made the row,
-        # once greyed, display the edit instead of the source, disagreeing with
+        # once grayed, display the edit instead of the source, disagreeing with
         # its own stored row until a reload silently put it back.
         edited_date = values.get("date") or None
         edited_amount = values.get("amount_cents")
@@ -945,7 +945,7 @@ class ImportReviewPanel(QWidget):
         if entry is None:
             return
         # An already-actioned row is history, not work. Accept did not check,
-        # so pressing it on a greyed row committed the SAME import row a second
+        # so pressing it on a grayed row committed the SAME import row a second
         # time -- a duplicate transaction the register had no way to explain.
         # discard_index has always guarded this; accept did not.
         if getattr(entry, "is_actioned", False):

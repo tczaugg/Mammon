@@ -315,7 +315,7 @@ class ReviewEntry:
 
     @property
     def is_actioned(self) -> bool:
-        """Already accepted or discarded -- shown greyed, not actionable."""
+        """Already accepted or discarded -- shown grayed, not actionable."""
         return self.state in ("accepted", "discarded")
 
     @property
@@ -760,7 +760,7 @@ def mapped_from_record(rec) -> MappedRow:
     """Map a parsed :class:`~mammon.importers.record.NormalizedTxn` to a provisional
     :class:`MappedRow` -- the single-account *file* twin of :func:`map_row`.
 
-    A file's records are already normalised (signed cents, ISO date, split of the
+    A file's records are already normalized (signed cents, ISO date, split of the
     ``[Account]`` transfer target), so this is a straight field copy that keeps a
     transfer leg intact (``is_transfer`` + ``transfer_account`` NAME). It exists so
     a SINGLE-account QIF (or any single-account file) can go through the very same
@@ -1540,7 +1540,7 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
     # date, amount or check number before accepting. Those corrections are taken
     # as ARGUMENTS and never written back onto ``mapped``: that object is the
     # review row's ground truth -- what the bank actually sent -- and overwriting
-    # it made the greyed row afterwards show the edit instead of the source,
+    # it made the grayed row afterwards show the edit instead of the source,
     # disagreeing with its own stored row until a reload put it back.
     d = mapped.date if date is None else date
     amt_cents = mapped.amount_cents if amount_cents is None else int(amount_cents)

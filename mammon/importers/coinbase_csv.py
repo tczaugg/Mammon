@@ -119,7 +119,7 @@ class ExchangeRecord:
 # ---------------------------------------------------------------------------
 # Coinbase's Transaction Type -> the action for each DIRECTION, as
 # (action when the quantity is positive, action when it is negative). ``None``
-# means "no special mapping: use the direction default". Matched on a normalised
+# means "no special mapping: use the direction default". Matched on a normalized
 # (lower-cased, single-spaced) name.
 _TYPE_ACTIONS: dict[str, tuple[Optional[str], Optional[str]]] = {
     "buy": ("BUY", None),
@@ -204,7 +204,7 @@ def _iso_date(stamp: str) -> str:
 
 
 def _find_col(header: list[str], *predicates) -> Optional[int]:
-    """First column index whose normalised name satisfies any predicate."""
+    """First column index whose normalized name satisfies any predicate."""
     for pred in predicates:
         for i, name in enumerate(header):
             if pred(" ".join((name or "").strip().lower().split())):

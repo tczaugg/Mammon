@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import QApplication
 from mammon import db, ledger, scheduled
 from mammon.ui import style
 from mammon.ui.projection_dialogs import CalendarPanel
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 
@@ -33,7 +34,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "sched_split.db")
+    c = fresh_db(tmp_path / "sched_split.db")
     yield c
     c.close()
 

@@ -19,6 +19,7 @@ import datetime as _dt
 import pytest
 
 from mammon import db, ledger, predictions, projection, scheduled
+from mammon.tests import fresh_db
 
 TODAY = "2026-09-02"
 PAYEE = "Talkline Mobile"          # invented: four family lines on one bill payee
@@ -27,7 +28,7 @@ ROTATION_START = "2026-05-01"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "cadence.db")
+    c = fresh_db(tmp_path / "cadence.db")
     yield c
     c.close()
 
@@ -182,3 +183,68 @@ def test_projected_month_holds_one_event_per_real_bill_beside_a_reminder(conn):
         ("2026-10-24", -42_00, projection.PREDICTED),
         ("2026-10-30", -48_00, projection.PREDICTED)]
     assert len(events) == 4                      # one per real bill, no duplicate
+
+
+# ---------------------------------------------------------------------------
+# semimonthly: twice a month, which is NOT every fourteen days
+# ---------------------------------------------------------------------------
+# The defect these cover: a paycheck on the 15th and the last day gaps by 13 to
+# 16 days, which used to land on the biweekly row and be projected every 14
+# days -- 26 paydays a year against the real 24, drifting a full period by
+# December. All dates below are invented.
+def test_fifteenth_and_last_day_across_a_february_is_semimonthly():
+    dates = ["2026-01-15", "2026-01-31", "2026-02-15", "2026-02-28",
+             "2026-03-15", "2026-03-31", "2026-04-15", "2026-04-30"]
+    assert predictions.fit_period(dates) == "semimonthly"
+
+
+def test_first_and_sixteenth_is_semimonthly():
+    dates = ["2026-01-01", "2026-01-16", "2026-02-01", "2026-02-16",
+             "2026-03-01", "2026-03-16", "2026-04-01", "2026-04-16"]
+    assert predictions.fit_period(dates) == "semimonthly"
+
+
+def test_a_year_of_semimonthly_still_fits_its_own_grid():
+    # 24 postings: the flat-grid reading strays furthest at this length, and
+    # the calendar grid must hold every one of them.
+    dates = []
+    for month in range(1, 13):
+        dates.append(f"2026-{month:02d}-15")
+        last = 28 if month == 2 else (30 if month in (4, 6, 9, 11) else 31)
+        dates.append(f"2026-{month:02d}-{last}")
+    assert len(dates) == 24
+    assert predictions.fit_period(dates) == "semimonthly"
+
+
+def test_semimonthly_survives_one_date_moved_off_a_weekend():
+    # 2026-02-28 is a Saturday; the employer paid on the Friday before.
+    dates = ["2026-01-15", "2026-01-31", "2026-02-15", "2026-02-27",
+             "2026-03-15", "2026-03-31", "2026-04-15", "2026-04-30"]
+    assert predictions.fit_period(dates) == "semimonthly"
+
+
+def test_exactly_biweekly_is_still_biweekly():
+    start = _dt.date(2026, 1, 2)
+    dates = [(start + _dt.timedelta(days=14 * i)).isoformat() for i in range(12)]
+    assert predictions.fit_period(dates) == "biweekly"
+
+
+def test_monthly_is_still_monthly():
+    dates = [f"2026-{m:02d}-05" for m in range(1, 13)]
+    assert predictions.fit_period(dates) == "monthly"
+
+
+def test_an_irregular_run_is_still_nothing():
+    dates = ["2026-01-05", "2026-01-21", "2026-02-19", "2026-02-24",
+             "2026-04-02", "2026-04-08"]
+    assert predictions.fit_period(dates) is None
+
+
+def test_the_detected_semimonthly_label_projects_the_next_real_pay_date():
+    # The point of returning the label: advance_date must carry the series on,
+    # and a flat fourteen days would have said 2026-05-14.
+    dates = ["2026-01-15", "2026-01-31", "2026-02-15", "2026-02-28",
+             "2026-03-15", "2026-03-31", "2026-04-15", "2026-04-30"]
+    freq = predictions.fit_period(dates)
+    assert scheduled.advance_date(dates[-1], freq) == "2026-05-15"
+    assert scheduled.advance_date("2026-05-15", freq) == "2026-05-31"

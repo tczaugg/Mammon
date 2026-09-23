@@ -14,11 +14,12 @@ from decimal import Decimal
 import pytest
 
 from mammon import db, investments, ledger, securities
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "sec.db")
+    c = fresh_db(tmp_path / "sec.db")
     yield c
     c.close()
 

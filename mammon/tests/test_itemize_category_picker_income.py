@@ -28,6 +28,7 @@ from PyQt5.QtCore import Qt
 
 from mammon import db, ledger
 from mammon.ui.report_window import ITEMIZE_SPEC, ReportWindow
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="session")
@@ -40,7 +41,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "itemize_picker.db")
+    c = fresh_db(tmp_path / "itemize_picker.db")
     yield c
     c.close()
 

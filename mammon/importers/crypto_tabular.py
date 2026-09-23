@@ -163,7 +163,7 @@ def _date_of(value) -> Optional[str]:
     ``parse_date_flex`` handles the cash world's date columns but not a date with
     a TIME stapled to it (``2/15/2020 0:00``) nor a raw unix stamp
     (``1581724800``) -- and a block explorer ships both, side by side. Rather
-    than widen the shared cash parser, whose behaviour a lot of statement imports
+    than widen the shared cash parser, whose behavior a lot of statement imports
     depend on, this narrows the value first and then hands it over."""
     s = str(value or "").strip()
     if not s:

@@ -24,11 +24,12 @@ from mammon import db, investments, ledger, mcp_tools
 # The reports package re-exports a function named ``investment_performance`` that
 # shadows the submodule of the same name, so import the callable directly.
 from mammon.reports.investment_performance import investment_performance as run_report
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "perf.db")
+    c = fresh_db(tmp_path / "perf.db")
     yield c
     c.close()
 

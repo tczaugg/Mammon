@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, importers, instruments, investments, ledger, securities
+from mammon.tests import fresh_db
 
 STOCK = "ACME"
 CALL45 = "ACME  260417C00045000"         # strike 45, call
@@ -28,7 +29,7 @@ DAY = "2026-03-20"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "delivery.db")
+    c = fresh_db(tmp_path / "delivery.db")
     yield c
     c.close()
 

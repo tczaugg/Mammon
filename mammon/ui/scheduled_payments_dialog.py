@@ -126,7 +126,7 @@ class ScheduledPaymentEditor(QDialog):
         self.memo = QLineEdit()
         form.addRow("Memo", self.memo)
 
-        # Reminder behaviour (parity): remind this many days ahead (Default =
+        # Reminder behavior (parity): remind this many days ahead (Default =
         # the app's usual lead), and whether to pre-enter it automatically or
         # only remind and wait for Enter.
         self.lead_days = QSpinBox()

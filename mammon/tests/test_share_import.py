@@ -34,6 +34,7 @@ from mammon.importers.holdings_csv import (
     parse_holdings_csv,
     parse_holdings_file,
 )
+from mammon.tests import fresh_db
 
 FIXTURE = Path(__file__).parent / "fixtures" / "anon_401k_holdings.csv"
 
@@ -44,7 +45,7 @@ LARGE = "ANONX ANON LARGE CAP INDEX"
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "shareimport.db")
+    c = fresh_db(tmp_path / "shareimport.db")
     yield c
     c.close()
 

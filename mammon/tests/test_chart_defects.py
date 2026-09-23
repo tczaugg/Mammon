@@ -1,12 +1,12 @@
 """Regressions for two reported chart defects (SRD 5.8d chart-readability).
 
 Defect 7 -- the category pies (Spending by Category / Income by Category, and
-the shared Asset Allocation pie) drew from a 10-colour palette that wrapped with
+the shared Asset Allocation pie) drew from a 10-color palette that wrapped with
 ``i % len``, so an 11th division reused -- and became indistinguishable from --
-the ``Other`` wedge's colour. The fix (``ui.charts.wedge_colors`` +
-``_PIE_PALETTE``) carries enough distinct colours for the worst realistic pie
+the ``Other`` wedge's color. The fix (``ui.charts.wedge_colors`` +
+``_PIE_PALETTE``) carries enough distinct colors for the worst realistic pie
 (~19 wedges: every real category ~5% with an ``Other`` >=10%) and PINS ``Other``
-to the palette's stable final colour regardless of the division count. Every
+to the palette's stable final color regardless of the division count. Every
 wedge stays identifiable: slivers too small for an inline label get a hover
 tooltip naming the category, its share of the whole and its dollar amount.
 
@@ -36,40 +36,40 @@ def qapp():
     yield app
 
 
-# --- Defect 7: palette breadth and a stable 'Other' colour -------------------
-def test_pie_palette_has_at_least_19_distinct_colours():
+# --- Defect 7: palette breadth and a stable 'Other' color -------------------
+def test_pie_palette_has_at_least_19_distinct_colors():
     """The worst realistic pie has ~19 divisions (18 real categories near 5%
     apiece plus an ``Other`` >=10%); the palette must supply that many distinct
-    colours so no two wedges share one."""
+    colors so no two wedges share one."""
     assert len(set(charts._PIE_PALETTE)) >= 19
 
 
 def test_other_is_pinned_to_the_last_palette_slot_at_every_count():
     """``Other`` always takes the palette's FINAL entry, whatever its position in
     the label list and however many real categories precede it -- so it is a
-    stable, recognizable colour rather than wherever the slice order landed."""
-    other_colour = charts._PIE_PALETTE[-1]
+    stable, recognizable color rather than wherever the slice order landed."""
+    other_color = charts._PIE_PALETTE[-1]
 
     # Position-independent: 'Other' need not be last in the label list.
-    assert charts.wedge_colors(["A", "Other", "B"])[1] == other_colour
+    assert charts.wedge_colors(["A", "Other", "B"])[1] == other_color
 
     # Count-independent: from 1 up through the worst case, 'Other' keeps the last
-    # slot and never collides with any real category's colour.
+    # slot and never collides with any real category's color.
     for n_real in range(1, 19):
         labels = [f"Cat{i}" for i in range(n_real)] + ["Other"]
-        colours = charts.wedge_colors(labels)
-        assert colours[-1] == other_colour
-        real_colours = colours[:-1]
-        assert other_colour not in real_colours, f"'Other' collided at n={n_real}"
+        colors = charts.wedge_colors(labels)
+        assert colors[-1] == other_color
+        real_colors = colors[:-1]
+        assert other_color not in real_colors, f"'Other' collided at n={n_real}"
 
 
 def test_worst_case_19_divisions_are_all_distinct():
-    """18 real categories + ``Other`` -> 19 wedges, every colour different."""
+    """18 real categories + ``Other`` -> 19 wedges, every color different."""
     labels = [f"Cat{i}" for i in range(18)] + ["Other"]
-    colours = charts.wedge_colors(labels)
-    assert len(colours) == 19
-    assert len(set(colours)) == 19
-    assert colours[-1] == charts._PIE_PALETTE[-1]
+    colors = charts.wedge_colors(labels)
+    assert len(colors) == 19
+    assert len(set(colors)) == 19
+    assert colors[-1] == charts._PIE_PALETTE[-1]
 
 
 def _rolled_up_rows():
@@ -81,13 +81,13 @@ def _rolled_up_rows():
             + [(f"Tiny{i}", 1000) for i in range(7)])
 
 
-def test_slices_pie_paints_other_wedge_the_final_palette_colour(qapp):
+def test_slices_pie_paints_other_wedge_the_final_palette_color(qapp):
     canvas = charts.SlicesPieCanvas("Spending by Category", _rolled_up_rows())
     assert canvas.has_group()          # the tail actually rolled into 'Other'
     by_label = dict(canvas._wedges)
     assert "Other" in by_label
     assert by_label["Other"].get_facecolor() == to_rgba(charts._PIE_PALETTE[-1])
-    # No real wedge shares the 'Other' colour.
+    # No real wedge shares the 'Other' color.
     for label, wedge in canvas._wedges:
         if label != "Other":
             assert wedge.get_facecolor() != to_rgba(charts._PIE_PALETTE[-1])

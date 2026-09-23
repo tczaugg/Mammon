@@ -10,7 +10,7 @@ opened a *different* -- often brand-new, empty -- database, so rules committed i
 one session were invisible the next. The fix anchors the default DB to the Mammon
 install root, independent of the CWD.
 
-These tests pin that behaviour and prove an end-to-end two-session cycle: learn
+These tests pin that behavior and prove an end-to-end two-session cycle: learn
 in session 1 (launched from dir A) -> restart from dir B -> the persisted payee
 AND category are auto-filled on a matching import.
 """
@@ -22,6 +22,7 @@ import pytest
 
 from mammon import (app, category_rules, category_tree, db, import_review,
                     ledger, rename_tree)
+from mammon.tests import fresh_db
 
 
 def _row(desc, *, tid="", amount="12.34", debit=True, date="2026-05-01"):
@@ -65,7 +66,7 @@ def test_resolve_db_is_cwd_independent(tmp_path):
 
 
 def test_resolve_db_ignores_stray_cwd_db_when_anchored_exists(tmp_path):
-    # A leftover mammon.db from the old CWD-relative behaviour must NOT hijack the
+    # A leftover mammon.db from the old CWD-relative behavior must NOT hijack the
     # session away from the real anchored database.
     install = tmp_path / "install"
     (install / "data").mkdir(parents=True)
@@ -136,7 +137,7 @@ def test_main_explicit_existing_db_opens_that_db(tmp_path, monkeypatch):
     # is read): here the DB already exists and --db is passed explicitly, so this
     # pins the "existing" half of "explicit --db is authoritative, existing OR new".
     existing = tmp_path / "already_here.db"
-    seed = db.init_db(str(existing))
+    seed = fresh_db(str(existing))
     ledger.create_account(seed, "Marker Checking", "checking")
     seed.commit()
     seed.close()
@@ -180,7 +181,7 @@ def test_main_cli_argv_none_honours_explicit_db(tmp_path, monkeypatch):
     # with a marker account, point --db at it on sys.argv, and prove main() opens
     # THAT file (marker visible), never mammon.db.
     existing = tmp_path / "tom_existing.db"
-    seed = db.init_db(str(existing))
+    seed = fresh_db(str(existing))
     ledger.create_account(seed, "the user Checking", "checking")
     seed.commit()
     seed.close()
@@ -265,7 +266,7 @@ def test_learning_survives_restart_across_working_dirs(tmp_path):
         from pathlib import Path
         path = app._resolve_db(None, root=install)
         Path(path).resolve().parent.mkdir(parents=True, exist_ok=True)
-        return path, db.init_db(path)
+        return path, fresh_db(path)
 
     try:
         # ---- Session 1: launched from cwd_a; user corrects payee + sets category.

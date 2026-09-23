@@ -24,11 +24,11 @@ from . import style            # active theme (dark/light) -- same source the re
 # pies. It carries enough VISUALLY DISTINCT hues for the worst realistic pie --
 # ~19 wedges, which happens when every real category is roughly 5% of the period
 # and the sub-10% tail rolls up into an ``Other`` that is itself >=10%. The ten
-# calm lead colours are unchanged, so the common (few-category) pie looks exactly
+# calm lead colors are unchanged, so the common (few-category) pie looks exactly
 # as before; the tail extends them with further separated hues. The FINAL entry
 # is a neutral gray RESERVED for the ``Other`` wedge: pinning ``Other`` there
-# (see :func:`wedge_colors`) keeps it a stable, recognizable colour no matter how
-# many real categories precede it. The old 10-colour list wrapped with
+# (see :func:`wedge_colors`) keeps it a stable, recognizable color no matter how
+# many real categories precede it. The old 10-color list wrapped with
 # ``i % len``, so an 11th category collided with -- and was indistinguishable
 # from -- the ``Other`` wedge.
 _PIE_PALETTE = [
@@ -61,23 +61,23 @@ _GREEN = "#4f9d69"        # INCOME bars (money in)
 # Grid-line weight/opacity for the Net Worth chart. matplotlib's default y-grid
 # (alpha 0.25, no vertical lines) reads as barely-there hairlines; these draw a
 # crisp ~1px line at near-full opacity on BOTH axes, matching the app's financial
-# calendar table grid (a solid 1px line in the theme's ``grid`` colour) so values
+# calendar table grid (a solid 1px line in the theme's ``grid`` color) so values
 # read against horizontal and vertical guides alike.
 _GRID_LINEWIDTH = 0.8
 _GRID_ALPHA = 0.9
-_GRID_LIGHT = "#c9ced8"   # light-theme grid colour (charts skip the dark palette in light mode)
+_GRID_LIGHT = "#c9ced8"   # light-theme grid color (charts skip the dark palette in light mode)
 
 
 def wedge_colors(labels, group_label=_OTHER_LABEL, palette=None):
-    """Map each wedge label to a stable colour. Real categories take the leading
+    """Map each wedge label to a stable color. Real categories take the leading
     palette entries in order; the ``group_label`` (``Other``) wedge ALWAYS takes
-    the palette's FINAL entry, so it never shares a colour with a real category
+    the palette's FINAL entry, so it never shares a color with a real category
     however many divisions there are. With 18 real categories plus ``Other`` --
-    the worst realistic pie -- all 19 wedges get distinct colours.
+    the worst realistic pie -- all 19 wedges get distinct colors.
 
     Pinning ``Other`` to the last slot (rather than letting it fall wherever the
     slice order put it and wrapping the list past its length) is the whole fix:
-    before, an 11th category wrapped back onto ``Other``'s colour and the two
+    before, an 11th category wrapped back onto ``Other``'s color and the two
     were indistinguishable.
     """
     pal = palette if palette is not None else _PIE_PALETTE
@@ -108,7 +108,7 @@ def _chart_palette(for_print: bool = False):
     read -- rather than inventing a chart-specific mechanism. Light mode returns
     ``None`` so the figure keeps matplotlib's default (original) light styling
     byte-for-byte; dark mode returns the palette so the figure, axes, ticks,
-    labels and bars can be recoloured to stay legible on the dark background.
+    labels and bars can be recolored to stay legible on the dark background.
 
     ``for_print`` forces ``None`` regardless of the active theme, so a chart
     printed or exported to PDF is always drawn on a white page with black chrome
@@ -120,8 +120,38 @@ def _chart_palette(for_print: bool = False):
     return style.palette_for("dark") if style.theme() == "dark" else None
 
 
+def _active_palette(for_print: bool = False) -> dict:
+    """The ACTIVE theme's palette dict, light INCLUDED.
+
+    :func:`_chart_palette` deliberately returns ``None`` in light mode so the
+    chrome matplotlib already draws well (near-black ticks on white) is left
+    byte-for-byte alone. That rule cannot serve a color the chart must pick for
+    ITSELF in both themes -- a series line, a shaded band -- because there is no
+    matplotlib default to fall back on: hardcoding one gives a hue tuned for one
+    background and unreadable on the other, which is exactly what the investment
+    dashboard's two hole charts were reported for. Those colors come from here,
+    so ``style.py``'s semantic names (``blue``, ``negative``, ``muted``) stay the
+    single source of truth in either theme. ``for_print`` forces the light
+    palette, matching :func:`_chart_palette`'s "print is always white" rule."""
+    if for_print:
+        return style.palette_for("light")
+    return style.palette_for(style.theme())
+
+
+def _theme_grid(ax, pal, *, axis: str = "both") -> None:
+    """Turn on a subtle-but-visible grid, colored for the active theme.
+
+    One helper so every chart's grid has the same weight and the same color
+    rule: the dark palette's ``line`` when ``pal`` is a dark palette, the light
+    grid gray otherwise. ``set_axisbelow`` keeps the lines BEHIND the data, so a
+    grid never crosses a bar or a filled band."""
+    ax.set_axisbelow(True)
+    ax.grid(True, axis=axis, color=(pal["line"] if pal else _GRID_LIGHT),
+            linewidth=_GRID_LINEWIDTH, alpha=_GRID_ALPHA)
+
+
 def _theme_axes_chrome(ax, pal) -> None:
-    """Recolour an axes' spines, tick marks, tick labels, y-grid and title from a
+    """Recolor an axes' spines, tick marks, tick labels, y-grid and title from a
     dark palette. A no-op when ``pal`` is ``None`` (light mode keeps matplotlib's
     defaults, so the classic light look is unchanged)."""
     if pal is None:
@@ -136,9 +166,9 @@ def _theme_axes_chrome(ax, pal) -> None:
 
 
 def _theme_pie_chrome(ax, texts, pal) -> None:
-    """Recolour a pie's title and its slice labels from a dark palette. A no-op
+    """Recolor a pie's title and its slice labels from a dark palette. A no-op
     when ``pal`` is ``None`` (light mode keeps matplotlib's black text). The
-    autopct percentages sit ON the coloured wedges (mid-tone in both themes), so
+    autopct percentages sit ON the colored wedges (mid-tone in both themes), so
     they keep matplotlib's black -- legible on the wedge in either mode."""
     if pal is None:
         return
@@ -151,7 +181,7 @@ def _theme_pie_chrome(ax, texts, pal) -> None:
 class SpendingPieCanvas(FigureCanvasQTAgg):
     """A pie chart of top-level categories from a ``SpendingPie`` payload. The
     same canvas renders the spending (expense) pie and the income pie -- pass
-    ``title`` and ``empty_text`` to label which. Colour treatment is identical
+    ``title`` and ``empty_text`` to label which. Color treatment is identical
     for both (the shared categorical palette)."""
 
     def __init__(self, pie, parent=None, *, title="Spending by Category",
@@ -275,9 +305,9 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
     (:meth:`_on_motion`) naming the category, its share of the whole and its
     dollar amount, so nothing on the pie is anonymous.
 
-    **Colours are stable and distinct** (:func:`wedge_colors`): the palette
+    **Colors are stable and distinct** (:func:`wedge_colors`): the palette
     carries enough separated hues for the worst realistic pie (~19 wedges), and
-    the **Other** wedge is pinned to the palette's final neutral colour so it
+    the **Other** wedge is pinned to the palette's final neutral color so it
     never collides with a real category as the division count grows.
 
     **Percentages are of the whole.** Every wedge's label shows its share of the
@@ -548,12 +578,9 @@ class NetWorthCanvas(FigureCanvasQTAgg):
         # Both axes, crisp: horizontal lines that were too faint get stronger,
         # and vertical lines (aligned to the x-axis ticks set above) are added,
         # matching the financial calendar's grid weight/opacity. In dark mode the
-        # colour is the palette's line colour -- the same value _theme_axes_chrome
+        # color is the palette's line color -- the same value _theme_axes_chrome
         # gives the y-gridlines -- so both axes stay consistent.
-        grid_color = pal["line"] if pal else _GRID_LIGHT
-        ax.set_axisbelow(True)
-        ax.grid(True, axis="both", color=grid_color,
-                linewidth=_GRID_LINEWIDTH, alpha=_GRID_ALPHA)
+        _theme_grid(ax, pal, axis="both")
         _theme_axes_chrome(ax, pal)
         self.draw_idle()
 
@@ -593,7 +620,7 @@ class SpendingBarCanvas(FigureCanvasQTAgg):
         The palette is consulted HERE, on each render, not once at construction:
         that is the fix for the reported defect where a live dark->light toggle
         left the home chart stuck dark. A fresh :meth:`render` clears the figure
-        and recolours the figure, axes, bars and chrome from the current theme --
+        and recolors the figure, axes, bars and chrome from the current theme --
         and light mode restores matplotlib's white figure background explicitly,
         so switching back out of dark is a full undo (not a leftover dark patch).
         The deliberate non-zero value baseline is preserved across every redraw.
@@ -653,7 +680,7 @@ class SpendingBarCanvas(FigureCanvasQTAgg):
             legend.get_frame().set_edgecolor(pal["line"])
             for txt in legend.get_texts():
                 txt.set_color(pal["text"])
-        _theme_axes_chrome(ax, pal)       # dark: recolour ticks/spines/grid/title
+        _theme_axes_chrome(ax, pal)       # dark: recolor ticks/spines/grid/title
         self.draw_idle()
 
 
@@ -733,7 +760,7 @@ class PriceHistoryCanvas(FigureCanvasQTAgg):
         invented top would claim a precision the row does not have. Points with
         no bounds -- every quote -- get nothing at all, so the presence of a bar
         IS the signal that a number was computed rather than read."""
-        lows, highs, xs, centres = [], [], [], []
+        lows, highs, xs, centers = [], [], [], []
         open_x, open_y = [], []
         for i, (lo, hi) in enumerate(bounds):
             if lo is None:
@@ -744,11 +771,11 @@ class PriceHistoryCanvas(FigureCanvasQTAgg):
                 open_y.append(y)
                 continue
             xs.append(i)
-            centres.append(y)
+            centers.append(y)
             lows.append(max(y - float(lo), 0.0))
             highs.append(max(float(hi) - y, 0.0))
         if xs:
-            ax.errorbar(xs, centres, yerr=[lows, highs], fmt="none",
+            ax.errorbar(xs, centers, yerr=[lows, highs], fmt="none",
                         ecolor=_BLUE, elinewidth=1.0, capsize=3, alpha=0.75)
         for i, y in zip(open_x, open_y):
             ax.annotate("", xy=(i, y * 1.35), xytext=(i, y),
@@ -812,7 +839,7 @@ class AssetValueCanvas(FigureCanvasQTAgg):
             legend.get_frame().set_edgecolor(pal["line"])
             for txt in legend.get_texts():
                 txt.set_color(pal["text"])
-        _theme_axes_chrome(ax, pal)       # dark: recolour ticks/spines/grid/title
+        _theme_axes_chrome(ax, pal)       # dark: recolor ticks/spines/grid/title
 
 
 class LoanProjectionCanvas(FigureCanvasQTAgg):
@@ -897,9 +924,14 @@ class ProjectedBalanceCanvas(FigureCanvasQTAgg):
 
 
 class ChartDialog(QDialog):
-    """A simple modal frame that embeds a chart canvas + a Close button."""
+    """A simple modal frame that embeds a chart canvas + a Close button.
 
-    def __init__(self, title, canvas, parent=None):
+    ``on_edit`` adds an "Edit Price History…" button beside Close. A price chart
+    is where a user NOTICES a wrong or missing close -- a spike, a flat run, a
+    series that stops -- so it is where the way to fix one belongs; every price
+    chart passes it, and nothing else does."""
+
+    def __init__(self, title, canvas, parent=None, on_edit=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.canvas = canvas
@@ -908,5 +940,11 @@ class ChartDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
+        self.edit_button = None
+        if on_edit is not None:
+            self.edit_button = buttons.addButton(
+                "Edit Price History…", QDialogButtonBox.ActionRole)
+            self.edit_button.setAutoDefault(False)
+            self.edit_button.clicked.connect(lambda _c=False: on_edit())
         lay.addWidget(buttons)
         self.resize(720, 560)

@@ -1,7 +1,7 @@
 """Category Manager -- domain verbs (rename / reparent / merge) plus the
 offscreen dialog that projects them.
 
-The domain tests pin the behaviour that makes a merge safe on a 40-year archive:
+The domain tests pin the behavior that makes a merge safe on a 40-year archive:
 ids are preserved on a rename/reparent (so learned rules and budget lines keep
 pointing at the right category), and a merge REPOINTS every reference onto the
 survivor -- transactions, split lines, keyword rules, payee mappings, scheduled
@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 from mammon import budgets, category_rules, db, ledger, scheduled
 from mammon.ui import categories_dialog
 from mammon.ui.categories_dialog import CategoriesDialog
+from mammon.tests import fresh_db
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +34,7 @@ def qapp():
 
 @pytest.fixture
 def conn(tmp_path):
-    c = db.init_db(tmp_path / "catmgr.db")
+    c = fresh_db(tmp_path / "catmgr.db")
     yield c
     c.close()
 

@@ -21,12 +21,13 @@ import pytest
 from mammon import db, ledger
 from mammon.importers import import_file
 from mammon.importers.record import clean_category, split_category_tag
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
 def conn():
     d = tempfile.mkdtemp()
-    return db.init_db(os.path.join(d, "t.db"))
+    return fresh_db(os.path.join(d, "t.db"))
 
 
 def _import(conn, qif, name="Mammon_2018.QIF"):
@@ -207,7 +208,7 @@ def test_tags_survive_a_qif_round_trip(conn):
     text = open(path, encoding="utf-8").read()
     assert text.startswith("!Type:Tag\nNRig 8\nDEighth build\n^\n")
 
-    back = db.init_db(os.path.join(tempfile.mkdtemp(), "b.db"))
+    back = fresh_db(os.path.join(tempfile.mkdtemp(), "b.db"))
     import_file(back, path, account="Checking")
 
     assert {r["name"]: r["description"] for r in

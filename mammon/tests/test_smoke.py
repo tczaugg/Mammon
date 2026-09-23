@@ -23,6 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from mammon import db
+from mammon.tests import fresh_db
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def test_the_app_runs_and_displays_data(qapp, tmp_path):
     from mammon.ui.models import RegisterModel
     from mammon.ui.widgets import MainWindow
 
-    conn = db.init_db(tmp_path / "smoke.db")
+    conn = fresh_db(tmp_path / "smoke.db")
     sample_data(conn)
     win = MainWindow(conn)
     try:
