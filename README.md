@@ -94,18 +94,9 @@ Now it is an application you can use to master your finances. Enjoy.
   tier, with federal and state tax, IRMAA and the ACA credit paid from the
   accounts and totaled in today's dollars. Every rule cites its source in the
   Retirement FAQ.
-- **Budget planner** — one month, one list, one balance. Take-home income on top,
-  every line marked F (a cost you carry) or V (spending you can change), with
-  Planned, Spent and Remaining, and two sentences: does the plan balance, and how
-  is the month going. A line can cover several categories; "Everything else" shows
-  what has no line yet. The financial calendar can burn the month's budget down
-  day by day. Ten minutes to a plan, ten seconds a week to read it — see
-  [Budget](#budget) below.
-- **Savings goals and debt payoff, on the budget line.** A save-into line can
-  carry a target and a date, and proposes what that takes per month; a pay-down
-  line is a fixed extra principal payment on top of the regular one, and shows
-  how much sooner the debt clears and how much interest that saves. Hover the
-  line's Spent for where it stands.
+- **Budget planner** — one month on one page: take-home income on top, then
+  Planned, Spent and Remaining for each line, with amounts proposed from your own
+  history. Lines can also save toward a goal or pay down a debt early.
 - **Loans** — amortization with a full interest-rate history, and payments split
   into principal / interest / escrow / other. Auto-recalculated when interest, escrow 
   and payment changes.
@@ -125,67 +116,6 @@ Now it is an application you can use to master your finances. Enjoy.
   SQLCipher, backups included. Leave it unset and the file stays plain SQLite.
 - **MCP Server** — give an LLM access to your database and ask it questions
   about your finances. Generate any kind of report or chart you can conceive of.
-
-## Budget
-
-`View ▸ Budget` is the budget planner, and it is deliberately one page: one month
-of one plan, as a single list. It follows a first-timer's worksheet rather than an
-envelope system — an Income section of take-home pay on top, then the Expenses
-lines in the priority order you put them in — because the people a budget helps
-most are the people who have never kept one.
-
-**Building the plan.** *Start a budget* begins an empty twelve-month plan from the
-month you are on. *Add a line* asks what the line is for — spending, income,
-saving into an account, paying down a loan, or a payment identified by payee — and
-how often it recurs: every month, every two weeks, every week, a yearly bill, or
-only in certain months. Mammon proposes the amount from your own history and says
-what it counted. One line can cover several categories, and the last line,
-"Everything else", shows what the month spent outside the plan; double-click a
-line to see the transactions behind it, grouped biggest first, which is how you
-find out what deserves a line of its own. Right-click a line to edit it, move it
-up or down, remove it, or turn on *Carry unspent amounts forward* — what the line
-does not spend is added to next month's amount, and an overspend is forgiven.
-
-**Reading the month.** Planned, Spent and Remaining, with a negative Remaining in
-red, and two sentences above the table: whether the plan balances against income,
-and how the month is going — spent so far, left, and days remaining. Payroll
-deductions are not lines and are not spending; every figure is drawn at take-home,
-because withholding and premiums are decided once a year at open enrollment and
-are not something a budget changes. A three-paycheck month is planned on the
-income line itself, which carries two paychecks in most months and three in some.
-
-**Options.** The gear holds the rest. It turns *Show spending* off, leaving the
-plan alone without the Spent and Remaining columns; counts scheduled bills as
-spent; limits the plan
-to chosen accounts and categories; sorts lines by amount; opens *Plan the year*,
-the same lines across all twelve months, Planned only; proposes a whole plan from
-the last twelve complete months, one variable line per category at its average
-plus income at its average net; and handles the once-a-year chores under
-*Budgets…* — a new plan, a copy for next year, a rename, the start month, which
-plan is active. It can also hand the budget's measured spending to the Retirement
-Planner as the spending basis for the projection.
-
-**Burn-down on the financial calendar.** Turn on *Budget burn-down* and each day
-shows what is left of the month's budget instead of the projected balance: the
-allowance is every budgeted line plus anything carried in, drained day by day by
-what has posted, what is scheduled, and what recurs. Income is ignored on purpose
-— the question is whether the plan is holding, not whether the account clears, and
-transfers into savings and the principal part of a loan payment are not spending.
-An expense that pushes its own category past its line is marked, and the band
-under the grid becomes one bar per line, showing what is left and how far an
-overrun went. A coverage figure beside the toggle says how much of recent spending
-the budget actually watches.
-
-**Savings goals and debt payoff** live on budget lines rather than in a separate
-tool. A line that saves into an account can carry a target and a date; it says
-what that takes per month and whether you are on pace or behind, and by how much.
-A line that pays down a loan carries a fixed extra principal payment on top of the
-regular one, and says in plain words when the debt clears at the regular payment,
-when it clears with the extra, how many months sooner that is, and how much
-interest it saves. Both check the month against a cash floor before the money is
-committed — whether the projected balance stays above its cushion every day, and
-if not, when it dips — so a plan that balances for the month on paper cannot
-quietly overdraw you when a bill clears before the paycheck lands.
 
 ## Importing from Quicken
 
