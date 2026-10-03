@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "id": "example-formx-2026",
+  "family": "example-formx",
+  "title": "Example Form X, year 2026 (synthetic)",
+  "kind": "tax",
+  "year": 2026,
+  "default_range": { "kind": "calendar_year", "year": 2026 },
+  "items": [
+    {
+      "name": "FX:line 1",
+      "label": "Wages and salaries",
+      "kind": "SOSC",
+      "sign": 1,
+      "group": "Income",
+      "seq": 10,
+      "export": { "txf_refnum": 9001, "txf_copy": 1, "txf_format": 1 },
+      "migrated_from": "FX:line 1"
+    },
+    {
+      "name": "FX:line 7",
+      "label": "Taxable interest",
+      "kind": "SOSC",
+      "sign": 1,
+      "group": "Income",
+      "seq": 70,
+      "export": { "txf_refnum": 9006, "txf_copy": 1, "txf_format": 1 },
+      "migrated_from": "FX:line 6b"
+    },
+    {
+      "name": "FX:line 11",
+      "label": "Real estate taxes, now a disclosed balance",
+      "kind": "EDAB",
+      "sign": 1,
+      "group": "Disclosures",
+      "seq": 110,
+      "migrated_from": "FX:line 11"
+    },
+    {
+      "name": "FX:line 12",
+      "label": "New line, no predecessor",
+      "kind": "SOSC",
+      "sign": 1,
+      "group": "Deductions",
+      "seq": 120,
+      "migrated_from": null
+    },
+    {
+      "name": "FX:line 20",
+      "label": "Year-end balance of reported accounts",
+      "kind": "EDAB",
+      "sign": 1,
+      "group": "Disclosures",
+      "seq": 200,
+      "migrated_from": { "definition": "example-formx-2025", "name": "FX:line 20" }
+    }
+  ]
+}

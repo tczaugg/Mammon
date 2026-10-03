@@ -1,0 +1,596 @@
+# Mammon
+
+An open-source personal-finance ledger for people who want to own their own 
+data.
+
+Mammon is a Python desktop application (PyQt5) with a GUI that feels familiar. 
+Everything it knows lives in one SQLite file on your disk — a file you can 
+copy, back up, query, and read with any tool that speaks SQL, or encrypt 
+with a password. There is no cloud, no account, and no subscription.
+
+It's written in Python, so it runs identically in Windows, Linux or MacOs. The
+database is portable between system types.
+
+It exists because financial history outlives the software that recorded it.
+
+## What it looks like
+
+The register: Lists transaction with date, payee/payer, category, tags, memo, 
+payment or deposit, reconciliation status, transfers and splits.
+
+![The Mammon register, dark theme](docs/images/register-dark.png)
+
+The window opens on a financial calendar — a month of what is coming, per
+account, with scheduled or predicted spending and the projected balance on each 
+day. Income against spending for last year is shown below it.
+
+![The financial calendar, dark theme](docs/images/home-dark.png)
+
+Investment accounts get a register of their own, with share quantities at
+`Decimal` precision and a running cash balance beside the share balance. This one
+is in the light theme — the two above are dark. Both ship; pick one under
+**Settings → Display Preferences**, along with the font, the row shading and the
+color used for negative amounts.
+
+![An investment register, light theme](docs/images/investments-light.png)
+
+The Retirement Planner projects every year of retirement — Social Security,
+IRA and Roth draws, taxable-account sales — over the invested funds behind
+them, and stacks planned Roth conversions on a chart of taxable income against
+the bracket tops, the Medicare (IRMAA) tiers and the ACA cliff. This household
+holds $1.2M across a traditional IRA, a Roth IRA and a brokerage account and
+retires next year. Clicking a line fills that year's conversion to it; here the
+nine years before required minimums were filled to the 22% top, stopping under
+the next IRMAA tier, which costs about $42,000 less tax over the plan, in
+today's dollars, than converting nothing.
+
+![The Retirement Planner, dark theme](docs/images/retirement-dark.png)
+
+The Investment Dashboard shows the portfolio as a ring — by account, security
+or asset class — around its performance history and a projected range of
+future value. With **Retirement Plan** on, the projection carries the plan's
+draws and conversions, and the thermometer's **What If** tries a different
+mix. The corner tiles open the capital gains and performance reports, asset
+categories and rebalancing.
+
+![The Investment Dashboard, dark theme](docs/images/dashboard-dark.png)
+
+The first three come from `--demo`; the last two from a second synthetic
+household (see [Demo data](#demo-data)).
+
+## Why the name
+
+Mammon is the name I used for my financial database for 40 years. I chose it 
+as a continual reminder that money is not my master. 
+Now it is an application you can use to master your finances. Enjoy.
+
+## What it does
+
+- **Register** — per-account ledger with inline editing, splits, running
+  balances, cleared/reconciled flags, and transfers modeled as two linked
+  transactions so totals never double-count.
+- **Import** — QIF, OFX/QFX, CSV, and JSON files can all be imported into the register. 
+  Columns are automatically identified and if Mammon can't figure them out it runs 
+  a wizard where you can help it.
+- **Import review** — downloaded transactions are classified NEW or MATCHING and wait
+  for you to accept them. Nothing from an account download reaches the register unreviewed.
+- **Learning** — Mammon learns payee renaming, categories, and transfer targets
+  from your corrections, so the third review needs far less work than the
+  first. It learns with decision trees per payee, and per payee in each
+  account, never with keyword rules. Typing a payee lists each category it has
+  carried, most used first. Tools ▸ Learned Categories shows what was learned
+  and forgets a payee on request.
+- **Investments** — holdings, cost basis, price history, and account valuation,
+  and share balance reconcilation, even handling splits and reverse splits. Price
+  history is also corrected for splits and can be downloaded for securities with tickers.
+- **Investment Dashboard** — the whole portfolio on one page: allocation by
+  account, security or asset class, performance over any period, and a
+  projected range of future value with a What If for a different mix — with
+  the retirement plan's draws and conversions applied when it is on.
+- **Retirement Planner** — Social Security from the earnings record (spousal,
+  survivor and earnings-test rules included), required minimums, a household
+  spending plan drawn from IRAs, Roths and taxable accounts in the order you
+  choose, and Roth conversions filled to a bracket top or under the next IRMAA
+  tier, with federal and state tax, IRMAA and the ACA credit paid from the
+  accounts and totaled in today's dollars. Every rule cites its source in the
+  Retirement FAQ.
+- **Budget planner** — one month, one list, one balance. Take-home income on top,
+  every line marked F (a cost you carry) or V (spending you can change), with
+  Planned, Spent and Remaining, and two sentences: does the plan balance, and how
+  is the month going. A line can cover several categories; "Everything else" shows
+  what has no line yet. The financial calendar can burn the month's budget down
+  day by day. Ten minutes to a plan, ten seconds a week to read it — see
+  [Budget](#budget) below.
+- **Savings goals and debt payoff, on the budget line.** A save-into line can
+  carry a target and a date, and proposes what that takes per month; a pay-down
+  line is a fixed extra principal payment on top of the regular one, and shows
+  how much sooner the debt clears and how much interest that saves. Hover the
+  line's Spent for where it stands.
+- **Loans** — amortization with a full interest-rate history, and payments split
+  into principal / interest / escrow / other. Auto-recalculated when interest, escrow 
+  and payment changes.
+- **Scheduled payments** — recurring bills pre-entered as placeholders that the
+  real transaction merges into when it posts.
+- **Reports** — spending by category, itemized income and expense, net worth
+  over time, with charts.
+- **Multi-currency** — accounts carry their own currency with a dated FX-rate
+  store, so net worth reports per currency or totals through FX into one
+  presentation currency. Rates are `Decimal` text, never floats.
+- **Cryptocurrency** — two kinds of account, wallet (just the cyrptocurrency, 
+  no cash) and exchanges (multiple coins and/or currencies).
+- **Backups** — an automatic snapshot every minute, stored as only the database
+  pages that changed, so changes in the current session cost kilobytes rather 
+  than megabytes.
+- **Encryption** — set a password and the whole file is encrypted with
+  SQLCipher, backups included. Leave it unset and the file stays plain SQLite.
+- **MCP Server** — give an LLM access to your database and ask it questions
+  about your finances. Generate any kind of report or chart you can conceive of.
+
+## Budget
+
+`View ▸ Budget` is the budget planner, and it is deliberately one page: one month
+of one plan, as a single list. It follows a first-timer's worksheet rather than an
+envelope system — an Income section of take-home pay on top, then the Expenses
+lines in the priority order you put them in — because the people a budget helps
+most are the people who have never kept one.
+
+**Building the plan.** *Start a budget* begins an empty twelve-month plan from the
+month you are on. *Add a line* asks what the line is for — spending, income,
+saving into an account, paying down a loan, or a payment identified by payee — and
+how often it recurs: every month, every two weeks, every week, a yearly bill, or
+only in certain months. Mammon proposes the amount from your own history and says
+what it counted. One line can cover several categories, and the last line,
+"Everything else", shows what the month spent outside the plan; double-click a
+line to see the transactions behind it, grouped biggest first, which is how you
+find out what deserves a line of its own. Right-click a line to edit it, move it
+up or down, remove it, or turn on *Carry unspent amounts forward* — what the line
+does not spend is added to next month's amount, and an overspend is forgiven.
+
+**Reading the month.** Planned, Spent and Remaining, with a negative Remaining in
+red, and two sentences above the table: whether the plan balances against income,
+and how the month is going — spent so far, left, and days remaining. Payroll
+deductions are not lines and are not spending; every figure is drawn at take-home,
+because withholding and premiums are decided once a year at open enrollment and
+are not something a budget changes. A three-paycheck month is planned on the
+income line itself, which carries two paychecks in most months and three in some.
+
+**Options.** The gear holds the rest. It turns *Show spending* off, leaving the
+plan alone without the Spent and Remaining columns; counts scheduled bills as
+spent; limits the plan
+to chosen accounts and categories; sorts lines by amount; opens *Plan the year*,
+the same lines across all twelve months, Planned only; proposes a whole plan from
+the last twelve complete months, one variable line per category at its average
+plus income at its average net; and handles the once-a-year chores under
+*Budgets…* — a new plan, a copy for next year, a rename, the start month, which
+plan is active. It can also hand the budget's measured spending to the Retirement
+Planner as the spending basis for the projection.
+
+**Burn-down on the financial calendar.** Turn on *Budget burn-down* and each day
+shows what is left of the month's budget instead of the projected balance: the
+allowance is every budgeted line plus anything carried in, drained day by day by
+what has posted, what is scheduled, and what recurs. Income is ignored on purpose
+— the question is whether the plan is holding, not whether the account clears, and
+transfers into savings and the principal part of a loan payment are not spending.
+An expense that pushes its own category past its line is marked, and the band
+under the grid becomes one bar per line, showing what is left and how far an
+overrun went. A coverage figure beside the toggle says how much of recent spending
+the budget actually watches.
+
+**Savings goals and debt payoff** live on budget lines rather than in a separate
+tool. A line that saves into an account can carry a target and a date; it says
+what that takes per month and whether you are on pace or behind, and by how much.
+A line that pays down a loan carries a fixed extra principal payment on top of the
+regular one, and says in plain words when the debt clears at the regular payment,
+when it clears with the extra, how many months sooner that is, and how much
+interest it saves. Both check the month against a cash floor before the money is
+committed — whether the projected balance stays above its cushion every day, and
+if not, when it dips — so a plan that balances for the month on paper cannot
+quietly overdraw you when a bill clears before the paycheck lands.
+
+## Importing from Quicken
+
+Quicken may be able to export the whole ledger to a single file for small 
+ledgers. But for multi-year ledgers with multiple accounts we recommend a 
+**series of calendar-year QIF exports** (Quicken seems to have trouble 
+with large exports). Mammon can import multiple files all at once.
+Export all the data for each year and use the same name for each file with
+the year appended, e.g. myLedger_2024.qif, myLedger_2025.qif, ..., then
+when importing into Mammon, select the files for all the years at once.
+
+```
+File → Import Quicken File (QIF)…
+```
+
+A multi-account QIF import does **not** go through the review queue.
+A QIF from Quicken is already curated: its payees and categories come across as
+given and land straight in the register. Mammon does not second-guess data you
+spent years cleaning up.
+
+Note that the QIF format does not support different currencies — Quicken's export
+carries no currency field at all, so an account created by the import always
+defaults to USD. Rows *do* import into an account that already exists, and that
+account keeps its own currency. So for every non-USD account, create it in Mammon
+first — empty, with the right currency — named **exactly** as it is in Quicken,
+**including capitalization**. Account names are matched exactly: a name differing
+in case silently creates a second, USD account and imports the transactions into 
+that one instead, with no reported error. So be careful.
+
+
+## Install
+
+Python 3.12 or newer, on **Windows, macOS or Linux** — it is pure Python on
+PyQt5, with no platform-specific code beyond one path-parsing branch. It is
+developed and used daily on Windows, and the macOS and Linux paths are currently
+untested rather than known-good; the default font is picked per platform, and
+everything else should follow. Reports from either are welcome.
+
+### Windows: the installer
+
+No Python or git needed. Download `Mammon-<version>-Setup.zip` from the
+[Releases](https://github.com/tczaugg/Mammon/releases) page, extract the whole ZIP (right-click, Extract
+All), and run `setup.bat`. Windows may warn that the file is unrecognized
+(More info, then Run anyway): the installer is not code-signed.
+
+Setup brings its own private copy of Python and installs everything for you
+alone. It needs no administrator rights and does not touch any other Python on
+the machine:
+
+* the program goes in `%LOCALAPPDATA%\Mammon`, which each upgrade replaces;
+* **your ledgers and backups live in `Documents\Mammon`**, which neither
+  upgrading nor uninstalling ever touches;
+* Mammon is added to the Start Menu (start it, then right-click its taskbar
+  button to pin it) and to Settings > Apps, which is where you uninstall it.
+
+If you have been running Mammon from a clone, setup offers to move that
+ledger, with its backups, into `Documents\Mammon`: drag its `mammon.db` onto the
+setup window. To upgrade, run the newer version's `setup.bat` with Mammon closed.
+
+### From a clone of the repository
+
+On any platform:
+
+```
+pip install -r requirements.txt        # PyQt5, matplotlib, yfinance: the app itself
+```
+
+That is everything: `yfinance` (quotes,FX rates, crypto prices, the asset-mix 
+split), `mcp` (the ledger's read-only LLM tool server), `sqlcipher3` (at-rest 
+encryption) and `pytest`/`pytest-xdist` (the test suite). 
+Every one of them ships wheels for Windows, Linux and macOS, and the heavier 
+imports are lazy, so an offline session never reaches the network.
+
+**The one optional component is webSlinger**, and it is not a Python package: it
+is a separate MCP automation tool that Mammon launches over stdio to drive your
+own browser. Mammon runs without it — that is a supported way to use it:
+
+* download transactions from your bank yourself and File ▸ Import the files;
+* enter home and asset valuations by hand (Get Value is the automated path);
+* enter share balances by hand.
+
+The download fields in Account Details simply stay empty, and clicking Download
+explains what is missing rather than failing. To enable automation, install
+webSlinger separately and point `$MAMMON_WEBSLINGER_MCP_CMD` at it.
+
+An editable install (`pip install -e .`) also puts `mammon` and `mammon-mcp`
+commands on your path; `python -m mammon.app` from the repository root works
+without installing anything beyond the requirements.
+
+## Running
+
+```
+python -m mammon.app
+```
+
+Mammon reopens the database you last opened with File ▸ New, Open or Save As, so
+a Start Menu or taskbar launch comes up on the right ledger. The first time, or
+if that file has gone missing, it opens `mammon.db` in its data folder:
+`data/` beside the code in a clone (no matter which directory you launch from), or
+`Documents\Mammon` for an installed copy. It says so when it had to fall back.
+
+Open a particular file for one session with `--db`. That does not change which
+database the next launch opens:
+
+```
+python -m mammon.app --db /path/to/ledger.db
+python -m mammon.app --demo          # seed a full demo ledger into an empty database
+```
+
+## Demo data
+
+`--demo` seeds a synthetic ledger — around thirty months across checking,
+savings, credit card, brokerage, retirement, house and mortgage accounts, with
+categories, tags, splits, transfers, price history and scheduled payments. It is
+what the screenshots above are taken from.
+
+```
+python -m mammon.app --db data\demo.db --demo
+```
+
+The planner and dashboard screenshots come from a second, smaller household:
+one person a year from retiring with $1.2M across a traditional IRA, a Roth IRA
+and a brokerage account. `tools/screenshots_retirement.py` builds it, applies a
+spending plan and the Roth-conversion fill that costs the least tax in today's
+dollars, and takes the two screenshots. Open the result with
+`--db data\demo-retirement.db`.
+
+## Encryption
+
+Optional, and off by default. With no password the ledger is an ordinary SQLite
+file.
+
+Set a password under **File → Database Password** and the entire file is 
+encrypted with SQLCipher (AES-256): every account, transaction and price, the 
+indexes, and the schema. Backups taken from it are encrypted too.
+
+You are asked for the password when the app starts, when you open or restore a
+database, and before changing it. It is held in memory for that session only and
+written nowhere. **There is no recovery if you forget it.**
+
+Two things worth knowing before you turn it on:
+
+- A backup keeps the password it was written under. After a password change,
+  restoring an older backup needs the *old* one.
+- Backups saved before you enabled encryption are still plaintext. Mammon
+  offers to delete them at that point, and defaults to keeping them.
+
+`docs/encryption.md` has the details, including the MCP server.
+
+## Time savers
+
+The register is built to be quick and responsive, even for 30 year ledgers:
+
+- **Copy the previous split.** Open the split dialog on a payee you have split
+  before and it offers *Copy from previous <payee> split*. A paycheck with a
+  dozen lines — gross, taxes, deferral, insurance — is one click instead of
+  twelve rows of typing.
+- **Payee autofill.** Typing a known payee fills the amount, memo, tag and
+  category from that payee's last transaction, preferring this account's own.
+  If the last one was a transfer, the new row becomes a transfer too.
+- **Loan splits correct themselves.** When a rate, an escrow amount, or the
+  payment changes, every affected payment is re-split forward — already-posted
+  ones included. The total payment is preserved rather than recomputed, so the
+  principal / interest / escrow breakdown follows reality without re-entering
+  anything.
+- **Accept All.** Processes every remaining row in the review queue using the
+  learned renames and categories, exactly as accepting them one at a time would.
+  So you only have to manually enter the transactions you know Mammon hasn't 
+  learned. Then auto accept the rest.
+- **One-minute backups.** The auto-backup runs every minute and keeps about two
+  hours of restore points, so when you mangle something there is a snapshot from
+  a minute before it. Restore from File->Restore from backup.
+
+## Automatic downloads
+
+Mammon can drive your bank's own site through
+[webSlinger](https://webslinger.ai) and pull transactions in. Downloaded 
+transactions do not enter the register: they land in a review queue below 
+it, just like Importing from a file, classified NEW or MATCHING, and wait 
+for you to accept them.
+
+Mammon holds **no credentials** — login, MFA and secrets belong entirely to the
+webSlinger side, which drives your own browser.
+
+Recording a script is a one-time demonstration: you drive your bank once and
+webSlinger replays it after that. webSlinger offers a 30-day free trial and
+an execution-only tier runs your saved scripts for only $20/year. 
+So you can record everything you need on the free plan and then switch to
+execution-only to use them.
+
+A curated community library of institution scripts is planned, with ratings and
+a safety review, so that over time most people will only need to record a script
+for an uncommon institution.
+
+The vision includes other approaches to automatic downloads but depends on
+other people helping out.
+
+## Ask an LLM about your finances (MCP server)
+
+Mammon can serve the ledger to a language model over the Model Context
+Protocol, read-only. Every tool returns aggregates first (income vs. expense,
+cash flow, spending by category or payee, balances over time, holdings,
+upcoming bills, loan terms), with a bounded transaction listing, free-text
+search and a read-only SQL tool for the long tail. Account numbers and login
+details are never returned.
+
+The `mcp` package is part of `requirements.txt`. An installed copy has the
+server ready as `%LOCALAPPDATA%\Mammon\mammon-mcp.bat`: use that path as the
+command wherever the examples below say `python -m mammon.mcp_server`. With no
+`--db` it serves the ledger Mammon itself would open. It cannot open an
+encrypted database, and it refuses one whose schema is older than the code (open
+it in Mammon once to migrate) or newer.
+
+### Connecting Claude Code
+
+One command, from anywhere:
+
+```
+claude mcp add mammon -- python -m mammon.mcp_server --db /path/to/mammon.db
+```
+
+Then ask it things in plain language — `/mcp` lists what it picked up. Add
+`--scope user` to make the server available in every project rather than just the
+current one.
+
+### Connecting Claude Desktop
+
+Add it to `claude_desktop_config.json` (Settings → Developer → Edit Config) and
+restart:
+
+```json
+{
+  "mcpServers": {
+    "mammon": {
+      "command": "python",
+      "args": ["-m", "mammon.mcp_server", "--db", "C:\\path\\to\\mammon.db"]
+    }
+  }
+}
+```
+
+### Connecting anything else
+
+The server speaks standard MCP over stdio, which is what most desktop clients
+expect. The shape is always the same — a command and its arguments:
+
+| Client | Where it goes |
+|---|---|
+| LM Studio | `mcp.json`, same `mcpServers` shape as above |
+| Cursor / Windsurf / Zed | the editor's own MCP settings, same shape |
+| Anything with an MCP SDK | run the command, speak MCP on stdin/stdout |
+
+A hosted model and a local one connect the same way; which you use is your
+choice. To keep everything on your own machine, see below.
+
+### Keeping everything local (Ollama)
+
+Worth being precise here, because it trips people up: **Ollama runs models, it is
+not an MCP client.** It has no way to call this server on its own. What you need
+is a client that speaks MCP *and* can use Ollama as its model backend — then
+nothing leaves your machine, because both halves are local.
+
+Several do. The shape is always the same: point the client at Ollama for the
+model, and at the command below for the tools.
+
+```
+python -m mammon.mcp_server --db /path/to/mammon.db
+```
+
+| Client | Model backend | Notes |
+|---|---|---|
+| [Open WebUI](https://openwebui.com) | Ollama, natively | MCP arrives through its `mcpo` proxy, which fronts an MCP server as an OpenAPI tool |
+| [Goose](https://block.github.io/goose/) | Ollama, configurable | MCP servers are "extensions"; add this one as a command |
+| [Continue](https://continue.dev) | Ollama | An IDE extension with MCP support |
+| [oterm](https://github.com/ggozad/oterm) | Ollama | A terminal client for Ollama with MCP support |
+
+Each configures MCP servers slightly differently and they all move quickly, so
+follow the client's own current documentation for exactly where the command
+goes — but the command itself is the one above, and it is the same one Claude
+Code and Claude Desktop use.
+
+Pick a model with solid tool-calling. A small one will happily call the wrong
+tool, or invent an answer instead of calling anything, and you will not
+necessarily notice: the reply looks like the others.
+
+### Over a port
+
+```
+python -m mammon.mcp_server --transport streamable-http --port 8765
+```
+
+This listens on `127.0.0.1` — your machine only. Something on your own network
+could reach the ledger from elsewhere in the house (a phone, say, given a client
+to talk to it), but understand what that means first:
+
+> **The server has no authentication of any kind.** Binding it to anything other
+> than localhost puts your entire financial history in reach of everything on
+> that network, unauthenticated. If you do it, put it behind something that
+> authenticates — an SSH tunnel, a reverse proxy, a VPN — and never expose it to
+> the open internet.
+
+Read-only is enforced, so nothing reached this way can alter the ledger: the
+connection sets `PRAGMA query_only`, and the SQL tool runs under an authorizer
+that blanks account numbers, URLs and download configuration.
+
+### What that looks like
+
+Asked in Claude Code, against a ledger:
+
+> *Make a histogram of which day of the month rent reaches my checking account,
+> over the last five years.*
+
+![Rent arrival by day of month](docs/images/mcp-rent-histogram.png)
+
+Rent is due on the 1st, with a grace period to the 5th, and most of it lands
+inside that window.
+
+The tail is not late tenants — it is a measurement artifact, and a good example
+of why the question you asked matters. When rent arrives by Venmo and only
+reaches the register once somebody remembers to move it across to checking,
+the chart is measuring that hop, not the tenants.
+
+Which is the argument for the design Mammon pushes everywhere: give the
+intermediary its own account. Then the tenant's payment and the sweep to checking
+are two dated events instead of one blurred one, and the same question gets a
+more accurate answer.
+
+## Tests
+
+```
+python -m pytest mammon/tests -q
+```
+
+Qt tests run headless (`QT_QPA_PLATFORM=offscreen`), so no display is needed.
+A handful of acceptance tests run only when a real ledger is present; point
+`$MAMMON_ACCEPTANCE_DB` at one to include them, otherwise they skip. The
+encryption tests skip unless the `encryption` extra is installed.
+
+## Design notes
+
+Money is stored as signed integer cents — never floats. Share quantities and
+per-share prices are `Decimal`-precision text. The domain layer
+(`mammon/ledger.py`) is the only writer of transaction rows and holds no Qt, so
+the invariants that matter are enforced in one place and tested headless. See
+`docs/SRD.md` for the full requirements and data model.
+
+## Adding a feature
+
+Contributions are welcome. A few things will make yours land smoothly.
+
+**Read `CLAUDE.md` first.** It sits in the repository root and is the working
+guide to this codebase: the layering, the money and date conventions, why the
+schema migrations are append-only, and which invariants exist because a specific
+bug broke them once. It is written for coding agents and is just as useful to a
+person. `docs/SRD.md` is the requirements document of record.
+
+**One feature per branch.**
+
+```
+git checkout -b my-feature
+```
+
+Keep the branch to a single change. A branch that fixes a bug *and* renames some
+things *and* adds a feature is hard to review and impossible to revert cleanly.
+
+**Ground rules**
+
+- **Tests come with the change.** Every behavioral fix lands with a regression
+  test in `mammon/tests/`, named after the module it covers. Run the full suite
+  before you open a pull request: `python -m pytest mammon/tests -q`
+- **`mammon/ledger.py` is the only writer of transaction rows.** Importers, the
+  review queue, the loan engine and the UI all go through it, so the transfer
+  invariants are enforced in one place. Adding a second write path is the main
+  way to break this codebase.
+- **Money is signed integer cents. Never floats.** Share quantities and
+  per-share prices are `Decimal`-encoded text. Dates are ISO `YYYY-MM-DD` in
+  storage and in the domain layer.
+- **Never edit an existing migration.** Append a new one — real databases have
+  already applied the old ones.
+- **Explain *why* in the module docstring**, not just what. The docstrings here
+  carry the reasoning, including which bug the current shape prevents. When you
+  change behavior, update that reasoning rather than deleting it.
+- **Never commit financial data.** `data/`, `*.db`, `*.qif`, `*.ofx` and `*.qfx`
+  are gitignored. The only exception is `mammon/tests/fixtures/`, which is
+  synthetic. No real account numbers, no real names — check your test fixtures.
+- **Reflect requirement changes into `docs/SRD.md`.**
+
+**Opening a pull request.** Say what it changes and why, and mention anything you
+decided against — the reasoning is usually the most useful part of the review.
+Small, focused pull requests get read and merged; large ones sit. If you are
+planning something substantial, open an issue first so the design can be talked
+through before you write it.
+
+## Coming soon
+
+- **Advanced budgeting** — scenarios compared side by side, and a twelve-month
+  outlook that projects the plan forward rather than only listing it. Kept off the
+  Budget page so it stays simple.
+
+## Status
+
+Working and in daily use, but young. The schema is versioned and migrated
+forward automatically (`PRAGMA user_version`); back up your database before
+upgrading.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

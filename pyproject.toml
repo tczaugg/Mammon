@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mammon"
+version = "0.4.0"
+description = "A classic-register personal finance ledger: one SQLite file you own, decades of history, downloads reviewed before they post."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
+dependencies = [
+    "PyQt5>=5.15",
+    "matplotlib>=3.7",
+    # The DEFAULT source for four separate features: investment quotes, FX rates,
+    # crypto prices and the asset-mix split. It used to be the `quotes` extra,
+    # which in practice meant ABSENT -- requirements.txt shipped it commented
+    # out, so following the documented install produced an app whose Get Quotes,
+    # Refresh Rates and crypto pricing were dead on first click, and whose UI had
+    # to hedge about whether its own buttons would work. matplotlib is already a
+    # required dependency of comparable weight, so "it pulls in pandas" does not
+    # distinguish it. The lazy `import yfinance` and the injectable
+    # QuoteSource/FxSource seams are kept -- they are what make the network
+    # testable and keep an offline session from touching it -- but absence of the
+    # package is no longer a supported configuration.
+    "yfinance>=0.2",
+    # The MCP server that exposes the read-only ledger tools to an LLM
+    # (`python -m mammon.mcp_server`), required for the same reason as yfinance:
+    # as an extra it was absent from the documented install, so a documented
+    # entry point simply did not work. Imported lazily, in mcp_server.py only.
+    # Capped below 2: mcp_server.py imports mcp.server.fastmcp, which 2.0
+    # removed, so an uncapped install today resolves to a server that dies at
+    # import. Moving to 2.x means porting build_server first.
+    "mcp>=1.2,<2",
+    # At-rest encryption. Required because it ships PREBUILT WHEELS for every
+    # platform this app targets -- Windows (amd64/win32/arm64), Linux
+    # (manylinux_2_28 x86_64/aarch64/i686 and musllinux_1_2) and macOS (arm64,
+    # x86_64, universal2) -- so there is no toolchain barrier to weigh against
+    # it. >=0.6 rather than 0.5: the wheel coverage is what makes this safe.
+    # NOTE the package name: `sqlcipher3` has the full matrix; the older
+    # `sqlcipher3-binary` is Linux-x86_64 only despite its name.
+    "sqlcipher3>=0.6",
+    # Report definition files (mammon/reports/report_defs.py) may be written in
+    # YAML as well as JSON, and a definition Mammon SHIPS is in YAML, so the
+    # reader is on the ordinary path rather than a lucky one. The `import yaml`
+    # stays lazy and still explains itself when it fails, but that is now a
+    # damaged-install message, not a supported configuration.
+    "PyYAML>=6",
+    # The test suite is part of the product, not a contributor luxury: CLAUDE.md
+    # instructs every task to run test_smoke.py plus the files it changed, and
+    # `-n auto` before a push. A checkout that cannot do that is broken.
+    "pytest>=8",
+    "pytest-xdist>=3",
+]
+
+# No optional-dependencies table, deliberately. Every Python package this app
+# touches is in `dependencies` above: an absent package is a broken install, not
+# a configuration worth supporting, and "optional" in practice meant absent --
+# the documented install produced an app whose Get Quotes, Refresh Rates and
+# `mammon-mcp` entry point all failed on first use.
+#
+# The one genuinely optional component is WEBSLINGER, which is not a Python
+# package: it is an external MCP automation tool Mammon launches over stdio
+# ($MAMMON_WEBSLINGER_MCP_CMD). Without it the app runs on manual file import,
+# manually entered home valuations and manually entered balances; see
+# mammon/webslinger.py and the no-webSlinger tests in mammon/tests/.
+
+[project.scripts]
+mammon = "mammon.app:main"
+mammon-mcp = "mammon.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["mammon*"]
+
+[tool.setuptools.package-data]
+# mammon/report_defs/ holds the report definitions SHIPPED with the app (the
+# second search root in mammon/reports/report_defs.py). It has no __init__.py,
+# so packages.find never sees it and a wheel would silently omit it, leaving
+# the bundled tax lines dead on an installed copy. The three globs mirror that
+# module's SUFFIXES = (".json", ".yaml", ".yml") - a definition dropped in as
+# any of the accepted forms has to ship, not just the one that exists today.
+mammon = ["tests/fixtures/*",
+          "report_defs/*.json", "report_defs/*.yaml", "report_defs/*.yml"]
