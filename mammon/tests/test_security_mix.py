@@ -115,7 +115,7 @@ def test_hybrids_land_in_other_and_unknown_keys_are_dropped():
 
 
 def test_normalize_forces_exactly_one_hundred():
-    """A provider's rounding gives 100.01; a mixture totalling 100.01 would
+    """A provider's rounding gives 100.01; a mixture totaling 100.01 would
     allocate more than the position is worth."""
     out = security_mix.normalize({"bond": Decimal("98.36"), "cash": Decimal("1.64"),
                                   "other": Decimal("0.01")})

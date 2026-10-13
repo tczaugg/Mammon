@@ -1,21 +1,17 @@
-"""Debt payoff projection: revolving-debt terms, payoff plans, one engine.
+"""Debt payoff projection: revolving-debt terms and one engine.
 
-The Budget Planner's Pay Down half answers one question -- "if I put this much a
-month against these debts, when are they gone and what does the interest cost?"
--- and it answers it twice, once with the smallest balance first and once with
-the highest rate first, showing both figures side by side. It does not choose.
-That is a deliberate constraint rather than a missing feature: the two orders
-have different evidence behind them (the rate order costs less interest, the
-balance order is the one households actually finish), the difference is usually
-small, and a program that names the order, the amount or the account the user
-ought to pick has stopped computing and started counseling. So this module
-returns numbers and :data:`CITATIONS`, and the page prints both.
+The Budget page's pay-down line answers one question -- "with this much extra
+principal a month, when is this debt gone and what does the interest cost?" --
+by running the debt twice, at its regular payment and with the extra added
+(:func:`project_extra`). This module returns numbers; it does not choose an
+amount or an account for the household.
 
 WHY ONE ENGINE. "Snowball" and "avalanche" are not two algorithms. They are one
 simulation with a different sort key, and the CFPB's "highest interest rate
-method" is the second of them under another name. Writing them twice would mean
-two places for the roll-in to go wrong, so :func:`simulate` takes a strategy
-name and everything else about the month is identical.
+method" is the second of them under another name. :func:`simulate` takes a
+strategy name and everything else about the month is identical, so a
+one-member run -- all the Budget page makes -- uses the same arithmetic a
+multi-debt run would.
 
 WHY THE BUDGET IS A TOTAL. ``budget_cents`` is the WHOLE monthly outlay, not an
 extra on top of the minimums. The alternative framing needs a separate
@@ -42,14 +38,13 @@ payoff month saved today is a lie after the next import.
 ACCURACY, STATED RATHER THAN IMPLIED. Interest is APR/12 on the month-end
 balance. A real issuer charges daily interest on an average daily balance, so
 the projection differs from a statement by roughly a percent, more in a short or
-long month. :data:`ACCRUAL_CAVEAT` is that sentence, for the page to print, and
-a payoff is labeled as a MONTH, never a day -- a projection accurate to plus or
+long month, and a payoff is labeled as a MONTH, never a day -- a projection accurate to plus or
 minus a month has no business naming the 14th.
 
 Rounding happens at exactly one site per debt-month: the interest accrual.
 Principal is derived by subtraction, never rounded, and never clamped -- under
 negative amortization it is genuinely negative and the balance genuinely grows.
-The engine reports that ("does not pay off", :data:`NEVER_PAYS_OFF`) rather than
+The engine reports that (``negative_amortizing``, no payoff month) rather than
 quietly raising the minimum to cover the interest, which would be a projection
 of a plan the issuer never offered. Same reasoning for minimums that exceed the
 budget: the shortfall is reported, nothing is pro-rated, and no payoff date is
@@ -61,33 +56,26 @@ from __future__ import annotations
 import datetime as _dt
 import sqlite3
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
-from typing import Iterable, Optional, Sequence
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional, Sequence
 
 from mammon import budgets, ledger
 
 __all__ = [
-    "ExtraPrincipal", "project_extra", "set_apr",
+    "ExtraPrincipal", "project_debt", "project_extra", "set_apr",
     "DEBT_ACCOUNT_TYPES", "MIN_FORMS", "DEFAULT_MIN_FORM",
     "DEFAULT_MIN_FLOOR_CENTS", "DEFAULT_MIN_PCT", "SNOWBALL", "AVALANCHE",
-    "CUSTOM", "STRATEGIES", "STRATEGY_LABELS", "MAX_MONTHS",
-    "ACCRUAL_CAVEAT", "NEVER_PAYS_OFF", "NO_NEW_CHARGES", "CAP_REACHED_NOTE",
-    "MINIMUMS_EXCEED_NOTE", "CITATIONS", "MAGNITUDE_NOTE",
-    "DebtTerms", "DebtPlan", "DebtMember", "DebtInput", "DebtOutcome",
-    "MonthRow", "Simulation",
-    "set_terms", "get_terms", "delete_terms",
-    "create_plan", "update_plan", "get_plan", "list_plans", "delete_plan",
-    "set_member", "remove_member", "list_members",
-    "debt_accounts", "available_debts", "collect_debts",
-    "monthly_rate", "required_minimum", "payoff_months", "simulate", "compare",
-    "interest_spread_cents", "apply_to_budget", "check_extra_payment",
+    "CUSTOM", "STRATEGIES", "MAX_MONTHS",
+    "DebtTerms", "DebtInput", "DebtOutcome", "MonthRow", "Simulation",
+    "set_terms", "get_terms", "debt_accounts",
+    "monthly_rate", "required_minimum", "simulate",
 ]
 
-#: Account kinds that can carry a debt payoff plan. ``credit`` is a revolving
+#: Account kinds that can carry a debt to pay down. ``credit`` is a revolving
 #: card, ``liability`` anything else owed (an installment loan, a note, a
 #: balance a relative is owed). Both hold a NEGATIVE ledger balance when money
 #: is owed; the sign flip to a positive magnitude happens once, in
-#: :func:`collect_debts`, and nowhere else.
+#: :func:`_debt_input`, and nowhere else.
 DEBT_ACCOUNT_TYPES = ("credit", "liability")
 
 #: The three minimum-payment forms real issuers use:
@@ -103,56 +91,10 @@ SNOWBALL = "snowball"                   # smallest balance first, rate ignored
 AVALANCHE = "avalanche"                 # highest APR first
 CUSTOM = "custom"                       # the order the user stored
 STRATEGIES = (SNOWBALL, AVALANCHE, CUSTOM)
-STRATEGY_LABELS = {
-    SNOWBALL: "Smallest balance first",
-    AVALANCHE: "Highest rate first",
-    CUSTOM: "My order",
-}
 
 #: Months the projection will run before it gives up. Fifty years is past any
 #: honest plan, so hitting it is an OUTCOME the page reports, not an error.
 MAX_MONTHS = 600
-
-ACCRUAL_CAVEAT = (
-    "Interest is estimated monthly at APR divided by 12 on the month-end "
-    "balance. Your issuer charges daily interest on your average daily "
-    "balance, so a real statement will differ by roughly one percent, and by "
-    "more in a short or long month. Treat the payoff date as plus or minus "
-    "one month.")
-
-#: Truth in Lending's own wording for negative amortization. Borrowed on
-#: purpose: it is the sentence the user has already read on a statement.
-NEVER_PAYS_OFF = (
-    "We estimate you will never pay off the balance shown because the payment "
-    "is less than the interest charged each month.")
-
-NO_NEW_CHARGES = ("The projection assumes no further charges on these "
-                  "accounts.")
-CAP_REACHED_NOTE = (f"The projection stopped at {MAX_MONTHS} months with a "
-                    "balance still owed.")
-MINIMUMS_EXCEED_NOTE = (
-    "The required minimums come to more than the monthly amount, so there is "
-    "no payoff date to show. Paying part of a minimum is a missed payment, "
-    "not a slower plan.")
-
-#: What is published about the two orders, both sides, for the page to print
-#: beside the figures. Mammon cites; it does not conclude.
-CITATIONS = (
-    "Consumer Financial Protection Bureau, \"highest interest rate method\": "
-    "paying the highest rate first costs the least interest.",
-    "Kettle, Trudel, Blanchard and Haeubl, \"Repayment Concentration and "
-    "Consumer Motivation to Get Out of Debt\", Journal of Consumer Research "
-    "43(3):460-477: concentrating repayment on one balance sustains effort.",
-    "Brown and Lahey, \"Small Victories: Creating Intrinsic Motivation in "
-    "Savings and Debt Reduction\", NBER w20125, Journal of Marketing Research "
-    "52(6):768-783: clearing a small balance first raises follow-through.",
-)
-
-#: The size of the thing being compared, as published -- so a user reading a
-#: difference of a few hundred dollars knows it is the usual size of it.
-MAGNITUDE_NOTE = ("Published comparisons put the extra interest under the "
-                  "smallest-balance order at roughly 1.8 to 4.3 percent of "
-                  "the total.")
 
 _CENT = Decimal(1)
 _HUNDRED = Decimal(100)
@@ -253,31 +195,10 @@ class DebtTerms:
 
 
 @dataclass(frozen=True)
-class DebtPlan:
-    """A named set of debts and the total monthly outlay against them."""
-    id: int
-    name: str
-    strategy: str = AVALANCHE
-    monthly_cents: int = 0
-    start_period: Optional[str] = None
-    budget_id: Optional[int] = None
-    note: Optional[str] = None
-    created_at: str = ""
-
-
-@dataclass(frozen=True)
-class DebtMember:
-    plan_id: int
-    account_id: int
-    included: bool = True
-    sort_index: Optional[int] = None
-
-
-@dataclass(frozen=True)
 class DebtInput:
     """One debt as the engine sees it. ``balance_cents`` is a POSITIVE magnitude
     of what is owed -- the flip out of the ledger's negative liability balance
-    happens in :func:`collect_debts`, once, and no sign rule is added to the
+    happens in :func:`_debt_input`, once, and no sign rule is added to the
     domain layer."""
     account_id: int
     name: str
@@ -399,12 +320,6 @@ class _Live:
 # ---------------------------------------------------------------------------
 # Terms CRUD
 # ---------------------------------------------------------------------------
-_TERM_COLUMNS = ("account_id", "apr", "min_form", "min_floor_cents", "min_pct",
-                 "credit_limit_cents", "due_day", "promo_rate",
-                 "promo_end_date", "promo_deferred", "scheduled_id",
-                 "estimated", "updated_at")
-
-
 def _terms_from_row(row) -> DebtTerms:
     return DebtTerms(
         account_id=int(row["account_id"]),
@@ -499,162 +414,10 @@ def set_terms(conn: sqlite3.Connection, account_id: int, *,
 
 def get_terms(conn: sqlite3.Connection, account_id: int) -> Optional[DebtTerms]:
     """One account's stored terms, or ``None`` when it has none -- which is not
-    an error: :func:`collect_debts` synthesizes them and marks them estimated."""
+    an error: :func:`_debt_input` synthesizes them and marks them estimated."""
     row = conn.execute("SELECT * FROM debt_terms WHERE account_id = ?",
                        (int(account_id),)).fetchone()
     return None if row is None else _terms_from_row(row)
-
-
-def delete_terms(conn: sqlite3.Connection, account_id: int) -> bool:
-    """Forget an account's terms. The account and its register are untouched."""
-    cur = conn.execute("DELETE FROM debt_terms WHERE account_id = ?",
-                       (int(account_id),))
-    conn.commit()
-    return cur.rowcount > 0
-
-
-# ---------------------------------------------------------------------------
-# Plan CRUD
-# ---------------------------------------------------------------------------
-def _plan_from_row(row) -> DebtPlan:
-    return DebtPlan(
-        id=int(row["id"]), name=row["name"],
-        strategy=_validate_strategy(row["strategy"]),
-        monthly_cents=int(row["monthly_cents"]),
-        start_period=row["start_period"] or None,
-        budget_id=None if row["budget_id"] is None else int(row["budget_id"]),
-        note=row["note"], created_at=row["created_at"] or "",
-    )
-
-
-def create_plan(conn: sqlite3.Connection, name: str, *,
-                strategy: str = AVALANCHE, monthly_cents: int = 0,
-                start_period: Optional[str] = None,
-                budget_id: Optional[int] = None, note: Optional[str] = None,
-                created_at: Optional[str] = None) -> int:
-    """Create a payoff plan and return its id. ``monthly_cents`` is the TOTAL
-    monthly outlay, minimums included."""
-    if not str(name or "").strip():
-        raise ValueError("a plan needs a name")
-    if int(monthly_cents) < 0:
-        raise ValueError("monthly_cents cannot be negative")
-    if start_period:
-        _validate_period(start_period)
-    cur = conn.execute(
-        "INSERT INTO debt_plans (name, strategy, monthly_cents, start_period, "
-        "budget_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (str(name).strip(), _validate_strategy(strategy), int(monthly_cents),
-         start_period or None,
-         None if budget_id is None else int(budget_id), note or None,
-         _validate_date(created_at) if created_at else _today()))
-    conn.commit()
-    return int(cur.lastrowid)
-
-
-def update_plan(conn: sqlite3.Connection, plan_id: int, **fields) -> DebtPlan:
-    """Change a plan's inputs. Only inputs exist to change: no result is stored,
-    so there is nothing here to invalidate."""
-    plan = get_plan(conn, plan_id)
-    allowed = ("name", "strategy", "monthly_cents", "start_period",
-               "budget_id", "note")
-    unknown = set(fields) - set(allowed)
-    if unknown:
-        raise ValueError(f"cannot set {sorted(unknown)} on a debt plan")
-    if not fields:
-        return plan
-    sets, params = [], []
-    for key, value in fields.items():
-        if key == "name":
-            if not str(value or "").strip():
-                raise ValueError("a plan needs a name")
-            value = str(value).strip()
-        elif key == "strategy":
-            value = _validate_strategy(value)
-        elif key == "monthly_cents":
-            value = int(value)
-            if value < 0:
-                raise ValueError("monthly_cents cannot be negative")
-        elif key == "start_period":
-            value = _validate_period(value) if value else None
-        elif key == "budget_id":
-            value = None if value is None else int(value)
-        sets.append(f"{key} = ?")
-        params.append(value)
-    params.append(int(plan_id))
-    conn.execute(f"UPDATE debt_plans SET {', '.join(sets)} WHERE id = ?", params)
-    conn.commit()
-    return get_plan(conn, plan_id)
-
-
-def get_plan(conn: sqlite3.Connection, plan_id: int) -> DebtPlan:
-    row = conn.execute("SELECT * FROM debt_plans WHERE id = ?",
-                       (int(plan_id),)).fetchone()
-    if row is None:
-        raise KeyError(f"no debt plan {plan_id}")
-    return _plan_from_row(row)
-
-
-def list_plans(conn: sqlite3.Connection) -> list:
-    return [_plan_from_row(r) for r in conn.execute(
-        "SELECT * FROM debt_plans ORDER BY name, id")]
-
-
-def delete_plan(conn: sqlite3.Connection, plan_id: int) -> bool:
-    """Delete a plan and its membership. Terms survive: they describe the
-    account's agreement, not this plan."""
-    cur = conn.execute("DELETE FROM debt_plans WHERE id = ?", (int(plan_id),))
-    conn.commit()
-    return cur.rowcount > 0
-
-
-def set_member(conn: sqlite3.Connection, plan_id: int, account_id: int, *,
-               included: bool = True, sort_index: Optional[int] = None) -> None:
-    """Put an account in a plan (or change its inclusion / custom position)."""
-    get_plan(conn, plan_id)
-    acct = ledger.get_account(conn, int(account_id))
-    if acct is None:
-        raise KeyError(f"no account {account_id}")
-    if (acct["type"] or "") not in DEBT_ACCOUNT_TYPES:
-        raise ValueError(f"account {account_id} is a {acct['type']!r} account; "
-                         f"a payoff plan holds {DEBT_ACCOUNT_TYPES} accounts")
-    conn.execute(
-        """
-        INSERT INTO debt_plan_members (plan_id, account_id, included, sort_index)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(plan_id, account_id) DO UPDATE SET
-            included = excluded.included, sort_index = excluded.sort_index
-        """,
-        (int(plan_id), int(account_id), 1 if included else 0,
-         None if sort_index is None else int(sort_index)))
-    conn.commit()
-
-
-def remove_member(conn: sqlite3.Connection, plan_id: int,
-                  account_id: int) -> bool:
-    cur = conn.execute("DELETE FROM debt_plan_members WHERE plan_id = ? "
-                       "AND account_id = ?", (int(plan_id), int(account_id)))
-    conn.commit()
-    return cur.rowcount > 0
-
-
-def list_members(conn: sqlite3.Connection, plan_id: int, *,
-                 included_only: bool = False) -> list:
-    """A plan's accounts in plan order: the custom order first (``sort_index``
-    ascending), then anything unpositioned, by account id -- deterministic
-    either way, which is what lets a test pin the order."""
-    sql = ("SELECT plan_id, account_id, included, sort_index "
-           "FROM debt_plan_members WHERE plan_id = ?")
-    params: list = [int(plan_id)]
-    if included_only:
-        sql += " AND included = 1"
-    sql += (" ORDER BY CASE WHEN sort_index IS NULL THEN 1 ELSE 0 END, "
-            "sort_index, account_id")
-    return [DebtMember(plan_id=int(r["plan_id"]),
-                       account_id=int(r["account_id"]),
-                       included=bool(r["included"]),
-                       sort_index=(None if r["sort_index"] is None
-                                   else int(r["sort_index"])))
-            for r in conn.execute(sql, params)]
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +427,7 @@ def debt_accounts(conn: sqlite3.Connection, *,
                   include_closed: bool = False,
                   as_of: Optional[str] = None,
                   owing_only: bool = True) -> list:
-    """The accounts a payoff plan can hold, by name.
+    """The accounts a pay-down line can name, by name.
 
     ``owing_only`` (the default) keeps only the accounts that actually owe
     something as of ``as_of``: a retired loan and a card paid off sit at a zero
@@ -749,100 +512,6 @@ def _debt_input(conn: sqlite3.Connection, acct, as_of: Optional[str]) -> DebtInp
         estimated=terms.estimated)
 
 
-def collect_debts(conn: sqlite3.Connection, plan_id: int,
-                  as_of: Optional[str] = None) -> list:
-    """A plan's included debts as engine inputs, in plan order."""
-    get_plan(conn, plan_id)
-    out = []
-    for m in list_members(conn, plan_id, included_only=True):
-        acct = ledger.get_account(conn, m.account_id)
-        if acct is None:                 # the cascade should prevent this
-            continue
-        out.append(_debt_input(conn, acct, as_of))
-    return out
-
-
-#: How many months back :func:`pays_interest` looks for an interest charge.
-INTEREST_LOOKBACK_MONTHS = 3
-
-#: Words that mark a charge on a card as interest (category path, payee or
-#: memo, case-insensitively).
-_INTEREST_WORDS = ("interest", "finance charge")
-
-
-def pays_interest(conn: sqlite3.Connection, account_id: int,
-                  as_of: Optional[str] = None,
-                  months: int = INTEREST_LOOKBACK_MONTHS) -> bool:
-    """Whether a card has been charged interest in the last ``months``.
-
-    A card paid in full on time every month is not a debt to pay down: the
-    balance it shows is this month's purchases, already the budget's spending,
-    and a payoff plan over it would "pay off" money that costs nothing. The
-    evidence is a charge on the account whose category, payee or memo reads as
-    interest or a finance charge, which is how a real interest charge posts.
-
-    The look-back ends at ``as_of``, or at the account's LAST posted row when
-    none is given: a ledger behind on its downloads, or one whose dates are not
-    the clock's, is judged by its own latest months rather than by today's.
-    """
-    end = as_of
-    if end is None:
-        last = conn.execute(
-            "SELECT MAX(date) AS d FROM transactions WHERE account_id = ?",
-            (int(account_id),)).fetchone()
-        end = (last["d"] if last is not None and last["d"] else None) or _today()
-    year, month = int(end[:4]), int(end[5:7])
-    m0 = month - 1 - max(1, int(months)) + 1
-    start_year, start_month = year + (m0 // 12), m0 % 12 + 1
-    start = f"{start_year:04d}-{start_month:02d}-01"
-    rows = conn.execute(
-        "SELECT t.payee, t.memo, c.name AS category, p.name AS parent "
-        "FROM transactions t LEFT JOIN categories c ON c.id = t.category_id "
-        "LEFT JOIN categories p ON p.id = c.parent_id "
-        "WHERE t.account_id = ? AND t.date >= ? AND t.date <= ? AND t.amount < 0 "
-        "AND t.transfer_account_id IS NULL",
-        (int(account_id), start, end)).fetchall()
-    for r in rows:
-        text = " ".join(str(r[k] or "") for k in ("payee", "memo", "category", "parent")).lower()
-        if any(w in text for w in _INTEREST_WORDS):
-            return True
-    return False
-
-
-def available_debts(conn: sqlite3.Connection, plan_id: Optional[int] = None,
-                    as_of: Optional[str] = None, *,
-                    real_only: bool = True) -> list:
-    """Debt accounts NOT already in ``plan_id``, as inputs -- what the page
-    offers to add.
-
-    With ``real_only`` (the default) only debts that cost something are
-    offered: a loan or card with nothing owed is left out by
-    :func:`debt_accounts`, and a card is left
-    out unless it has been charged interest lately (:func:`pays_interest`) or
-    the user has entered its terms (:func:`get_terms`; recording a card's APR
-    is saying it is a debt) -- a card paid in full every month is not a debt
-    to pay down. The user's ruling; the earlier list showed every card and
-    every paid-off loan.
-    """
-    taken = set()
-    if plan_id is not None:
-        taken = {m.account_id for m in list_members(conn, plan_id)}
-    out = []
-    for a in debt_accounts(conn, as_of=as_of, owing_only=real_only):
-        if int(a["id"]) in taken:
-            continue
-        debt = _debt_input(conn, a, as_of)
-        if real_only:
-            if debt.balance_cents <= 0:    # belt and braces: debt_accounts did it
-                continue
-            if ((a["type"] or "") == "credit"
-                    and get_terms(conn, int(a["id"])) is None
-                    and not pays_interest(conn, int(a["id"]), as_of)):
-                continue
-        out.append(debt)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # The arithmetic
 # ---------------------------------------------------------------------------
@@ -869,36 +538,6 @@ def required_minimum(debt: DebtInput, balance_cents: int,
             part += max(0, int(interest_cents))
         minimum = max(floor, part)
     return max(0, min(minimum, balance))
-
-
-def payoff_months(balance_cents: int, payment_cents: int,
-                  monthly_rate_value) -> Optional[int]:
-    """Months to clear ``balance_cents`` at a FIXED ``payment_cents``, from the
-    closed form ``n = -ln(1 - r*B/P) / ln(1+r)``, rounded up.
-
-    Two guards come before the formula, and both are answers rather than errors:
-    at ``r == 0`` it degenerates and the answer is ``ceil(B/P)``, and when
-    ``P <= r*B`` the payment never touches principal, so this returns ``None``
-    -- "does not pay off" is a result the page has to render.
-
-    Valid only for a fixed payment against a fixed rate. Anything else -- a rate
-    change mid-term, a one-off extra, a minimum that recomputes from the
-    balance, a payment holiday, or a per-month split on screen -- needs
-    :func:`simulate`."""
-    balance = int(balance_cents)
-    payment = int(payment_cents)
-    rate = _dec(monthly_rate_value)
-    if balance <= 0:
-        return 0
-    if payment <= 0:
-        return None
-    B, P = Decimal(balance), Decimal(payment)
-    if rate <= 0:
-        return int((B / P).to_integral_value(rounding=ROUND_CEILING))
-    if P <= rate * B:
-        return None
-    n = -(Decimal(1) - rate * B / P).ln() / (Decimal(1) + rate).ln()
-    return int(n.to_integral_value(rounding=ROUND_CEILING))
 
 
 def _effective_apr(debt: DebtInput, period: str) -> Decimal:
@@ -1067,113 +706,9 @@ def _result(strategy, budget, start, state, rows, months_run, payoff,
         minimums_exceed_budget=bool(minimums_exceed_budget))
 
 
-def compare(debts: Sequence[DebtInput], budget_cents: int, *,
-            strategies: Iterable[str] = (SNOWBALL, AVALANCHE),
-            max_months: int = MAX_MONTHS,
-            start_period: Optional[str] = None) -> list:
-    """Every strategy's projection over the same debts, in the order asked.
-
-    Returns the simulations and stops. It does not sort them by cost, mark one,
-    or pick a winner: see this module's docstring, and note that the two orders'
-    payoff DATES are usually the same month while their interest totals differ,
-    so "sooner" is the wrong promise to make."""
-    return [simulate(debts, budget_cents, s, max_months=max_months,
-                     start_period=start_period) for s in strategies]
-
-
-def interest_spread_cents(simulations: Sequence[Simulation]) -> int:
-    """The gap between the cheapest and dearest total interest among
-    ``simulations`` -- the comparison's one summary figure. Zero when fewer than
-    two of them reach a payoff, because an unfinished projection's total is not
-    comparable to a finished one's."""
-    totals = [s.total_interest_cents for s in simulations if s.pays_off]
-    return max(totals) - min(totals) if len(totals) > 1 else 0
-
-
 # ---------------------------------------------------------------------------
-# Seams: the budget, and the cash floor
+# A pay-down line's projection
 # ---------------------------------------------------------------------------
-def apply_to_budget(conn: sqlite3.Connection, plan_id: int,
-                    periods: Sequence[str], *,
-                    monthly_cents: Optional[int] = None,
-                    as_of: Optional[str] = None) -> int:
-    """Write a plan's projected payments into its budget as ordinary pay-down
-    rows, one per (account, month), and return how many rows were written.
-
-    The whole payment lands on the account's pay-down row rather than being
-    split into a principal row and an interest category: the number a budget
-    has to hold is the CASH the month needs, and a principal-only figure would
-    understate the outlay by the interest -- which is exactly the amount a
-    payoff plan exists to attack. Each debt's interest share is shown on the
-    plan's own table, where it is information rather than an envelope.
-
-    This routes through :func:`mammon.budgets.set_saving_line`, so budgets.py
-    remains the only writer of budget tables. It writes no transactions."""
-    plan = get_plan(conn, plan_id)
-    if plan.budget_id is None:
-        raise ValueError(f"debt plan {plan_id} has no budget to write to")
-    periods = [_validate_period(p) for p in periods]
-    if not periods:
-        return 0
-    debts = collect_debts(conn, plan_id, as_of)
-    if not debts:
-        return 0
-    budget = plan.monthly_cents if monthly_cents is None else int(monthly_cents)
-    start = plan.start_period or min(periods)
-    sim = simulate(debts, budget, plan.strategy, start_period=start)
-    if sim.minimums_exceed_budget:
-        raise ValueError("the plan's minimums exceed its monthly amount; "
-                         "nothing to budget until that is resolved")
-    by_period: dict = {}
-    for row in sim.schedule:
-        by_period.setdefault(row.period, {})[row.account_id] = row.payment_cents
-    written = 0
-    for period in periods:
-        for account_id, cents in sorted(by_period.get(period, {}).items()):
-            if cents <= 0:
-                continue
-            budgets.set_saving_line(conn, plan.budget_id, account_id, period,
-                                    int(cents))
-            written += 1
-    return written
-
-
-def check_extra_payment(conn: sqlite3.Connection, account_id: int, date: str,
-                        amount_cents: int, *,
-                        cushion_cents: int = budgets.DEFAULT_CUSHION_CENTS,
-                        start: Optional[str] = None, end: Optional[str] = None,
-                        include_predictions: bool = True,
-                        today: Optional[str] = None):
-    """Would paying ``amount_cents`` against this debt on ``date`` push the
-    projected cash floor below the cushion?
-
-    The same test a savings contribution gets (:func:`mammon.goals.check_contribution`)
-    and for the same reason: an extra payment is real money leaving a real
-    checking account on a real day, and the month it leaves may already be the
-    tight one. Overdrawing an account to pay a card down faster costs more than
-    the interest it saves. The debt account itself is excluded from the floor --
-    paying a card down does not fund next week's groceries.
-
-    Returns a :class:`mammon.budgets.FloorCheck`; it changes nothing."""
-    _validate_date(date)
-    acct = ledger.get_account(conn, int(account_id))
-    if acct is None:
-        raise KeyError(f"no account {account_id}")
-    from mammon.reports import saving as _saving
-
-    ids = [i for i in _saving.cash_flow_account_ids(conn)
-           if i != int(account_id)]
-    if start is None or end is None:
-        year, month = budgets._split_period(_period_of(date))
-        bounds = budgets.month_bounds(year, month)
-        start = start or bounds[0]
-        end = end or bounds[1]
-    return budgets.check_floor(
-        conn, start, end, cushion_cents=int(cushion_cents), account_ids=ids,
-        include_predictions=include_predictions, today=today,
-        extra=((date, -abs(int(amount_cents))),))
-
-
 def project_debt(conn: sqlite3.Connection, account_id: int, monthly_cents: int, *,
                  as_of: Optional[str] = None,
                  apr: Optional[Decimal] = None) -> Simulation:
@@ -1182,7 +717,7 @@ def project_debt(conn: sqlite3.Connection, account_id: int, monthly_cents: int, 
 
     The account's terms as stored or synthesized, with ``apr`` overriding the
     rate when the page offers one the user typed; a single-member run of
-    :func:`simulate`, so the arithmetic is the same the comparison uses and a
+    :func:`simulate`, so the arithmetic is the engine's own and a
     payment below the minimum comes back as a shortfall with no date rather
     than a line drawn through a missed payment. Nothing is stored."""
     acct = ledger.get_account(conn, int(account_id))

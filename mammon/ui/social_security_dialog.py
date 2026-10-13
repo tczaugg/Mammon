@@ -259,7 +259,7 @@ class SocialSecurityDialog(QDialog):
         closes. Bracket indexing is a tax assumption, but it rides with the
         COLA it is set against - both are "how fast do the numbers rise"."""
         from decimal import Decimal, InvalidOperation
-        from PyQt5.QtWidgets import QFormLayout, QLineEdit, QSpinBox
+        from PyQt5.QtWidgets import QFormLayout, QLineEdit
 
         self._Decimal, self._InvalidOperation = Decimal, InvalidOperation
         box = QGroupBox("Assumptions for projecting")
@@ -941,7 +941,7 @@ class SocialSecurityDialog(QDialog):
             self._rename_year(person, current, item.text())
         elif item.column() == 1:
             cents = abs(parse_amount(item.text()))
-            # A figure the user types is his own, so an ESTIMATED year becomes
+            # A figure the user types is their own, so an ESTIMATED year becomes
             # reported -- otherwise the next "Estimate from Ledger" would throw
             # the correction away. A projected or already-reported year keeps
             # the source it has.

@@ -275,7 +275,7 @@ def set_sound_enabled(on: bool, settings: QSettings | None = None) -> None:
     s.sync()
 
 
-# ---- Investment Center: retirement plan in the projection (SRD 5.8k) -------
+# ---- Investment Dashboard: retirement plan in the projection (SRD 5.8k) ----
 _RETIREMENT_PROJECTION_KEY = "dashboard/retirement_in_projection"
 
 

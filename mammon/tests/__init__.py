@@ -97,3 +97,34 @@ def fresh_db(path, key=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(_migrated_template(), target)
     return db.init_db(target)
+
+
+def seed_balance_cache(conn) -> None:
+    """Build every account's year-end balance checkpoints, as an import does.
+
+    ``ledger`` maintains the cache only for accounts that already HAVE one, so a
+    test that never builds it passes against an empty cache whatever the write
+    path did. Seed it before the write under test."""
+    from mammon import ledger
+    for (aid,) in conn.execute("SELECT id FROM accounts").fetchall():
+        ledger.rebuild_checkpoints(conn, aid)
+
+
+def assert_balance_cache_matches(conn) -> None:
+    """Every account's cached balance equals the sum of its register rows.
+
+    The Accounts list reads ``ledger.account_balance`` -- last year-end
+    checkpoint plus the rows after it -- while the register adds up the rows
+    themselves. A write that changes a row without refreshing the checkpoints
+    makes the two disagree, silently and permanently. Checked at every year end
+    a checkpoint exists for, and open-ended."""
+    from mammon import ledger
+    for (aid,) in conn.execute("SELECT id FROM accounts").fetchall():
+        assert ledger.account_balance(conn, aid) == \
+            ledger._account_balance_full(conn, aid), f"account {aid}: total"
+        for (year,) in conn.execute(
+                "SELECT year FROM balance_checkpoints WHERE account_id=?", (aid,)):
+            as_of = f"{year}-12-31"
+            assert ledger.balance_via_checkpoint(conn, aid, as_of) == \
+                ledger._account_balance_full(conn, aid, as_of), \
+                f"account {aid}: {as_of}"

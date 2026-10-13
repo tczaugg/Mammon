@@ -300,7 +300,7 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
     together make up :attr:`GROUP_TARGET_PCT` of the total are folded into one
     **Other** wedge (:func:`group_small_slices`), and any wedge still under
     :attr:`LABEL_MIN_PCT` of the *drawn* pie is drawn without inline text -- a
-    sliver's label would have landed on its neighbour's. Every wedge stays
+    sliver's label would have landed on its neighbor's. Every wedge stays
     identifiable regardless: the un-labeled slivers get a **hover tooltip**
     (:meth:`_on_motion`) naming the category, its share of the whole and its
     dollar amount, so nothing on the pie is anonymous.
@@ -480,7 +480,7 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
 
         # Every wedge is identifiable: big ones carry an inline label+percent,
         # and the slivers whose text was suppressed (they would land on a
-        # neighbour) get a hover tooltip instead -- category name, its share of
+        # neighbor) get a hover tooltip instead -- category name, its share of
         # the WHOLE period, and the dollar amount. Built for ALL wedges so the
         # hovered exact dollars are available even on a labeled wedge.
         self._tooltips = {
@@ -501,7 +501,7 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
             seq["i"] += 1
             lab, cents = drawn[i]
             if lab not in shown:
-                return ""                       # a sliver's text lands on its neighbour
+                return ""                       # a sliver's text lands on its neighbor
             return f"{cents / whole * 100.0:.0f}%\n{_dollars(cents)}"
 
         wedges, texts, *_ = ax.pie(sizes, labels=labels, colors=colors,
@@ -522,7 +522,7 @@ class SlicesPieCanvas(FigureCanvasQTAgg):
         if self._stack:
             text += "\n(click outside the pie to go back)"
         elif self._grouped:
-            text += (f"\n(smallest categories totalling {self.group_target_pct:.0f}% "
+            text += (f"\n(smallest categories totaling {self.group_target_pct:.0f}% "
                      f"grouped as {self.GROUP_LABEL} -- click it to break it out)")
         return text
 

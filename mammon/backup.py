@@ -455,7 +455,7 @@ def check_same_database(snapshot, out_path) -> None:
 
 def restore_backup(snapshot, out_path, *, baseline_dir=None,
                    allow_foreign: bool = False) -> Path:
-    """Materialise ``snapshot`` as a standalone SQLite database at ``out_path``.
+    """Materialize ``snapshot`` as a standalone SQLite database at ``out_path``.
 
     Works for both kinds, so callers (the Restore dialog, the CLI) never have to
     care whether the user picked a full snapshot or a delta.

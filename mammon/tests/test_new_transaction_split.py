@@ -129,7 +129,7 @@ def test_new_transaction_split_offers_copy_from_previous_payee(qapp, conn, accou
     assert sum(s["amount"] for s in splits) == 1000_00
 
 
-def test_split_gesture_on_blank_row_materialises_then_opens_editor(
+def test_split_gesture_on_blank_row_materializes_then_opens_editor(
         qapp, conn, accounts, monkeypatch):
     chk, _ = accounts
     reg = widgets.RegisterWidget(conn, chk)

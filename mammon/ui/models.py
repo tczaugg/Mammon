@@ -1878,14 +1878,15 @@ class InvestmentRegisterModel(QAbstractTableModel):
         shares, price -- and accepts; nothing is written until then."""
         m = entry.mapped
         # The importer's action is a lookup-table guess over the source's own
-        # activity vocabulary. The action TREE has seen every accept the user
-        # ever made (bootstrapped from register history), so when it is
+        # activity vocabulary. The action TREE has learned from every row the
+        # user accepted in review, so when it is
         # high-confidence for this description it seeds the editable row --
         # visibly, correctably -- and the review list keeps showing the raw
         # ground truth. Silent or unsure, the importer's mapping stands.
         # One implementation, shared with Accept All (import_review.accept_all),
         # so the bulk path cannot drift from what this row displays.
-        action = import_review.predict_action(self.conn, m)
+        action = import_review.predict_action(self.conn, m,
+                                              account_id=self.account_id)
         self.beginResetModel()
         self._pending = {"entry": entry, "buf": {
             "date": m.date or "",
@@ -2505,7 +2506,8 @@ class CryptoRegisterModel(QAbstractTableModel):
         self.beginResetModel()
         self._pending = {"entry": entry, "buf": {
             "action": (m.action or "RECEIVE").upper(),
-            "payee": import_review.predict_crypto_payee(self.conn, m),
+            "payee": import_review.predict_crypto_payee(self.conn, m,
+                                                        account_id=self.account_id),
             "memo": m.memo or "",
             "transfer": "",
             "amount": fmt_cents(abs(m.amount_cents or 0)) if m.amount_cents else "",

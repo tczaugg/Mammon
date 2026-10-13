@@ -11,7 +11,7 @@ summary/error AND Mammon's final success/failure decision, so the
 
 Scope discipline
 -----------------
-This module ONLY records what :func:`mammon.downloads.download_account` already
+This module ONLY records what :func:`mammon.downloads.download_rows_for_review` already
 decided -- it contains NO success/failure logic (task 51582452 owns that). Each
 attempt is written as one JSON object per line (JSON Lines), which stays
 human-readable AND trivially parseable by the in-app viewer.
@@ -24,9 +24,7 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
-import time
-from typing import Any, Optional
+from typing import Optional
 
 # ~1 MB per generation, one rolled backup kept (download.log + download.log.1).
 MAX_BYTES = 1_000_000

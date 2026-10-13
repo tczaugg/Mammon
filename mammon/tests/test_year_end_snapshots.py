@@ -16,7 +16,8 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, investments, ledger
-from mammon.tests import fresh_db
+from mammon.tests import (assert_balance_cache_matches, fresh_db,
+                          seed_balance_cache)
 
 
 @pytest.fixture
@@ -203,3 +204,94 @@ def test_investment_cascade_helper_matches_full_rebuild(conn):
     baseline = [tuple(r) for r in _dump()]
     investments.recompute_holdings_checkpoints_from_year(conn, acct, 2021)
     assert [tuple(r) for r in _dump()] == baseline
+
+
+# ---------------------------------------------------------------------------
+# every write path keeps the cache honest: the Accounts list (checkpoint path)
+# and the register (the rows themselves) must never disagree
+# ---------------------------------------------------------------------------
+def _three_accounts(conn):
+    """Checking, savings and a loan, each with rows in several years and a
+    seeded checkpoint cache."""
+    checking = ledger.create_account(conn, "Checking", "checking")
+    savings = ledger.create_account(conn, "Savings", "savings")
+    loan = ledger.create_account(conn, "Loan", "liability",
+                                 opening_balance=-50_000_00)
+    for year in (2019, 2020, 2021, 2022):
+        ledger.add_transaction(conn, checking, f"{year}-03-01", 2_000_00,
+                               payee="Payroll")
+        ledger.add_transaction(conn, savings, f"{year}-04-01", 300_00,
+                               payee="Interest")
+        ledger.add_transaction(conn, loan, f"{year}-05-01", 100_00,
+                               payee="Paydown")
+    seed_balance_cache(conn)
+    assert_balance_cache_matches(conn)
+    return checking, savings, loan
+
+
+def test_a_backdated_transfer_refreshes_both_accounts(conn):
+    """create_transfer writes two rows in two accounts; both caches follow."""
+    checking, savings, _loan = _three_accounts(conn)
+    ledger.create_transfer(conn, checking, savings, "2020-07-04", 175_810,
+                           payee="Move")
+    assert_balance_cache_matches(conn)
+
+
+def test_split_transfer_legs_refresh_the_counter_account(conn):
+    """A split's transfer leg writes a mirror row in ANOTHER account; creating,
+    re-amounting, removing and deleting it all keep that account's cache."""
+    checking, _savings, loan = _three_accounts(conn)
+    pid = ledger.add_transaction(conn, checking, "2020-06-01", -1_000_00,
+                                 payee="Bank")
+    interest = ledger.resolve_category(conn, "Interest")
+    ledger.set_splits(conn, pid, [
+        {"transfer_account_id": loan, "amount": -700_00, "memo": "Principal"},
+        {"category_id": interest, "amount": -300_00, "memo": "Interest"}])
+    assert_balance_cache_matches(conn)
+    ledger.set_splits(conn, pid, [
+        {"transfer_account_id": loan, "amount": -697_00, "memo": "Principal"},
+        {"category_id": interest, "amount": -303_00, "memo": "Interest"}])
+    assert_balance_cache_matches(conn)
+    ledger.clear_splits(conn, pid)
+    assert_balance_cache_matches(conn)
+    ledger.set_splits(conn, pid, [
+        {"transfer_account_id": loan, "amount": -700_00, "memo": "Principal"},
+        {"category_id": interest, "amount": -300_00, "memo": "Interest"}])
+    ledger.delete_transaction(conn, pid)
+    assert_balance_cache_matches(conn)
+
+
+def test_splitting_a_plain_transfer_and_undoing_it_keeps_the_cache(conn):
+    """Splitting a transfer re-amounts the adopted counter row; handing the leg
+    back (undo's clear_splits(restore_transfer_to=...)) re-amounts it again."""
+    checking, savings, _loan = _three_accounts(conn)
+    from_id, _to_id = ledger.create_transfer(conn, checking, savings,
+                                             "2021-02-02", 500_00)
+    fee = ledger.resolve_category(conn, "Fees")
+    ledger.set_splits(conn, from_id, [
+        {"transfer_account_id": savings, "amount": -480_00},
+        {"category_id": fee, "amount": -20_00}])
+    assert_balance_cache_matches(conn)
+    ledger.clear_splits(conn, from_id, restore_transfer_to=savings)
+    assert_balance_cache_matches(conn)
+
+
+def test_retargeting_a_transfer_refreshes_a_moved_legs_split_mirrors(conn):
+    """retarget_transfer deletes the old counter-leg and, belt and braces, any
+    split mirrors it owned -- those live in a third account, whose cache has to
+    follow them out. (Not reachable through the register today, so the state is
+    built by hand.)"""
+    checking, savings, loan = _three_accounts(conn)
+    from_id, to_id = ledger.create_transfer(conn, checking, savings,
+                                            "2021-02-02", 500_00)
+    mirror = conn.execute(
+        "INSERT INTO transactions(account_id, date, amount, transfer_account_id) "
+        "VALUES (?, '2020-05-05', 40_00, ?)", (loan, savings)).lastrowid
+    conn.execute("INSERT INTO splits(transaction_id, transfer_account_id, "
+                 "transfer_pair_id, amount) VALUES (?, ?, ?, -40_00)",
+                 (to_id, loan, mirror))
+    conn.commit()
+    seed_balance_cache(conn)
+    other = ledger.create_account(conn, "Other", "savings")
+    ledger.retarget_transfer(conn, from_id, other)
+    assert_balance_cache_matches(conn)

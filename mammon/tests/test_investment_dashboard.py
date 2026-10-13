@@ -19,7 +19,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from mammon import (crypto, db, forecast, investments, ledger, portfolio,   # noqa: E402
-                     security_mix)
+                     retirement_plan, security_mix)
 from mammon.ui import investment_dashboard as dash         # noqa: E402
 from mammon.tests import fresh_db
 
@@ -2083,7 +2083,7 @@ def test_what_if_sits_halfway_and_a_quarter_to_the_left(page, qapp):
     bar = page.what_if_bar.geometry()
     above = bar.top() - page.arrow_box.geometry().bottom()
     below = page.thermometer.geometry().top() - bar.bottom()
-    assert above > 0 and below > 0, "it must not overlap either neighbour"
+    assert above > 0 and below > 0, "it must not overlap either neighbor"
     assert abs(above - below) <= 2, f"clearances {above} vs {below}"
     assert page.arrow_box.geometry().left() - bar.left() == dash.CONTROL_SHIFT
     assert page.thermometer.geometry().left() == page.arrow_box.geometry().left()
@@ -3603,14 +3603,13 @@ def test_retirement_contributions_follow_the_planners_schedule(
     plan on they are the PLANNER's schedule, through the retirement year."""
     import datetime as _dt
     from mammon import rebalance, retirement
-    from mammon.ui import retirement_planner as rp
     rebalance.set_account_treatment(conn, seeded["brokerage"], "deferred")
     retirement.add_person(conn, "ANON Saver", "self", birth_year=1960,
                           birth_month=1, planned_claim_age_months=67 * 12)
     retirement.set_withdrawal_plan(conn, 50_000_00, 0, start_year=2028)
     page.refresh()
     measured = page._measured_inflows[seeded["brokerage"]]
-    schedule = rp.planned_contributions(conn, _dt.date.fromisoformat(AS_OF), 2028)
+    schedule = retirement_plan.planned_contributions(conn, _dt.date.fromisoformat(AS_OF), 2028)
     expected = [schedule.get(y, {}).get(seeded["brokerage"], 0)
                 for y in (2026, 2027, 2028)]
     assert expected[1] == measured and expected[2] == 0     # stops at retirement
@@ -3644,6 +3643,111 @@ def test_the_roth_gets_an_inflow_arrow_for_its_planned_conversions(
     assert "2027   in $3,000.00" in tip and "2030   out $2,000.00" in tip
     page.what_if_bar.retirement.setChecked(False)
     assert not any(w.group.key == "roth" for w in page.arrow_widgets)
+
+
+def _roth_landing_nodes(page) -> list:
+    """The nodes every Roth inflow group says its conversions land on, asserted
+    to be wedges the ring actually draws.
+
+    THE invariant of this group of tests: an inflow arrow whose target is not a
+    ring node is an arrow pointing at bare ring, because the arrow takes its
+    color from ``RingCanvas.color_for`` and an unmatched key falls back to a
+    gray no wedge wears (reported)."""
+    nodes = [int(m) for w in page.arrow_widgets if w.group.key == "roth"
+             for m in w.group.conversion_members]
+    assert nodes                            # there is conversion money to land
+    drawn = set(page.ring.keys())
+    assert all(str(n) in drawn for n in nodes)
+    return nodes
+
+
+def test_a_planned_roth_conversion_lands_on_the_owners_real_roth(
+        page, conn, seeded):
+    """With a real Roth of the same owner on file, the hypothetical Roth the
+    plan converts into is attributed to THAT account: it is the ring node, the
+    arrow wears its wedge color, and no hypothetical wedge is drawn."""
+    from mammon import rebalance, retirement
+    planned = retirement.conversion_target(conn, seeded["ira"])
+    assert retirement.is_planned(planned)   # no Roth yet: a hypothetical one
+    roth = ledger.create_account(conn, "ANON Roth", "investment",
+                                 opening_balance=1_000_00, opening_date=OPEN_DATE)
+    rebalance.set_account_treatment(conn, roth, "roth")
+    retirement.set_conversion(conn, seeded["ira"], planned, 2027, 3_000_00)
+    page.refresh()
+    assert _roth_landing_nodes(page) == [roth]
+    assert str(planned) not in set(page.ring.keys())    # no wedge of its own
+    w = next(w for w in page.arrow_widgets if w.group.key == "roth")
+    assert w.amount() == 3_000_00
+    assert w.color == page.ring.color_for(roth) != "#999999"
+
+
+def test_selecting_the_real_roth_projects_the_conversions_attributed_to_it(
+        page, conn, seeded):
+    """The Roth arrow points at the owner's real Roth, so selecting that wedge
+    projects the conversions the arrow states. They are keyed by the planned
+    Roth, and the selected account's plan series once dropped them (reported:
+    the Roth's fan showed none of the planned inflow)."""
+    from mammon import rebalance, retirement
+    planned = retirement.conversion_target(conn, seeded["ira"])
+    roth = ledger.create_account(conn, "ANON Roth", "investment",
+                                 opening_balance=1_000_00, opening_date=OPEN_DATE)
+    rebalance.set_account_treatment(conn, roth, "roth")
+    retirement.set_conversion(conn, seeded["ira"], planned, 2027, 3_000_00)
+    page.refresh()
+    page.select_slice(roth)
+    assert page._planned_nets(3) == [0, 3_000_00, 0]
+    # The source IRA still sees the conversion leave it, and nothing more.
+    page.select_slice(seeded["ira"])
+    assert page._planned_nets(3) == [0, -3_000_00, 0]
+
+
+def test_a_planned_roth_with_no_real_roth_gets_its_own_ring_wedge(
+        page, conn, seeded):
+    """With no real Roth to stand in, the hypothetical Roth joins the ring as
+    its own wedge: named "(planned)", sized by the conversion, muted so it does
+    not read as a funded account, and not selectable."""
+    from mammon import retirement
+    planned = retirement.conversion_target(conn, seeded["ira"])
+    retirement.set_conversion(conn, seeded["ira"], planned, 2027, 3_000_00)
+    page.refresh()
+    assert _roth_landing_nodes(page) == [planned]
+    slices = {k: (lab, cents) for k, lab, cents in dash.ring_slices(
+        conn, dash.MODE_ACCOUNTS, AS_OF, plan=True)}
+    label, cents = slices[str(planned)]
+    assert label.endswith("(planned)") and cents == 3_000_00
+    w = next(w for w in page.arrow_widgets if w.group.key == "roth")
+    assert w.amount() == cents
+    assert w.color == page.ring.color_for(planned) == dash.PLANNED_WEDGE_COLOR
+    # Hypothetical money is no account, so the page cannot be filtered to it:
+    # a click on the wedge widens back to the whole portfolio instead.
+    page.ring.pick(str(planned))
+    assert page.ring.selected() is None and page._filter is None
+    # It is a Retirement Plan node and nothing else: with the plan off, neither
+    # the wedge nor the arrow exists.
+    page.what_if_bar.retirement.setChecked(False)
+    assert not any(w.group.key == "roth" for w in page.arrow_widgets)
+    assert str(planned) not in set(page.ring.keys())
+    assert str(planned) not in {k for k, _lab, _c in dash.ring_slices(
+        conn, dash.MODE_ACCOUNTS, AS_OF)}
+
+
+def test_a_planned_roth_wedge_is_in_no_valuation_or_report(page, conn, seeded):
+    """The hypothetical wedge is a dashboard node only: the accounts ring's
+    real wedges, the center line's total and the asset-class ring are the same
+    with it as without."""
+    from mammon import retirement
+    before = dash.ring_slices(conn, dash.MODE_ACCOUNTS, AS_OF)
+    page.refresh()
+    total_before = page.center.line().total
+    classes_before = dash.ring_slices(conn, dash.MODE_CLASSES, AS_OF)
+    planned = retirement.conversion_target(conn, seeded["ira"])
+    retirement.set_conversion(conn, seeded["ira"], planned, 2027, 3_000_00)
+    page.refresh()
+    with_plan = dash.ring_slices(conn, dash.MODE_ACCOUNTS, AS_OF, plan=True)
+    assert [s for s in with_plan if int(s[0]) > 0] == before
+    assert page.center.line().total == total_before
+    assert dash.ring_slices(conn, dash.MODE_CLASSES, AS_OF, plan=True) \
+        == classes_before
 
 
 def test_the_plan_mix_and_the_plan_horizon_with_retirement_on(page, conn, seeded):
@@ -3700,7 +3804,6 @@ def test_retirement_contributions_are_the_planners_with_or_without_an_arrow(
     planner's fund line: a salary-linked plan without an arrow, a retired
     household, and a household with no retirement year on file."""
     from mammon import retirement
-    from mammon.ui import retirement_planner as rp
     as_of = dt.date.fromisoformat(AS_OF)
     person = retirement.add_person(conn, "ANON Saver", "self", birth_year=1970,
                                    birth_month=1, planned_claim_age_months=67 * 12)
@@ -3711,7 +3814,7 @@ def test_retirement_contributions_are_the_planners_with_or_without_an_arrow(
                                     deferral_pct=Decimal("7"), match_pct=Decimal("3"),
                                     person_id=person)
     page.refresh()
-    schedule = rp.planned_contributions(conn, as_of, 2035)
+    schedule = retirement_plan.planned_contributions(conn, as_of, 2035)
     assert seeded["ira"] not in page.arrow_accounts()      # three deposits: no arrow
     assert schedule[2027][seeded["ira"]] == 10_000_00     # 7% deferral + 3% match
     assert schedule[2026][seeded["ira"]] == 5_000_00      # the six months left
@@ -3744,7 +3847,7 @@ def test_retirement_contributions_are_the_planners_with_or_without_an_arrow(
                            100_00, memo="Contribution")           # a fourth: an arrow
     page.refresh()
     assert seeded["ira"] in page.arrow_accounts()
-    assert rp.planned_contributions(conn, as_of, 2026) == {}
+    assert retirement_plan.planned_contributions(conn, as_of, 2026) == {}
     page.select_slice(seeded["ira"])
     assert page._contribution_series(page._scoped_inflows(), 3) == [0, 0, 0]
     page.clear_filter()
@@ -3835,14 +3938,13 @@ def test_a_refresh_reads_the_plan_once_and_a_what_if_tick_not_at_all(
         page, conn, seeded, monkeypatch):
     """Measuring every retirement account's deposits is the expensive part of
     the plan; it ran twice per refresh and twice more per What If tick."""
-    from mammon.ui import retirement_planner as rp
     calls = []
-    real = rp.planned_contributions
+    real = retirement_plan.planned_contributions
 
     def counted(*args, **kwargs):
         calls.append(1)
         return real(*args, **kwargs)
-    monkeypatch.setattr(rp, "planned_contributions", counted)
+    monkeypatch.setattr(retirement_plan, "planned_contributions", counted)
     page.refresh()
     assert len(calls) == 1
     page.set_what_if(True)

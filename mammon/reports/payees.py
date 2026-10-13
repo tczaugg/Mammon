@@ -13,7 +13,7 @@ amount, not its legs. Split legs carry no payee of their own, so decomposing
 one only to re-group it by payee would change nothing -- except that the shared
 extraction drops transfer legs, which unbalances the split. That is how an
 employer's paychecks (salary in, tax legs out, a 401(k) deferral transferring
-away) totalled to the WITHHOLDING under the employer's name. :func:`by_tag`
+away) totaled to the WITHHOLDING under the employer's name. :func:`by_tag`
 keeps the legs: a tag annotates what money was FOR, which is a category-shaped
 question, and payroll tax is a real expense however the paycheck nets out.
 """

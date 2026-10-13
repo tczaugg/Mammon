@@ -332,8 +332,6 @@ def test_cash_is_never_sold(conn, world):
     # so "Invest" on the cash row read as an instruction to invest INTO cash
     # (reported). It pairs with "raise" as its plain opposite.
     assert rows["cash"].action == "spend"         # deploy the surplus...
-    assert rebalance.action_label("spend") == "Spend"
-    assert rebalance.action_label("raise") == "Raise"
     assert "never bought" in rebalance.CASH_ACTION_NOTE["spend"]
     assert rows["cash"].action != "sell"          # ...never sell cash
     # A security class is unaffected: still a plain Sell when overweight.

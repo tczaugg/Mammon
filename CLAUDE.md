@@ -99,6 +99,8 @@ mammon/db.py          schema + migrations only (no business logic)
 mammon/ledger.py      domain: accounts, transactions, transfers, balances. UI-free.
 mammon/investments.py holdings, price history, valuation (parallel domain layer)
 mammon/loans.py       amortization + payment splitting (pure domain, no Qt)
+mammon/retirement_plan.py  the retirement planner's projection engine (no Qt;
+                      the planner page and the MCP tools both run it)
    |
 mammon/importers/     parsers -> NormalizedTxn -> core.py's single insert/dedup path
 mammon/reports/       pure read-only aggregations returning plain data structures
@@ -127,7 +129,7 @@ mammon/mcp_server.py  binds those tools to MCP (the `mcp` SDK is imported only h
   text.
 - **Never edit an existing migration.** `db.py` holds an ordered `MIGRATIONS`
   list; index *i* upgrades the DB from version *i* to *i+1*, tracked in
-  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 116).
+  `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 120).
   Append a new `_Vn` and add it to the list - real databases have already
   applied the existing ones. `init_db()` is idempotent and safe on new and
   existing files. (That number is pinned by

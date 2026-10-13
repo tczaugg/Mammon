@@ -1,7 +1,7 @@
 """Register edit-state fixes (issues 1, 3, 4).
 
   1. Delete/Backspace on a TAB-selected cell clears it (parity with click).
-  3. The Split button on a NEW review row materialises it, then opens the split.
+  3. The Split button on a NEW review row materializes it, then opens the split.
   4. Enter/commit preserves the edited row's selection instead of jumping to top.
 """
 from __future__ import annotations
@@ -117,9 +117,9 @@ def test_refresh_all_excludes_committing_register(qapp, conn):
 
 
 # ---------------------------------------------------------------------------
-# issue 3: Split on a NEW review row materialises it, then opens the dialog
+# issue 3: Split on a NEW review row materializes it, then opens the dialog
 # ---------------------------------------------------------------------------
-def test_split_on_pending_review_row_materialises_and_opens(qapp, conn, monkeypatch):
+def test_split_on_pending_review_row_materializes_and_opens(qapp, conn, monkeypatch):
     chk = ledger.create_account(conn, "Checking", "checking", opening_balance=0)
     reg = widgets.RegisterWidget(conn, chk)
     entries = import_review.build_review(conn, chk, [_dl_row("ACME HARDWARE 55")])

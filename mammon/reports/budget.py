@@ -146,7 +146,7 @@ def budget_vs_actual_range(conn, budget_id: int, start_period: str,
 
     periods = _months(start_period, end_period)
 
-    by_period: dict[str, list[BudgetActualRow]] = {}
+    by_period: dict[str, list["budgets.BudgetActualRow"]] = {}
     period_totals: list[BudgetPeriodTotal] = []
     # category_id -> {name, budgeted, actual}, accumulated across periods.
     acc: dict[int, dict] = {}

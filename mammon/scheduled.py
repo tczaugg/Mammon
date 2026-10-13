@@ -378,7 +378,7 @@ def list_loan_schedules(conn, on_or_after: Optional[str] = None) -> list:
     ``loans.delete_loan_params``); these rows are derived on the fly from the
     amortization schedule, and ``next_date`` is the first period on/after
     ``on_or_after`` that no register holds yet (``loans_schedule.next_due_date``)
-    -- the loan analogue of a manual row's stored ``next_date``, advanced by
+    -- the loan analog of a manual row's stored ``next_date``, advanced by
     Enter/Generate and rolled back by deleting the payment. ``source`` is
     ``'loan'`` and ``id`` is the loan account id."""
     from mammon import loans, loans_schedule

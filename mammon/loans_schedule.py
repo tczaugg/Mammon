@@ -179,7 +179,7 @@ def create_pending_payment(conn, loan_account_id: int, due_date: str, *,
     # split-posted payment (has splits) or a bare principal/transfer leg
     # (transfer_account_id set, e.g. an imported loan-payment leg). Guarding only
     # on scheduled=1 (the old check) let a re-run of generation after the payment
-    # posted (merge flips scheduled -> 0), or after a recast re-materialised the
+    # posted (merge flips scheduled -> 0), or after a recast re-materialized the
     # schedule, insert a SECOND row on the loan side while the checking leg stayed
     # single -- the doubled-payment regression. A still-pending pre-entry, when
     # present, wins (its id is returned) so the import merge still lands on it.
@@ -699,12 +699,20 @@ def dedupe_loan_payment_legs(conn, loan_account_id: Optional[int] = None) -> int
     number of rows deleted. Idempotent."""
     if loan_account_id is None:
         sql = _DEDUPE_ONE_SIDED_LOAN_LEGS.format(account_filter="")
-        cur = conn.execute(sql)
+        args = ()
     else:
         sql = _DEDUPE_ONE_SIDED_LOAN_LEGS.format(
             account_filter="AND t.account_id = ?")
-        cur = conn.execute(sql, (loan_account_id,))
+        args = (loan_account_id,)
+    # The rows about to go, by (account, year): the loan's cached balance has
+    # to follow them out, or the Accounts list keeps counting what the loan
+    # register no longer shows.
+    doomed = sql.replace("DELETE FROM transactions WHERE id IN (",
+                         "SELECT account_id, date FROM transactions WHERE id IN (", 1)
+    edits = {(int(r[0]), int(r[1][:4])) for r in conn.execute(doomed, args)}
+    cur = conn.execute(sql, args)
     conn.commit()
+    ledger.touch_balance_cache(conn, *edits)
     return cur.rowcount
 
 

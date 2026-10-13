@@ -81,7 +81,7 @@ def _fingerprint(conn) -> tuple:
 def _open(path: str | Path, key: Optional[str]):
     conn = sqldriver.connect(str(path))
     if key:
-        # A pragma cannot be parameterised, so the key is quoted the way SQL quotes a
+        # A pragma cannot be parameterized, so the key is quoted the way SQL quotes a
         # literal: single quotes, doubled inside. Passwords with an apostrophe are not
         # exotic, and getting this wrong turns into "wrong password" for a right one.
         conn.execute("PRAGMA key = '%s'" % key.replace("'", "''"))

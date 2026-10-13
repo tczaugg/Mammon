@@ -4311,7 +4311,7 @@ def test_loan_wizard_new_payment_edit_resplits_forward_via_save(qapp, conn,
     """Editing the 'New total payment' field in the Edit Loan
     dialog must RE-DERIVE the schedule from the effective date FORWARD, not merely
     store the number (the old save path called loans.add_payment_change but never
-    loans_schedule.apply_payment_change, so already-materialised register rows kept
+    loans_schedule.apply_payment_change, so already-materialized register rows kept
     their stale split -- the edit looked like it did nothing). This drives the save
     handler directly (no modal) and asserts the engine ran, the forward split is
     recomputed to the cent, the running balance cascades, and no rows are doubled."""
@@ -4678,6 +4678,8 @@ def test_account_toolbar_emits_account_id(qapp):
     tb.importRequested.connect(lambda a: seen.setdefault("import", a))
     tb.downloadRequested.connect(lambda a: seen.setdefault("download", a))
     tb.hideRequested.connect(lambda a: seen.setdefault("hide", a))
+    tb.reconciledLogRequested.connect(lambda a: seen.setdefault("log", a))
+    tb.act_reconciled_log.trigger()
     tb.act_details.trigger()
     tb.act_reconcile.trigger()
     tb.act_import.trigger()
@@ -4686,7 +4688,7 @@ def test_account_toolbar_emits_account_id(qapp):
     tb.act_download.trigger()
     tb.act_hide.trigger()
     assert seen == {"details": 7, "reconcile": 7, "import": 7,
-                    "download": 7, "hide": 7}
+                    "download": 7, "hide": 7, "log": 7}
     # The Accounts roster moved off the toolbar to the Tools menu.
     assert not hasattr(tb, "act_accounts")
 
@@ -5544,7 +5546,7 @@ def _export_download_client(script="GetExport"):
 
 def _drop_download(monkeypatch, tmp_path, name, text):
     """Drop a file into a fake ~/Downloads whose mtime is AFTER the run starts
-    (newest_download only takes post-run files), and point default_downloads_dir
+    (new_downloads only takes post-run files), and point default_downloads_dir
     at it."""
     import os
     from mammon import downloads
@@ -6905,8 +6907,8 @@ def test_register_actions_live_in_a_gear_menu_not_a_toolbar_row(qapp, conn, acco
     reg = RegisterWidget(conn, chk)
     assert reg.toolbar.isVisible() is False
     labels = [a.text() for a in reg.gear_menu.actions() if a.text()]
-    for expected in ("Account Details…", "Reconcile…", "Import…",
-                     "Download…", "Review…", "Hide Account"):
+    for expected in ("Account Details…", "Reconcile…", "Reconciled Change Log…",
+                     "Import…", "Download…", "Review…", "Hide Account"):
         assert expected in labels, f"{expected} missing from the gear menu"
     # Same QAction objects, so existing wiring and callers still work.
     assert reg.toolbar.act_download in reg.gear_menu.actions()
@@ -7543,8 +7545,9 @@ def test_investment_register_actions_live_in_a_gear_menu(qapp, conn):
     reg = InvestmentRegisterWidget(conn, aid)
     assert reg.toolbar.isVisible() is False
     labels = [a.text() for a in reg.gear_menu.actions() if a.text()]
-    for expected in ("Account Details…", "Reconcile…", "Import…", "Download…",
-                     "Review…", "Hide Account", "Get Quotes…"):
+    for expected in ("Account Details…", "Reconcile…", "Reconciled Change Log…",
+                     "Import…", "Download…", "Review…", "Hide Account",
+                     "Get Quotes…"):
         assert expected in labels, f"{expected} missing from the gear menu"
     assert reg.gear_button.menu() is reg.gear_menu
     assert reg.toolbar.act_download in reg.gear_menu.actions()
@@ -7926,3 +7929,27 @@ def test_picking_the_pending_payee_reasks_the_category_tree(qapp, conn, accounts
     m.setData(m.index(m.pending_row(), RegisterModel.CATEGORY), "Dining", Qt.EditRole)
     m.setData(m.index(m.pending_row(), RegisterModel.PAYEE), "Anybank", Qt.EditRole)
     assert m.pending_values()["category"] == "Dining"     # the user's own stands
+
+
+def test_the_reconciled_change_log_opens_from_the_gear_not_account_details(
+        qapp, conn, accounts, monkeypatch):
+    """The audit trail is something you DO with an account, so it lives in the
+    register's gear menu beside Reconcile; Account Details is settings only."""
+    from mammon.ui import reconciled_log_dialog
+    from mammon.ui.widgets import AccountDetailsDialog, MainWindow
+    chk, _ = accounts
+    opened = []
+    monkeypatch.setattr(reconciled_log_dialog.ReconciledChangeLogDialog, "exec_",
+                        lambda self: opened.append(self.account_id) or 0)
+    win = MainWindow(conn)
+    try:
+        win.open_register(chk)
+        reg = win._registers[chk]
+        assert reg.toolbar.act_reconciled_log in reg.gear_menu.actions()
+        reg.toolbar.act_reconciled_log.trigger()
+        assert opened == [chk]
+    finally:
+        win.close()
+    dlg = AccountDetailsDialog(ledger.get_account(conn, chk), conn=conn)
+    assert not hasattr(dlg, "reconciled_log_btn")
+    dlg.deleteLater()

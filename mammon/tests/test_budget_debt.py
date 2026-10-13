@@ -1,23 +1,13 @@
-"""Debt payoff end to end: mammon.debt and the Pay Down half of the Budget
-Planner's Save & Pay Down tab (SRD 5.12h).
+"""Debt payoff: mammon.debt's engine and the account side of a Budget page
+pay-down line's projection (SRD 5.12h).
 
-Two claims carry the whole feature, and they are what the tests below pin.
-
-1. The arithmetic agrees with itself. The closed-form ``payoff_months`` and the
-   month-by-month ``simulate`` are two independent routes to the same number,
-   so the named agreement is asserted through BOTH, to the cent. When they
-   disagree the cause is always the accrual order or a second rounding site,
-   and a test that only ran the loop would not see it.
-
-2. Nothing about a RESULT is stored, and nothing is recommended. The page shows
-   both published orders with the difference between them and selects neither;
-   an extra payment is floor-tested before it is promised, and refused when it
-   breaks the cushion. Mammon computes and cites, never counsels.
+The arithmetic is pinned to the cent: interest accrues first on the month-end
+balance and is the one rounding site, so a known annuity lands exactly.
 
 The three degenerate outcomes are here too, because each one has its own
-readout on the page and each is a wrong answer if it silently becomes another:
-a payment below the monthly interest never pays off, a very long plan hits the
-cap with a balance still owed, and minimums above the monthly amount have no
+readout and each is a wrong answer if it silently becomes another: a payment
+below the monthly interest never pays off, a very long payoff hits the cap
+with a balance still owed, and minimums above the monthly amount have no
 payoff date at all.
 
 All fixtures are synthetic - invented account names, round invented balances
@@ -25,20 +15,13 @@ and dates in an invented year.
 """
 from __future__ import annotations
 
-import datetime as _dt
-import os
 from decimal import Decimal
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from mammon import budgets, debt, ledger
+from mammon import debt, ledger
 from mammon.tests import fresh_db
 
-#: A fixed "today" so every month label and payoff date is the same string on
-#: every run. Mid-month, because that is when a household opens a plan.
-TODAY = _dt.date(2031, 3, 12)
 START = "2031-03"
 
 
@@ -52,66 +35,6 @@ def conn(tmp_path):
     c.close()
 
 
-@pytest.fixture
-def book(conn):
-    """Checking with money in it and two interest-bearing cards owing money.
-
-    Both cards are ``credit`` accounts, which puts them inside the cash-flow
-    set the floor is computed over - that is the point of the floor test below.
-    """
-    checking = ledger.create_account(conn, "Everyday Checking", "checking")
-    blue = ledger.create_account(conn, "Blue Card", "credit")
-    green = ledger.create_account(conn, "Green Card", "credit")
-    ledger.add_transaction(conn, checking, "2031-01-02", 800_000,
-                           payee="Opening Balance")
-    ledger.add_transaction(conn, blue, "2031-01-05", -800_000,
-                           payee="Opening Balance")
-    ledger.add_transaction(conn, green, "2031-01-05", -200_000,
-                           payee="Opening Balance")
-    # Interest-bearing by their entered terms: a card whose agreement the user
-    # has recorded is a debt to pay down even before a charge posts.
-    debt.set_terms(conn, blue, apr=Decimal("19.99"), min_form="B",
-                   min_floor_cents=2_500, min_pct=Decimal("2"))
-    debt.set_terms(conn, green, apr=Decimal("12.99"), min_form="B",
-                   min_floor_cents=2_500, min_pct=Decimal("2"))
-    return {"checking": checking, "blue": blue, "green": green}
-
-
-@pytest.fixture
-def plan(conn, book):
-    """A plan over both cards, 500.00 a month, highest rate first."""
-    pid = debt.create_plan(conn, "Cards", strategy=debt.AVALANCHE,
-                           monthly_cents=50_000, start_period=START)
-    debt.set_member(conn, pid, book["blue"], sort_index=0)
-    debt.set_member(conn, pid, book["green"], sort_index=1)
-    return pid
-
-
-@pytest.fixture
-def qapp():
-    from PyQt5.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app
-    app.processEvents()
-
-
-@pytest.fixture
-def cushion(monkeypatch):
-    """The cash cushion, held in memory for the duration.
-
-    :mod:`mammon.ui.prefs` reads the real user profile, so a test that read it
-    would depend on the developer's own setting. Zero is the shipped default.
-    """
-    from mammon.ui import prefs
-
-    box = {"cents": 0}
-    monkeypatch.setattr(prefs, "cash_cushion_cents", lambda *a, **k: box["cents"])
-    monkeypatch.setattr(prefs, "set_cash_cushion_cents",
-                        lambda cents, *a, **k: box.__setitem__("cents", int(cents)))
-    return box
-
-
 def _debt(account_id: int, name: str, balance_cents: int, apr: str, *,
           min_form: str = "B", min_floor_cents: int = 2_500,
           min_pct: str = "2") -> debt.DebtInput:
@@ -123,21 +46,18 @@ def _debt(account_id: int, name: str, balance_cents: int, apr: str, *,
         apr=Decimal(apr))
 
 
-# ---- the agreement between the two routes ----------------------------------
-def test_closed_form_and_simulation_agree_to_the_cent():
+# ---- the engine --------------------------------------------------------------
+def test_the_simulation_matches_the_annuity_to_the_cent():
     """8,000.00 at 19.99 percent APR against 250.00 a month.
 
-    47 months and 3,524.38 of interest, by the closed form and by the loop.
-    The two share no code: ``payoff_months`` solves the annuity, ``simulate``
-    accrues a month at a time and rounds once per debt-month. Agreement is the
+    47 months and 3,524.38 of interest. The month count is the closed-form
+    annuity's (n = -ln(1 - rB/P) / ln(1 + r), rounded up); ``simulate`` accrues
+    a month at a time and rounds once per debt-month, so landing on it is the
     evidence that the accrual convention (interest first, on the month-end
-    balance) is applied consistently in both.
+    balance) has no second rounding site.
     """
     one = _debt(1, "Card", 800_000, "19.99", min_form="A",
                 min_floor_cents=25_000, min_pct="0")
-
-    assert debt.payoff_months(800_000, 25_000,
-                              debt.monthly_rate("19.99")) == 47
 
     sim = debt.simulate([one], 25_000, debt.AVALANCHE, start_period=START)
     assert sim.payoff_month == 47
@@ -159,32 +79,18 @@ def test_closed_form_and_simulation_agree_to_the_cent():
     assert sim.schedule[-1].payment_cents < 25_000
 
 
-def test_payoff_months_guards():
-    """The closed form's two guards, plus the answers at the edges."""
-    # r == 0 is ceil(B / P), not a division by log(1).
-    assert debt.payoff_months(100_000, 30_000, 0) == 4
-    # Nothing owed is nothing to pay.
-    assert debt.payoff_months(0, 1_000, debt.monthly_rate("19.99")) == 0
-    # P <= r * B has no solution: "does not pay off" is an answer, not an error.
-    assert debt.payoff_months(600_000, 6_000,
-                              debt.monthly_rate("29.99")) is None
-    assert debt.payoff_months(100, 0, 0) is None
-
-
 def test_the_order_is_recomputed_and_the_remainder_cascades():
-    """Two debts, both orders, and the published difference between them.
+    """Two debts under both sort keys of the one engine.
 
     The roll-in is not tracked: cascading the whole remainder each month
-    produces it for free. What the comparison is allowed to say is the interest
-    difference - and here it happens to be the sooner date as well, which is
-    exactly why the page states both numbers instead of concluding.
+    produces it for free, and the orders differ only in where it goes.
     """
     blue = _debt(1, "Blue Card", 800_000, "19.99")
     green = _debt(2, "Green Card", 200_000, "12.99")
 
-    sims = debt.compare([blue, green], 50_000, start_period=START)
-    assert [s.strategy for s in sims] == [debt.SNOWBALL, debt.AVALANCHE]
-    snowball, avalanche = sims
+    snowball, avalanche = (
+        debt.simulate([blue, green], 50_000, strategy, start_period=START)
+        for strategy in (debt.SNOWBALL, debt.AVALANCHE))
 
     assert snowball.payoff_month == 25
     assert snowball.payoff_period == "2033-03"
@@ -192,7 +98,6 @@ def test_the_order_is_recomputed_and_the_remainder_cascades():
     assert avalanche.payoff_month == 24
     assert avalanche.payoff_period == "2033-02"
     assert avalanche.total_interest_cents == 196_357
-    assert debt.interest_spread_cents(sims) == 24_012
 
     # Smallest-balance first clears the small card early; highest-rate first
     # leaves it until last. Both minimum totals are identical - the orders
@@ -237,7 +142,7 @@ def test_the_cap_is_reported_while_still_amortizing():
 
     Distinct from negative amortization: the balance falls every month, so
     nothing is flagged, but the projection stops with money still owed and says
-    so. The closed form agrees that the real answer is past the cap.
+    so. (The closed-form annuity puts the real answer at 625 months.)
     """
     card = _debt(1, "Card", 1_000_000, "12", min_form="A",
                  min_floor_cents=10_020, min_pct="0")
@@ -249,7 +154,6 @@ def test_the_cap_is_reported_while_still_amortizing():
     assert sim.months_run == debt.MAX_MONTHS
     assert sim.schedule[-1].balance_cents == 219_437
     assert sim.schedule[-1].balance_cents < 1_000_000
-    assert debt.payoff_months(1_000_000, 10_020, debt.monthly_rate("12")) == 625
 
 
 def test_minimums_above_the_budget_report_a_shortfall_and_no_date():
@@ -289,26 +193,24 @@ def test_degenerate_inputs():
 
 
 # ---- the database side -----------------------------------------------------
-def test_collect_debts_turns_a_liability_balance_into_a_magnitude(conn, book,
-                                                                  plan):
+def test_the_ledger_balance_becomes_a_positive_amount_owed(conn):
     """The sign flip happens once, on the way out of the ledger.
 
     A card's ledger balance is negative; every formula downstream wants a
-    positive amount owed. Doing it here means no arithmetic in the engine and
+    positive amount owed. Doing it there means no arithmetic in the engine and
     no label in the UI has to remember which way the sign points.
     """
-    assert ledger.account_balance(conn, book["blue"]) == -800_000
+    card = ledger.create_account(conn, "Blue Card", "credit")
+    ledger.add_transaction(conn, card, "2031-01-05", -800_000,
+                           payee="Opening Balance")
+    debt.set_terms(conn, card, apr=Decimal("19.99"), min_form="B",
+                   min_floor_cents=2_500, min_pct=Decimal("2"))
+    assert ledger.account_balance(conn, card) == -800_000
 
-    debts = debt.collect_debts(conn, plan)
-    assert [d.name for d in debts] == ["Blue Card", "Green Card"]
-    assert [d.balance_cents for d in debts] == [800_000, 200_000]
-    assert debts[0].monthly_rate == debt.monthly_rate("19.99")
-    assert not debts[0].estimated
-
-    # Membership is the switch, and it survives a round trip.
-    debt.set_member(conn, plan, book["green"], included=False)
-    assert [d.account_id for d in debt.collect_debts(conn, plan)] == [
-        book["blue"]]
+    row = debt.project_debt(conn, card, 50_000, as_of="2031-03-12").outcome(card)
+    assert row.balance_cents == 800_000
+    assert row.apr == Decimal("19.99")
+    assert not row.estimated
 
 
 def test_terms_with_nothing_entered_are_synthesized_and_marked(conn):
@@ -316,72 +218,15 @@ def test_terms_with_nothing_entered_are_synthesized_and_marked(conn):
     account = ledger.create_account(conn, "Store Card", "credit")
     ledger.add_transaction(conn, account, "2031-01-05", -50_000,
                            payee="Opening Balance")
-    ledger.add_transaction(conn, account, "2031-02-05", -1_500,
-                           payee="Store Card", memo="finance charge")
     assert debt.get_terms(conn, account) is None
 
-    [row] = debt.available_debts(conn, None)
+    row = debt.project_debt(conn, account, 5_000,
+                            as_of="2031-03-12").outcome(account)
     assert row.estimated                         # the page must call it a guess
-    assert row.min_floor_cents == debt.DEFAULT_MIN_FLOOR_CENTS
-    assert row.min_pct == debt.DEFAULT_MIN_PCT
+    assert row.minimum_cents == debt.DEFAULT_MIN_FLOOR_CENTS
 
 
 def test_terms_refuse_an_account_that_is_not_a_debt(conn):
     checking = ledger.create_account(conn, "Everyday Checking", "checking")
     with pytest.raises(ValueError):
         debt.set_terms(conn, checking, apr=Decimal("19.99"))
-
-
-def test_apply_to_budget_writes_the_input_not_the_result(conn, book, plan):
-    """The budget seam: the monthly payments, as ordinary budget saving rows.
-
-    What crosses is the plan's own arithmetic for each month, written through
-    :mod:`mammon.budgets` - the sole writer of budget tables. The payoff month
-    and the interest total are not written anywhere.
-    """
-    budget_id = budgets.create_budget(conn, "Household")
-    debt.update_plan(conn, plan, budget_id=budget_id)
-    periods = budgets.plan_periods(START, 3)
-
-    written = debt.apply_to_budget(conn, plan, periods)
-    assert written == 6                          # two debts, three months
-    lines = budgets.get_saving_lines(conn, budget_id)
-    assert {l.period for l in lines} == set(periods)
-    for period in periods:
-        month = [l for l in lines if l.period == period]
-        assert sum(l.amount_cents for l in month) == 50_000
-
-    # And it refuses outright when the minimums do not fit.
-    debt.update_plan(conn, plan, monthly_cents=1_000)
-    with pytest.raises(ValueError):
-        debt.apply_to_budget(conn, plan, periods)
-
-
-# ---- the page, end to end --------------------------------------------------
-def test_only_real_debts_are_offered(conn):
-    """A paid-off loan and a card paid in full every month are not debts to
-    pay down: the first owes nothing and the second costs nothing. A card
-    charged interest lately, and a loan with a balance, are."""
-    checking = ledger.create_account(conn, "Everyday Checking", "checking")
-    paid_off = ledger.create_account(conn, "Old Car Loan", "liability")
-    car = ledger.create_account(conn, "Car Loan", "liability")
-    convenience = ledger.create_account(conn, "Rewards Card", "credit")
-    revolving = ledger.create_account(conn, "Store Card", "credit")
-    ledger.add_transaction(conn, car, "2031-01-05", -900_000, payee="Opening Balance")
-    ledger.add_transaction(conn, convenience, "2031-02-10", -42_000, payee="Grocer")
-    ledger.create_transfer(conn, checking, convenience, "2031-02-25", 42_000)
-    ledger.add_transaction(conn, convenience, "2031-03-04", -31_000, payee="Grocer")
-    ledger.add_transaction(conn, revolving, "2031-01-05", -120_000, payee="Opening Balance")
-    ledger.add_transaction(conn, revolving, "2031-02-28", -2_300,
-                           payee="Store Card", category_id=ledger.resolve_category(
-                               conn, "Interest Paid"))
-    assert not debt.pays_interest(conn, convenience)
-    assert debt.pays_interest(conn, revolving)
-    names = sorted(d.name for d in debt.available_debts(conn, None))
-    assert names == ["Car Loan", "Store Card"]
-    assert paid_off not in {d.account_id for d in debt.available_debts(conn, None)}
-    # Entering a card's terms says it is a debt, charge or no charge yet.
-    debt.set_terms(conn, convenience, apr=Decimal("24.99"))
-    assert "Rewards Card" in {d.name for d in debt.available_debts(conn, None)}
-    # The filter is a choice: the unfiltered list still exists.
-    assert len(debt.available_debts(conn, None, real_only=False)) == 4

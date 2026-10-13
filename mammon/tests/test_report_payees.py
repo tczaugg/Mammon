@@ -70,7 +70,7 @@ def test_by_payee_bills_a_split_to_its_payee_at_the_parents_amount(conn):
     """A paycheck is a split: salary in, tax legs out, a 401(k) deferral
     transferring to the retirement account. The by-payee report used to read the
     LEGS, and the shared extraction drops transfer legs -- which unbalances the
-    split, so the employer totalled to the withholding: an employer's deposits
+    split, so the employer totaled to the withholding: an employer's deposits
     showed as a fraction of what they paid.
 
     Synthetic figures, same shape."""

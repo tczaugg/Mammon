@@ -40,7 +40,7 @@ from mammon.ui import prefs, sounds, style
 from mammon.ui.import_review_widget import ImportReviewPanel
 from mammon.ui.delegates import (
     CategoryDelegate, ChoiceDelegate, DateDelegate, FocusSelectDelegate,
-    MoneyDelegate, NoWheelComboBox,
+    MoneyDelegate, NoWheelComboBox, NoWheelFontComboBox, NoWheelSpinBox,
     TransferAccountDelegate,
     NoWheelDoubleSpinBox, PayeeCompleter, PayeeTwoLineDelegate, SplitAmountSpinBox,
     TagDelegate, TwoLineHeaderView, _accept_active_completion, accept_category_text,
@@ -52,9 +52,6 @@ from mammon.ui.models import (
     RegisterModel, SearchResultsModel,
     fmt_amount_ccy, fmt_cents, fmt_date, fmt_money, fmt_qty, parse_amount,
     warning_triangle_icon,
-)
-from mammon.ui.delegates import (
-    NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelFontComboBox, NoWheelSpinBox,
 )
 
 # classic account groupings (account type -> section box)
@@ -4953,7 +4950,7 @@ class CryptoRegisterWidget(TransferGotoMixin, QWidget):
         keeps its narrow classic width."""
         hh = self.view.horizontalHeader()
         # Nothing may collapse to an unreadable stub. Without a floor, a stretched
-        # section squeezed by its neighbours went to 21px -- present, and useless.
+        # section squeezed by its neighbors went to 21px -- present, and useless.
         hh.setMinimumSectionSize(72)
         M = CryptoRegisterModel
         coin_w = self._coin_column_width()
@@ -6134,15 +6131,6 @@ class AccountDetailsDialog(QDialog):
         form.addRow("", self.closed)
         form.addRow("", self.hidden)
         form.addRow(self._build_download_group(account))
-        # Parent the button at construction (never leave it briefly parentless --
-        # a realized top-level would steal focus and commit an in-progress cell
-        # edit elsewhere). It reparents into the form when added below.
-        self.reconciled_log_btn = QPushButton("Reconciled change log…", self)
-        self.reconciled_log_btn.setToolTip(
-            "Show every edit or deletion applied to a reconciled transaction in "
-            "this account -- rare events that can throw off a later reconcile.")
-        self.reconciled_log_btn.clicked.connect(self._open_reconciled_log)
-        form.addRow("", self.reconciled_log_btn)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(form_host)
@@ -6152,16 +6140,6 @@ class AccountDetailsDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(scroll, 1)
         outer.addWidget(buttons)
-
-    def _open_reconciled_log(self):
-        """Open the read-only audit trail of changes to this account's reconciled
-        transactions (migration 63). No SQL or money logic here -- the dialog
-        reads it through ``ledger.reconciled_change_log``."""
-        if self._conn is None or self._account_id is None:
-            return
-        from mammon.ui.reconciled_log_dialog import ReconciledChangeLogDialog
-        dlg = ReconciledChangeLogDialog(self._conn, self._account_id, parent=self)
-        dlg.exec_()
 
     def _build_download_group(self, account):
         """The Download (webSlinger) section: a slot for the automation SCRIPT
@@ -6493,6 +6471,9 @@ class AccountToolbar(QToolBar):
     # Investment-only (SRD 5.11b); hidden by default (see below), unhidden by
     # InvestmentRegisterWidget the same way act_load_invoices is cash-only.
     reconcileSharesRequested = pyqtSignal(int)
+    # The read-only audit trail of edits to this account's reconciled rows
+    # (SRD 5.11a). An account ACTION, beside Reconcile, not an account setting.
+    reconciledLogRequested = pyqtSignal(int)
 
     def __init__(self, account_id, parent=None):
         super().__init__(parent)
@@ -6518,6 +6499,11 @@ class AccountToolbar(QToolBar):
         self.act_reconcile_shares = self._add(
             "Reconcile Shares…", self.reconcileSharesRequested)
         self.act_reconcile_shares.setVisible(False)
+        self.act_reconciled_log = self._add("Reconciled Change Log…",
+                                            self.reconciledLogRequested)
+        self.act_reconciled_log.setToolTip(
+            "Show every edit or deletion applied to a reconciled transaction in "
+            "this account -- rare events that can throw off a later reconcile.")
         # Import (from a downloaded FILE) and Download (pull via webSlinger) are
         # DISTINCT actions. Download stays ALWAYS enabled/clickable so its click
         # handler always runs a preflight and reports exactly what setup is
@@ -9587,6 +9573,7 @@ class MainWindow(QMainWindow):
                 tb.enterPaymentRequested.connect(self._enter_loan_payment)
                 tb.printRequested.connect(self._print_account)
                 tb.reconcileSharesRequested.connect(self._reconcile_shares_account)
+                tb.reconciledLogRequested.connect(self._reconciled_log_dialog)
                 # Surface the Loan Setup button at the top of loan registers.
                 is_liability = acct is not None and acct["type"] == "liability"
                 is_loan = False
@@ -9830,6 +9817,13 @@ class MainWindow(QMainWindow):
         tb = getattr(reg, "toolbar", None) if reg is not None else None
         if tb is not None:
             self._refresh_download_gate(account_id, tb)
+
+    def _reconciled_log_dialog(self, account_id):
+        """Gear menu Reconciled Change Log… -> the read-only audit trail of this
+        account's reconciled rows (migration 63), read through
+        ``ledger.reconciled_change_log``."""
+        from mammon.ui.reconciled_log_dialog import ReconciledChangeLogDialog
+        ReconciledChangeLogDialog(self.conn, account_id, parent=self).exec_()
 
     def _reconcile_account(self, account_id):
         """Toolbar Reconcile… -> the existing reconcile flow for this account."""
@@ -10326,9 +10320,9 @@ class MainWindow(QMainWindow):
         silently unresponsive. Mammon handles NO credentials here: webSlinger
         logs in with the credentials in the user's own browser.
 
-        The run either returns data (imported directly) or drives the site's own
-        Export button, dropping a file in ~/Downloads that Mammon then imports --
-        :func:`downloads.download_account` handles both and reports the counts."""
+        The run either returns data or drives the site's own Export button,
+        dropping a file in ~/Downloads; either way the rows go to import review
+        -- :func:`downloads.download_rows_for_review` handles both."""
         acct = ledger.get_account(self.conn, account_id)
         if acct is None:
             return

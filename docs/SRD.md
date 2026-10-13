@@ -545,7 +545,7 @@ Code: `mammon/ledger.py`, `mammon/loans.py`.
   missing 15.00 is a transaction fee and has to be categorized. The register
   used to refuse with "a transfer cannot be split", leaving no way to record it.
 - **The transfer is a property of one split LINE, not of the ROW.** Splitting a
-  transfer produces a row totalling 1,000.00 whose Category renders `--Split--`,
+  transfer produces a row totaling 1,000.00 whose Category renders `--Split--`,
   one line transferring -985.00 to `[Checking]` and one line of -15.00 against a
   fee category.
 - **The mirror equals the transfer LINE, not the row total.** The counter-account
@@ -1207,7 +1207,7 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
 - Three rules are load-bearing, each a bug that was hit:
   - **An address is confirmed by the user and stored, never derived.** A name is
     not an address ("Condo (Asset)"); one that looks like an address may be
-    incomplete ("240 Birch" needs its city); a neighbouring account's
+    incomplete ("240 Birch" needs its city); a neighboring account's
     address is not this account's. Inferring "118 Cedar Ln" from a liability
     of that name returned a real, cleanly-extracted $400,000 for a house sold
     years earlier. `suggest_address` offers a starting point; only a stored value
@@ -1439,7 +1439,7 @@ Code: `mammon/investments.py`, `mammon/reports/portfolio.py`,
   A contract has its own terms, its own price series and its own expiry, and it
   ends while the stock goes on, so folding the two onto one identity would value
   the contract at the stock's price and merge two unrelated holdings with no way
-  to tell them apart again. The pull towards that mistake is structural, not
+  to tell them apart again. The pull toward that mistake is structural, not
   hypothetical: `investments.ticker_of` reads the first token of
   `XYZ 260117C00150000 XYZ 17JAN26 150 C` as `XYZ`, and a QIF `!Type:Security`
   block for an option states the ROOT ticker in its `S` field, so every
@@ -1627,7 +1627,7 @@ unclassified ledger behaves bit-for-bit as it did before any of this landed.
   is a classified option -- which is every identity in an un-backfilled file --
   so the cost is a handful of indexed primary-key reads and the behavior is
   unchanged.
-- **Why the resolution and not just the set.** Canonicalising first is how a bad
+- **Why the resolution and not just the set.** Canonicalizing first is how a bad
   alias row would still win: ask about the contract, resolve to the stock, and
   report the stock's shares under the contract's name. The partition has to
   apply to the resolution itself.
@@ -1983,7 +1983,7 @@ repair it.
 
 
 ### 5.8e-7 How an option ends: exercise, assignment, expiry
-An option has four ways out that a share has no analogue for, and in three of
+An option has four ways out that a share has no analog for, and in three of
 them **the premium does not become a gain or a loss -- it moves.** These are the
 lot and basis rules (IRS Pub 550, "Options"); getting them wrong misstates the
 cost basis of shares the user may hold for a decade afterwards.
@@ -2172,15 +2172,14 @@ note.**
   too many. `ui/rebalance_dialog.py` and its two
   test files are gone; the dashboard's bottom-right corner and Reports ▸
   Rebalance by fund… both open `FundTargetWindow`. The domain's class targets,
-  bands and locks stay -- `rebalance.drift` still serves the MCP tool and the
-  Investment Center card -- but nothing in the UI sets a class weight any more.
-- **The Investment Center's drift card must NOT read a fund target as class
-  lines.** A fund-stated target has no class lines at all, so `rebalance.drift`
-  reads every class as targeting 0% and tells the user to liquidate (verified
-  before the removal). The card detects `has_fund_lines` and shows the implied
-  blend instead -- current versus what the fund weights produce -- with no
-  action and no band verdict, because a class is not something you trade and
-  the user stated no goal for it.
+  bands and locks stay -- `rebalance.drift` still serves the MCP tool -- but
+  nothing in the UI sets a class weight any more.
+- **A fund target is never read as class lines.** A fund-stated target has no
+  class lines at all, so `rebalance.drift` reads every class as targeting 0%
+  and would tell the user to liquidate; a reader of a fund target checks
+  `has_fund_lines` and shows the implied blend instead -- current versus what
+  the fund weights produce -- with no action and no band verdict, because a
+  class is not something you trade and the user stated no goal for it.
 - **A weight per asset class is not a tradeable instruction.** A blended fund
   moves three classes at once, so "sell $30,000 of domestic stock" has to be
   decomposed across holdings whose mixes differ, using preferences the app does
@@ -2302,7 +2301,7 @@ note.**
   of was in neither and its row vanished with no way to bring it back.
   `drift(include_empty_classes=True)` pads the rows out to
   `portfolio.ASSET_CLASSES` and the Target & Drift dialog asks for it; every
-  other caller (the Investment Center card, the MCP tool) keeps the unpadded
+  other caller (the MCP tool) keeps the unpadded
   rows, because a column of zeros is noise where nothing can be typed. Padding
   adds rows, never cents.
 - `mammon/rebalance.py` holds a **target mix** and measures the real one against
@@ -2613,7 +2612,7 @@ Code: `mammon/importers/crypto_core.py`, `crypto_tabular.py`,
   `'exchange'`, the model they were built on. Predicates `crypto.is_wallet_account`
   / `is_exchange_account` / `account_kind` classify a row. Both kinds are
   multi-token, security-style: each token is a distinct position valued at market.
-- **Coin-native wallet writers (the ShrsIn/ShrsOut analogue).** A wallet coin
+- **Coin-native wallet writers (the ShrsIn/ShrsOut analog).** A wallet coin
   increase is `crypto.record_wallet_credit` (add coin, no fiat leg -- `price` /
   `amount` / `basis` left NULL) and a decrease is `record_wallet_debit` (remove
   coin, with an optional coin-native fee leg via `fee_symbol`/`fee_quantity`, the
@@ -2875,7 +2874,7 @@ was previously nowhere in the app to add the price it was complaining about.
   existing rows are READ and how future ones are written; no stored row is
   rewritten.
 - **`tx_hash` is the exact-dedup key, so a re-import is a NO-OP.** The on-chain
-  hash is globally unique and immutable -- the crypto analogue of `fitid`, and
+  hash is globally unique and immutable -- the crypto analog of `fitid`, and
   strictly better. Each row whose `(account_id, tx_hash)` already exists is
   skipped before any write, so re-scraping a wallet's full history never
   double-inserts. Failed on-chain transactions (non-empty `Status`/`ErrCode`)
@@ -3014,11 +3013,8 @@ was previously nowhere in the app to add the price it was complaining about.
   price.** Coin arriving from someone else's address - a mining pool, a payer -
   carries the file's `Historical $Price/Eth` and a basis at quantity x price
   (IRS Notice 2014-21); own-wallet transfers still carry their source's basis.
-  The wallet path used to keep every dollar field NULL, so mined ETH came in at
-  a $0 basis and carried it into every transfer. For a ledger
-  imported before: `crypto.fill_income_prices` (receipts, by tx hash, from the
-  file) and `crypto.restamp_transfer_basis` (the transfers out, measured as of
-  the day before - "as of" the day, the leg itself has already left).
+  Left NULL, those dollar fields would bring mined coin in at a $0 basis and
+  carry it into every transfer.
 - **A transfer keeps each coin's acquisition date** (v103). The incoming leg
   records the lots it carried - original date, quantity, cost - as JSON in
   `crypto_transactions.lots`, and the replay rebuilds them instead of one lot
@@ -3239,8 +3235,8 @@ was previously nowhere in the app to add the price it was complaining about.
 
 ### 5.8k Investment Dashboard and projection
 - **The dashboard is a PICTURE of the portfolio, not another table.** The
-  Investment Center (SRD 5.8d) already owns the tabular views -- allocation,
-  per-account performance, top holdings, drift -- so `InvestmentDashboardPage`
+  tabular views -- allocation, per-account performance, top holdings, drift --
+  belong to the windows its corner launchers open, so `InvestmentDashboardPage`
   draws only things no table states: a donut ring of the portfolio, arrows for
   money coming in, one line of numbers, two charts, and a projection. Anything
   that wants a table is a CORNER LAUNCHER that opens the window already owning
@@ -3544,10 +3540,29 @@ was previously nowhere in the app to add the price it was complaining about.
   four deposits - is inscribed with the first planned year's figure in that
   account's color, never with $0.00 (audit). Those hovers are the plan's, so
   they show only with the plan on. The outflow arrows are grouped the same
-  way, and a planned Roth's draws join the Roth group's outflow arrow: it
-  needs no wedge of its own. With the plan on, a retirement account's
-  contribution in the fan is that planner schedule - it used to stop at the
-  owner's Social Security claim age, which is not when a paycheck stops.
+  way, and a planned Roth's draws join the Roth group's outflow arrow. With
+  the plan on, a retirement account's contribution in the fan is that
+  planner schedule, which runs until the paycheck stops - not until the
+  owner's Social Security claim age.
+- **Every Roth inflow arrow ends on a wedge the ring draws** (reported). An
+  arrow takes its color from the wedge it belongs to, so one whose target is
+  not in the ring arrives in a gray no wedge wears -- a conversion pointing
+  at bare ring. The conversions are therefore attributed to a REAL Roth of
+  the same owner where the ledger holds one, at any custodian: a display
+  question deliberately looser than the conversion's own routing rule
+  (`retirement.owner_roth_accounts`, which moves no money), so the arrow
+  wears that account's color and lands on its wedge. Where the owner holds
+  no Roth at all, the hypothetical one joins the accounts ring as its own
+  wedge, labeled "(planned)", sized by the conversions into it and drawn in
+  one muted gray (`PLANNED_WEDGE_COLOR`) so it cannot read as funded money.
+  Its membership is decided in the ONE place every other wedge's is, under
+  the plan flag, rather than inside the arrows -- two answers to "what is in
+  the ring" is how an arrow came to point at nothing. The wedge is not
+  SELECTABLE: there is no account to scope the page to, so a click on it
+  widens back to the whole portfolio. And hypothetical money is in no
+  valuation, no net worth and no report: with the plan off the wedge does
+  not exist, and with it on the real wedges, the center line and the
+  asset-class ring are what they are without it.
 - **Band layout.** The arrows center on the history chart, the thermometer
   on the projection fan, and What If halfway between - a quarter of its width
   (`CONTROL_SHIFT`) to the LEFT of the other two, the band growing by that
@@ -3656,7 +3671,7 @@ was previously nowhere in the app to add the price it was complaining about.
   drawn band, plus the room an exploded wedge needs, is opaque to the mouse, and
   the corners fall outside it. Each is one small page method
   (`open_capital_gains`, `open_performance_report`, `open_asset_categories`,
-  `open_rebalancing`) funnelling through two seams -- one modeless, one modal --
+  `open_rebalancing`) funneling through two seams -- one modeless, one modal --
   so a test can assert what a corner aimed at without entering a modal loop.
 - **Each launcher is a prominent title over a themed graphic it paints itself.**
   Four identical gray boxes of small text gave no clue which was which. So the bottom-right corner
@@ -3872,6 +3887,18 @@ writer of transaction rows.
   click is a TOGGLE: on the line a bar is already filled to (within $50 or
   0.5%), or on the bar's violet conversion segment, it removes that year's
   conversions (otherwise undoing one meant editing the table).
+- **A year's conversion comes out of the IRAs in proportion.** The plan treats
+  the tax-deferred accounts as ONE hypothetical IRA (and the Roths as one
+  Roth); the per-account rows are its breakout, kept for the Investment
+  Dashboard's per-account projections. Every bracket click, typed total and
+  fill splits the year's total in proportion to what each convertible source
+  enters the year holding (`allocate_conversion`), whatever split the year
+  held before, so with the household withdrawals also drawn by balance every
+  account keeps its share of the pool. Draining the accounts one after another
+  gains nothing in the plan and shows one account emptied on the dashboard
+  beside others untouched. A current employer's plan joins the split the year
+  the job ends. Each source is still capped at what it holds, the excess
+  moving to the others.
 - **The schedule is one compact line per year.** Each year line carries the
   base taxable income and the year's total conversion (editing the total
   spreads it as a bracket click does) and expands to the IRA-type sources
@@ -4050,11 +4077,11 @@ writer of transaction rows.
   retirement projection.
 - **Contributions continue until retirement.** Each retirement account keeps
   receiving its MEASURED yearly inflow - the trailing-year deposits the
-  Investment Center's inflow arrows show - every year until the plan's start
+  Investment Dashboard's inflow arrows show - every year until the plan's start
   year (this year prorated to the months left), as `AccountFlow.
   contribution_cents`. It feeds the household plan, the pool, each account's
   projection (so the RMDs and conversion caps) and the fund line; the
-  Investment Center's own projection does not take it, having its own inflows.
+  Investment Dashboard's own projection does not take it, having its own inflows.
   Without it, a current employer's 401(k) was projected from today's balance as
   if nothing more would go in. A flat measured amount is the simple version; a
   savings plan by year belongs to budgeting. The retirement year is only the
@@ -4077,7 +4104,7 @@ writer of transaction rows.
   60/40 U.S./international as the ladder is). Every projection on the page
   goes through `measured_risk`, so the one override reaches the fund line, the
   growth factors and the pool. It replaced "Use What If Mix" (v94), which
-  copied whatever the Investment Center's What If said at the moment
+  copied whatever the Investment Dashboard's What If said at the moment
   (the plan's mix is set explicitly instead); a level copied that way reads
   back as the ladder's mix at that level.
 - **Taxable brokerage accounts are a source of money.** Accounts whose tax
@@ -4291,8 +4318,11 @@ writer of transaction rows.
   owner is under 59 1/2 (IRC 408A(d)(3)(F)), and earnings out of a Roth
   that held nothing today are taxed before its fifth year (IRC
   408A(d)(2)(B)) - `HouseholdYear.roth_taxable_cents`. A current employer's
-  plan cannot be converted before the job ends or 59 1/2 (IRC 401(k)(2)(B),
-  402A(c)(4)): the cap is zero and the notice says why. Each person has a
+  plan cannot be converted before the job ends (IRC 401(k)(2)(B),
+  402A(c)(4) forbid it before 59 1/2, and a plan may refuse an in-service
+  distribution at any age; Mammon cannot see which, and a plan that assumes
+  one the plan refuses cannot be carried out): the cap is zero and the notice
+  says why. Each person has a
   "Part D" box; without it no Part D surcharge is owed (42 U.S.C.
   1395w-113(a)(7)). Someone whose salary runs past 65 stays on the
   employer's coverage and enrolls in Medicare the January after it ends. A
@@ -4306,6 +4336,18 @@ writer of transaction rows.
   second re-apply after its own, whose extra pass could shrink the
   conversions again (the result had depended on whether a refresh ran
   first).
+- **A plan the ledger has moved under is flagged, not rewritten.** Apply
+  writes the household plan as the ledger stood that day: today's balances
+  and prices, each account's trailing-year deposits, the part of this year
+  left. Editing a conversion re-plans from that year on, but a download, a
+  price or the calendar is a change from THIS year on that no edit follows,
+  so on every reread the page compares the stored withdrawals with the plan
+  computed now (`retirement_plan.stale_withdrawal_years`, exact to the cent).
+  When they differ, the Withdrawal Schedule button wears the amber triangle,
+  and its tooltip says the data the plan depends on has changed, from which
+  year, and that the spending plan needs re-applying. Re-applying is the
+  user's decision; nothing is rewritten by the check. The MCP projection
+  reports the same as `summary.stored_withdrawals_out_of_date_from`.
 - **The charts follow a live theme switch.** The page redraws both charts on a
   style or palette change (coalesced, deferred): matplotlib colors are fixed
   when a chart is drawn, and switched to light mode the charts kept the dark
@@ -4675,6 +4717,23 @@ a plan exists even when a return assumption does not) and the conversions moving
 between accounts (`plan_other_net_cents`) -- then hands all four to
 `retirement.plan_household_withdrawals` as callables and writes what comes back.
 The split and the balances therefore cannot disagree with the bars above them.
+The arithmetic behind the page lives in `mammon/retirement_plan.py`, which
+imports no Qt: the per-year functions (`income_rows`, `social_security_cents`,
+`planned_contributions`, `pool_fund` and the rest) and two engine classes,
+`PlanEngine` (what both inline editors compute: accounts, balances, the RMD
+floor, flows, projected values) and `HouseholdEngine` (the household plan:
+`plan_for`, `tax_owed`, `irmaa_owed`, `most_we_can_spend`), and `PlanTaxes`,
+each year's whole income tax over the bars the page draws (the page's tax
+methods delegate to it; only the seeding WRITE stays in the page). `_PlanEditor` and
+`WithdrawalSchedule` are QWidgets over those engines; everything that WRITES --
+`apply_household`, the Roth-draw netting, the seeded minimums and taxable income
+-- stays in the page. `HouseholdPlanner` is the engine with no widget,
+configured as the page configures its schedule (the stored terminal age, the
+default filing status, the plan's own balances as the projection every cap and
+minimum reads); the MCP tools (§7.3) project through it, and
+`test_retirement_plan` pins that it and the page compute the same plan to the
+cent. The two dashboard reads the projection depends on, `inflow_arrows` and
+`current_mix`, live in `mammon/portfolio.py` for the same reason.
 Every projection on the page reads its
 weights through one seam, `projection_mix`: the plan's typed mix at its own
 weights (`retirement.plan_projection_mix`), else the pool's measured mix; the
@@ -5078,8 +5137,25 @@ Investment transaction adds: action, symbol, quantity, price, commission.
   a note the USER typed. One old memo of "deposit" on an Anytown Apartments row put
   that payee on the trie, and `MOBILE DEPOSIT` -- pure bank boilerplate -- then
   renamed to Anytown Apartments in a ledger started deliberately fresh.
-  `ensure_bootstrapped` remains callable on both modules for an explicit
-  seed-from-history action, but nothing invokes it on open.
+  `rename_tree` has no seeding path at all: every example is a correction the
+  user made in review, recorded at the accept. Review history from before the
+  learner existed is not one either -- migration 60 had copied it in, its older
+  naming habits outvoted the user's own consistent corrections so a payee never
+  filled, and migration 119 removed it. The category tree has none either:
+  its history rebuild and migration 116's one-time replay are gone, and
+  migration 120 emptied the tree (its votes are pooled tallies, so seeded ones
+  could not be told apart) to relearn from accepts and register edits.
+- **Renames are learned by account.** Each example records the account its row
+  was reviewed in. A row is answered from its own account's corrections once
+  that account has `rename_tree.MIN_FILL` candidates for it, else from every
+  account's -- the category tree's rule (`category_tree._answering_key`). One
+  bank text can mean a transfer in one account and a client in another.
+- **A deleted transaction releases its id.** `transactions.id` is an INTEGER
+  PRIMARY KEY, so SQLite hands a deleted newest row's id to the next insert.
+  Triggers (migration 119) clear `rename_examples.txn_id` and
+  `review_items.accepted_txn_id`/`matched_txn_id` on delete, so an example falls
+  back to the label chosen at the accept instead of reading an unrelated row's
+  payee, and a pending match to a deleted row returns to NEW.
 - **Offering a name and applying it are separate gates.**
   `import_review.RENAME_MIN_SIGHTINGS` (2) decides whether a payee appears in the
   dropdown; `rename_tree.MIN_FILL` (2) decides whether it is written into the
@@ -5493,18 +5569,16 @@ whose bank text was identical.)
   choices, and whether they fill in by themselves; for the selected payee every
   category and `[Account]` with its count overall and per account. **Forget
   payee** and **Forget this choice** (`category_tree.forget_payee`, optionally
-  one label) are the only actions, confirmed through `QMessageBox.question`;
-  `category_forgotten` keeps an explicit rebuild (`bootstrap`) from bringing
-  them back. A category merge moves the votes to the survivor
+  one label) are the only actions, confirmed through `QMessageBox.question`.
+  A category merge moves the votes to the survivor
   (`category_tree.merge_category`) instead of letting them cascade away.
 - **Migration 116 carried the existing tree across**: category votes kept as
   they were; `category_rules`, `transfer_rules` and the `learned`/`user` rows of
-  `import_mappings` dropped (its `account_link` rows are the importer's memory
-  of source accounts, not learning). A ledger with accepted review rows is
-  flagged `seed_v116`, and on the next open `category_tree.ensure_seeded`
-  replays THOSE ROWS ONLY -- adding each transfer's vote and every vote's
-  per-account copy. It is the same evidence the tree was grown from; the app
-  still never seeds from register history.
+  `import_mappings` dropped (its `account_link` rows, a map of source
+  accounts, are not learning and stayed). A ledger with accepted review rows is
+  flagged `seed_v116` for a one-time replay of those rows. That replay, and
+  the explicit history rebuild, were seeding, and migration 120 emptied the
+  tree so it relearns from the user's own choices (5.5k).
 - Regression: `test_category_tree.py`, `test_import_review.py` (the two-card
   cases), `test_categorize.py`, `test_rules_manager_ui.py` (the window and the
   completer), `test_db.py` (v116 keeps the votes).
@@ -5545,8 +5619,8 @@ review rows, the same evidence, into the shape the tree gained then). `rename_tr
 `memo -> payee` pair as an accepted rename — true for downloaded rows, where the memo IS the
 bank's text, and false for hand-entered and QIF-imported history, where it is a note the user
 typed. An old memo of "deposit" on an Anytown Apartments row taught the tree that `MOBILE DEPOSIT`
-means Anytown Apartments, in a ledger deliberately started fresh. `ensure_bootstrapped` survives on
-both modules as callable API for an explicit seed-from-history action; nothing calls it on open.
+means Anytown Apartments, in a ledger deliberately started fresh. `rename_tree` keeps no seeding
+API, and neither does `category_tree` (see 5.5k).
 For the same reason `_prior_txn_for` no longer fills the PAYEE from register rows sharing the
 statement text (category only).
 
@@ -5582,7 +5656,7 @@ chosen ONCE is neither filled nor offered.
   two same-issuer cards with identical bank text proved otherwise. Both jobs are the category
   tree's now, scoped by payee and paying account.
 - `categorize.py` — the register's side of the category tree: QuickFill, the text-less
-  suggestion, the auto-fill hooks, and the register edits that teach the tally. Its
+  suggestion, and the register edits that teach the tally. Its
   `import_mappings` payee -> category rows are gone (migration 116).
 
 ## Compartment H. Scheduled pre-entries, reminders and the calendar
@@ -5744,7 +5818,7 @@ Code: `mammon/scheduled.py`, `mammon/loans_schedule.py`,
 - **Loan rows in the Scheduled Payments manager are live, not read-only.** A
   loan row's next date is the first schedule period no register holds yet --
   pending or posted, on the funder (`loans_schedule.next_due_date`) -- the loan
-  analogue of a manual row's stored `next_date`. Enter posts that payment on
+  analog of a manual row's stored `next_date`. Enter posts that payment on
   the funding account in the posted shape (`loans_schedule.enter_payment`), so
   the row moves on; deleting the payment moves it back. The Edit slot reads
   "Loan Setup…" and opens the wizard; Delete removes the loan setup only
@@ -6176,9 +6250,10 @@ per-account basis, to make that class of problem easy to diagnose after the fact
   ids are excluded. Editing an UN-reconciled transaction, or reconciling a row
   for the first time (a 0 -> 1 transition), logs nothing.
 - The read side is `ledger.reconciled_change_log(conn, account_id)` (oldest
-  first). The viewer is a strictly read-only dialog reachable from the account's
-  Details window ("Reconciled change log…"); like all of `ui/` it holds no SQL
-  and no money logic, rendering the stored strings as-is.
+  first). The viewer is a strictly read-only dialog opened from the register's
+  gear menu ("Reconciled Change Log…", beside Reconcile -- an account action,
+  not an account setting, so it is not in Account Details); like all of `ui/` it
+  holds no SQL and no money logic, rendering the stored strings as-is.
 
 
 ### 5.11b Reconciling SHARE balances in investment accounts
@@ -6589,7 +6664,7 @@ counting as income.
   re-grouping them by payee changes nothing -- except that the shared extraction
   drops transfer legs, which unbalances the split. That is how a ledger's
   paychecks (salary in, tax legs out, a 401(k) deferral transferring away)
-  totalled an employer at its withholding alone, for a year in which it had
+  totaled an employer at its withholding alone, for a year in which it had
   deposited several times that. The parent's amount is safe to use because
   `ledger.set_splits` guarantees the legs sum to it. `by_tag` and
   `tags.spending_by_tag` keep the legs: a tag says what money was FOR, a
@@ -6836,7 +6911,7 @@ carrying no symbol — pops up no menu at all rather than an empty one.
   like `Acme Grocers,150.00`, and an Itemize window writes `Category,Amount`.
 - **HTML/PDF print reuses one renderer.** `report_rows_to_html(rows, title,
   columns=COLUMNS) -> str` mirrors the CSV writer — same columns, same order, amount via `fmt_cents`,
-  every field HTML-escaped (the analogue of CSV quoting) so a category name with
+  every field HTML-escaped (the analog of CSV quoting) so a category name with
   `&` or `<` renders as text — and emits a standalone document whose `title` is
   both `<title>` and heading. `export_html_to(path)` writes that string;
   `print_to_pdf(path)` renders it to a PDF. Both are dialog-free seams so the
@@ -6962,7 +7037,7 @@ here.
 on a security price, and so can come back incomplete (§5.9t).
 
 **The tag override.** Category selection is right for most lines and wrong for
-the handful a user argues with his accountant about, so an item's NAME doubles as
+the handful a user argues with their accountant about, so an item's NAME doubles as
 a Mammon tag when `tag_enabled` is set. These are ordinary tags in the existing
 `tags`/`transaction_tags`/`splits.tag_id` machinery of §5.6 — no parallel
 vocabulary, and the tag row is created lazily on first real use, not when the
@@ -7276,7 +7351,7 @@ six. Instead ONE item — "Property tax", pointed at the category the way any
 property.
 
 **It is per item and ON BY DEFAULT, with an opt-out.** Nobody should have to type
-the names of his own properties to see them subtotalled, and typing them was also
+the names of their own properties to see them subtotaled, and typing them was also
 how a property got silently left out of its own report; so an item that says
 nothing subtotals by EVERY tag its matched lines carry, and the only setting the
 editor offers is "do not". The opt-out is `options["no_tag_breakdown"] = true`
@@ -8186,7 +8261,7 @@ anything new.
 - **`check_floor(conn, start, end, *, cushion_cents, account_ids,
   include_predictions, today, extra)`** is the same check as a reusable seam.
   `extra` is a sequence of `(ISO date, signed cents)` for money that is *not* in
-  the ledger yet — a savings contribution, a debt plan's extra principal — each
+  the ledger yet — a savings contribution, say — each
   entry shifting every day from its own date onward. That is how a proposed
   payment is calendar-tested *before* it is committed, and a proposal that breaks
   the floor is known by the date it breaks on. `shortfall_cents` is how much is
@@ -8292,35 +8367,19 @@ those two tables.
   on the page.
 
 
-### 5.12h Debt payoff: two published orders, both figures, no recommendation
+### 5.12h Debt payoff: a pay-down line's projection
 
-A goal (§5.12g) asks what money has to arrive by when. **Debt payoff** asks the
-mirror question — given one total monthly amount across several
-interest-bearing accounts, when is each one clear and what does the interest
-come to — and answers it for the two orders the literature actually argues
-about. `mammon/debt.py` is the engine, UI-free and the only writer of
-`debt_terms`, `debt_plans` and `debt_plan_members` (schema v110). It reaches
-budget tables solely through `mammon.budgets` and writes no transaction row
-ever.
+A goal (§5.12g) asks what money has to arrive by when. A **pay-down line** asks
+the mirror question for one interest-bearing account -- with this much extra
+principal a month, when is it clear and what does the interest come to.
+`mammon/debt.py` is the engine, UI-free and the only writer of `debt_terms`
+(schema v110). It writes no transaction row and no budget row.
 
-- **Mammon computes and cites, never counsels.** Smallest-balance-first and
-  highest-rate-first are simulated side by side, both totals are shown with the
-  difference between them, and **neither is marked, sorted to the top, colored
-  or preselected**. The page prints the Consumer Financial Protection Bureau's
-  "highest interest rate method" (paying the highest rate first costs the least
-  interest) next to the two behavioral findings that cut the other way — Kettle,
-  Trudel, Blanchard and Haeubl, *Journal of Consumer Research* 43(3):460-477,
-  and Brown and Lahey, NBER w20125 / *Journal of Marketing Research*
-  52(6):768-783 — plus the published magnitude of the gap, roughly 1.8 to 4.3
-  percent of total interest. The household picks; the software does not name the
-  amount, the year or the account to choose.
 - **One engine, parameterized by a sort key.** `snowball`, `avalanche` and
   `custom` are three sort keys over one simulation, not three simulations. Ties
-  break deterministically — same rate, smaller balance first; same balance,
-  higher rate first; then account id — so a test can pin the order. The order is
-  recomputed at the top of every simulated month, and it is INTER-account only:
-  within one account the allocation of a payment across balances is the issuer's
-  by law, not Mammon's.
+  break deterministically -- same rate, smaller balance first; same balance,
+  higher rate first; then account id -- so a test can pin the order. The Budget
+  page runs it with one debt at a time.
 - **The monthly amount is the TOTAL outlay, not an extra on top of minimums.**
   Each simulated month accrues interest, pays every minimum, then cascades the
   entire remainder down the order. There is no separate "snowball amount" to
@@ -8333,12 +8392,6 @@ ever.
   clamped — and the monthly rate stays a full-precision `Decimal`. The final
   payment is computed from what is left, not scheduled, and a running total is
   never re-rounded.
-- **`payoff_months(balance, payment, rate)` is the closed form, and returns
-  `None` rather than raising** when the payment does not cover the interest,
-  because "does not pay off" is an answer the page has to render. It answers
-  `ceil(balance / payment)` at a zero rate. It is a cross-check and a
-  single-debt shortcut only: anything with a changing rate, a recomputed
-  minimum, a one-off extra or a per-month display uses the iteration.
 - **Three outcomes get their own readout, and none of them gets a payoff date.**
   A payment below the monthly interest reports `negative_amortizing` in Truth in
   Lending's own words ("we estimate you will never pay off the balance shown
@@ -8355,38 +8408,16 @@ ever.
   balance plus that month's interest — tagged `estimated` and rendered as
   "est." on the page. The minimum is always capped at the balance. `debt.py`
   does not re-derive amortization that `loans.py` already has.
-- **The liability sign is flipped exactly once**, in `collect_debts`, which turns
-  the ledger's negative balance into a positive amount owed. No formula
+- **The liability sign is flipped exactly once**, in `debt._debt_input`, which
+  turns the ledger's negative balance into a positive amount owed. No formula
   downstream and no label has to remember which way it points.
 - **No simulation result is stored.** Not the payoff month, not the interest
-  total, not a per-debt cleared month. The stored plan holds INPUTS only — the
-  member accounts, the order and the monthly amount — so a projection can never
-  go stale against the ledger it came from. The what-if control is that one
-  amount field: editing it re-simulates immediately and writes nothing.
-- **A proposed extra payment is floor-tested before it is promised**, through
-  the one seam (§5.12f): `debt.check_extra_payment` calls `budgets.check_floor`
-  with the payment as `extra` and leaves the target account out of the account
-  set, exactly as `goals.check_contribution` does — paying a credit card from
-  checking nets to zero across the two and would otherwise look free. The page
-  states in plain words that the month goes below the cushion, and refuses; it
-  never quietly reduces the payment, and it emits no transaction. Entering the
-  payment is the register's job.
-- **`apply_to_budget` writes the plan's monthly payments as ordinary saving
-  lines** (§5.12d), one per account per month, through `mammon.budgets` — the
-  same mechanism a goal uses, and it refuses outright while the minimums exceed
-  the monthly amount. The projection itself stays read-only. A debt that is also
-  a scheduled payment stores `scheduled_id` so the two can be reconciled rather
-  than counted twice.
-- **Only real debts are offered.** `debt.available_debts` leaves out a loan or
-  card with nothing owed, and a card unless it has been charged interest in the
-  last three months of its own activity (`debt.pays_interest`: a charge whose
-  category, payee or memo reads as interest or a finance charge) or the user has
-  entered its terms (recording an APR is saying it is a debt). A card paid in
-  full on time every month is not a debt to pay down: its balance is this
-  month's purchases, already the budget's spending, and a plan over it would pay
-  off money that costs nothing. `real_only=False` keeps the unfiltered list.
-  (The Budget page's pay-down choices are the liability accounts; a card is a
-  spending account there and is budgeted through what is bought with it.)
+  total. `debt_terms` holds what the user typed, so a projection can never go
+  stale against the ledger it came from. A debt that is also a scheduled payment
+  stores `scheduled_id` so the two can be recognized rather than counted twice.
+- **The pay-down choices are the liability accounts that owe something**
+  (`debt.debt_accounts`); a card is a spending account on the Budget page and is
+  budgeted through what is bought with it.
 - **A payoff projection is a property of a pay-down line on the Budget page**
   (2026-10; the user's ruling over a pane of its own, which existed for a day
   as `DebtPayDownPane` and is on the `budget-advanced-snapshot` branch). The
@@ -8417,9 +8448,7 @@ ever.
   `debt.set_apr`, which keeps the payment terms; `set_terms` writes a full row,
   and calling it with the rate alone reset a loan's payment to the revolving
   default. A payoff is labeled as a MONTH, never a day,
-  because the accrual convention is monthly. The two-order comparison, the
-  extra-payment floor check, plan membership and the citations remain in
-  `mammon/debt.py` with their tests and have no surface on the page.
+  because the accrual convention is monthly.
 
 
 ### 5.12i The budget-to-retirement seam: one figure, shown before it crosses
@@ -8614,18 +8643,18 @@ One SQLite database. Core tables:
   imported.
 - balance_checkpoints(account_id, year, balance) - fast running balances.
 - import_mappings(id, payee_pattern, mapped_payee, mapped_category_id, source,
-  hit_count) - the importer's ``account_link`` rows (which source account is
-  which). Its learned and user-pinned payee -> category rows were removed by
-  schema v116; that knowledge is the category tree's.
+  hit_count) - legacy; it holds only ``account_link`` rows (an institution
+  account -> Mammon account map) that no code reads or writes. Its learned and
+  user-pinned payee -> category rows were removed by schema v116; that
+  knowledge is the category tree's.
 - category_nodes(id, parent_id, payee_key, token, common) /
   category_node_labels / category_payee_stats / category_token_freq /
   category_token_labels - the category tree (§5.5g): one trie per payee and per
   payee in each account (``payee_key`` + TAB + account id), vote counts whose
   label is EITHER a category_id or an account_id (exactly one set, both ON
   DELETE CASCADE, schema v116), and the token ranking. ``common`` holds the
-  tokens every row that stopped at a node shared. category_forgotten(payee_key,
-  label, through_txn_id) and category_meta(key, value) - what the user told
-  Mammon to forget, and one-time flags. App-learned, never imported.
+  tokens every row that stopped at a node shared. App-learned, never imported
+  (schema v120 emptied it and dropped category_forgotten and category_meta).
 - (category_rules and transfer_rules, the keyword-rule tables of schema
   v14/v40/v115, were dropped by schema v116: every learned behavior is a tree.)
 - imports(id, provider, source_format, file_hash, filename, imported_at, status,
@@ -8810,22 +8839,17 @@ One SQLite database. Core tables:
   (`apply_to_budget`). Progress is derived, never stored.
 - debt_terms(account_id PRIMARY KEY, apr, min_form, min_floor_cents, min_pct,
   credit_limit_cents, due_day, promo_rate, promo_end_date, promo_deferred,
-  scheduled_id, estimated, updated_at) / debt_plans(id, name, strategy, monthly_cents,
-  start_period, budget_id, note, created_at) / debt_plan_members(plan_id,
-  account_id, included, sort_index, PRIMARY KEY (plan_id, account_id)) - the
-  repayment agreement for one debt account, and a named payoff plan over several
-  of them (schema v110, see §5.12h). App-generated, never imported. Every rate -
+  scheduled_id, estimated, updated_at) - the repayment agreement for one debt
+  account (schema v110, see §5.12h). App-generated, never imported. Every rate -
   `apr`, `min_pct`, `promo_rate` - is Decimal-encoded TEXT, like a share price:
   a rate is a precise quantity off an agreement, and float drift compounds over
   hundreds of simulated months. `estimated` says the terms are Mammon's guess
   rather than the household's paperwork, so the UI can label the figure instead
-  of presenting an invention as fact. `debt_plans.monthly_cents` is the TOTAL
-  monthly outlay across the plan's accounts, not an extra on top of the
-  minimums; `scheduled_id` (ON DELETE SET NULL) ties a debt to its scheduled
+  of presenting an invention as fact. `scheduled_id` (ON DELETE SET NULL) ties a debt to its scheduled
   payment so the two are reconciled rather than counted twice. **No simulation
   result is stored** - not a payoff month, an interest total or a per-debt
   cleared month - because a projection saved beside the ledger it came from goes
-  stale silently; the plan holds INPUTS only and every figure is recomputed.
+  stale silently; the terms are INPUTS only and every figure is recomputed.
   Written only by mammon/debt.py, which reaches budget tables solely through
   mammon/budgets.py (`apply_to_budget`) and writes no transaction row ever.
 - allocation_targets(id, name, active, sleeve, the two drift bands) /
@@ -8961,8 +8985,13 @@ reference for whoever works here, not per-call context.
 #### Schema migrations
 
 `mammon/db.py` holds an ordered `MIGRATIONS` list; index *i* upgrades the DB from version *i* to
-*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 116 —
-`_V116` dropped the keyword-rule tables and let the category tree learn transfer
+*i+1*, tracked in `PRAGMA user_version`, with `SCHEMA_VERSION = len(MIGRATIONS)` (currently 120 —
+`_V120` emptied the category tree to relearn from the user's own choices and
+dropped `category_forgotten` and `category_meta` (SRD 5.5k); `_V119` removed the rename examples migration 60 had seeded from review history,
+recorded each example's account, and made a deleted transaction release its id
+(SRD 5.5); `_V118` recomputed every balance checkpoint, repairing the ones four write paths
+had left stale (see the balance-cache note below); `_V117` dropped `debt_plans` and `debt_plan_members`, the multi-debt payoff plans
+nothing read (§5.12h); `_V116` dropped the keyword-rule tables and let the category tree learn transfer
 accounts and per-account trees, see §5.5g; `_V115` let one transfer keyword hold a
 rule per paying account, a step superseded the same day;
 `_V114` added `budget_accounts` and `budget_excluded_categories`, the budget's
@@ -8989,6 +9018,24 @@ file opens and scrolls fast. Any write that changes history calls `_touch_checkp
 cascades a recompute from the earliest year touched forward. `ledger.account_balance` reads through
 the checkpoint path; the full-sum version is retained as the oracle it must match, asserted by
 `test_year_end_snapshots.py`. Investments have the analogous `holdings_checkpoints`.
+
+**The Accounts list and the register must agree.** The Accounts list shows the checkpoint
+read; the register adds up the rows. A write that adds, removes or re-amounts a row without
+refreshing the cache makes them disagree, silently and for good -- `create_transfer`, a split's
+transfer-leg mirrors (which live in ANOTHER account), the loan-leg dedupe and a review match
+adopting the bank's amount all once did, and migration 118 repaired what they left. So: a
+`ledger` function refreshes before it returns (`_split_edits` collects a split rebuild's
+mirror accounts before and after), and a module that writes a row itself hands the
+`(account, year)` to `ledger.touch_balance_cache`. The test helper
+`mammon.tests.assert_balance_cache_matches` checks every account against the row sum, after
+`seed_balance_cache` -- without a seeded cache nothing is maintained and the check passes
+vacuously. Each write path that can change a balance has a test that ends in it.
+A file import is the one deliberate exception: its rows land raw and the cache is rebuilt
+once at the end, so `importers.import_records` repairs the cash and holdings caches for the
+rows a FAILED run already committed. A migration that adds, removes or re-amounts
+`transactions` rows must rebuild `balance_checkpoints` itself, as `_V118` does. The holdings
+snapshots carry positions, lots and the realized TOTAL but not the itemized gains, which is
+why `portfolio.capital_gains` and `crypto.realized_gains` replay from inception.
 
 #### Backups are incremental, by page
 
@@ -9412,6 +9459,27 @@ writer) so the item legs actually reach the ledger. Locked behavior:
   `excluded_options_value` and a `note` -- the sentence to show the user, empty
   when nothing was excluded. One contract is never reported as 100 shares of its
   underlying, and never dropped in silence.
+- **The retirement plan** (§5.8o). `retirement_plan` returns the plan's
+  inputs: the household by name, relationship and birth month/year, with each
+  person's claim age and monthly benefit; the accounts the plan spends from;
+  other income; the stored spending plan; the Roth conversions; and every
+  setting the projection runs on. `retirement_projection` returns the plan year
+  by year as the page projects it -- income, what the accounts must fund
+  including the tax and IRMAA/ACA cost that drawing it causes, draws by account
+  kind, required minimums, conversions, the pool, and the year the money runs
+  out -- through `retirement_plan.HouseholdPlanner`, so the model and the page
+  cannot disagree. Its `yearly_spending`, `increase_pct`, `start_year` and
+  `ira_bracket` arguments make a what-if, computed in memory and saved nowhere;
+  `retirement_max_spending` is the page's "most we can spend" search. Two tax
+  figures cross, each named for what it is: `income_tax` is the year's whole
+  income tax -- the page's own figure (`retirement_plan.PlanTaxes`), totaled
+  nominal and in today's dollars, the latter the page's figures-row "Federal
+  tax" plus "State tax" -- and `tax_paid_from_accounts` is what the
+  plan draws to pay tax, only the conversion's share before spending starts.
+  Handed the second under the first's name, a model contradicts the screen.
+  Names cross the boundary; the health columns do not. The projection reads the plan
+  as last written: the page seeds required minimums and taxable income when it
+  opens, and a read-only server cannot.
 - Conventions the model is told once (`mcp_tools.INSTRUCTIONS`): amounts are
   decimal dollar strings, negative = money out; dates ISO, ranges inclusive;
   accounts by name or id, hidden accounts excluded unless asked; categories by
@@ -9513,7 +9581,7 @@ own payload before it will write a ZIP. `installer/README.md` has the details.
   only the CASH half of the gap. `allocation.options_note` already renders the
   sentence; nothing on the dashboard shows it. Decide whether the page states
   the excluded premium, gives contracts their own wedge, or leaves it to the
-  Investment Center. Not a wrong number -- an unexplained one, and only for a
+  Holdings window. Not a wrong number -- an unexplained one, and only for a
   portfolio holding options.
 - Project NAME - RESOLVED: Mammon (Section 11).
 - Sample Quicken export (a few accounts incl. one investment) - needed to build

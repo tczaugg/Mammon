@@ -7,7 +7,7 @@ amounts are fake; every file is trimmed to a handful of rows.
 They exist so `tests/test_downloads.py` can prove two things against the real
 importer + cutover-guard code (no browser, no live account):
 
-1. each fixture imports cleanly (`import_download_file`, added > 0, no errors);
+1. each fixture imports cleanly (`importers.import_file`, added > 0, no errors);
 2. a first live pull does **not** duplicate history across the one-time
    Quicken-migration seam -- rows dated on/before the per-account
    `accounts.cutover_date` watermark are dropped even though the migrated

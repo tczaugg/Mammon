@@ -741,7 +741,7 @@ def _seclist_info_types(body: str) -> dict:
     security is; the nested ``<SECINFO>`` carries identity alone. Scanned
     separately rather than folded into the SECINFO pass because the SECINFO
     inside an OPTINFO is matched by that same pass and must not inherit a
-    neighbouring wrapper's tag -- it gets its type from the option pass."""
+    neighboring wrapper's tag -- it gets its type from the option pass."""
     out: dict[str, str] = {}
     for tag in _SECLIST_WRAPPERS:
         for m in re.finditer(rf"<{tag}>(.*?)</{tag}>", body, re.I | re.S):

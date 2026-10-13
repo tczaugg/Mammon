@@ -80,16 +80,46 @@ def import_records(
     # strict durability restored on the way out (db.bulk_write). This is the one
     # choke point every file import passes through, which is why the scope lives
     # here rather than at each of the callers.
+    #
+    # Rows commit as they land and the year-end caches are rebuilt once at the
+    # end, so a run that raises in between repairs them for what it wrote.
+    last_import = conn.execute("SELECT COALESCE(MAX(id), 0) FROM imports").fetchone()[0]
     with db.bulk_write(conn):
-        return _import_records(
-            conn, records, provider=provider, source_format=source_format,
-            filename=filename, file_hash=file_hash,
-            default_account=default_account,
-            default_account_type=default_account_type,
-            securities=securities, prices=prices, positions=positions,
-            instruments=instruments,
-            categories=categories, tags=tags, set_cutover=set_cutover,
-            registers=registers)
+        try:
+            return _import_records(
+                conn, records, provider=provider, source_format=source_format,
+                filename=filename, file_hash=file_hash,
+                default_account=default_account,
+                default_account_type=default_account_type,
+                securities=securities, prices=prices, positions=positions,
+                instruments=instruments,
+                categories=categories, tags=tags, set_cutover=set_cutover,
+                registers=registers)
+        except BaseException:
+            _repair_caches_after_failure(conn, last_import)
+            raise
+
+
+def _repair_caches_after_failure(conn: sqlite3.Connection, last_import: int) -> None:
+    """Bring the derived caches back in line with the rows a FAILED run already
+    committed (every import after ``last_import``): the year-end cash balance
+    checkpoints are rebuilt, the holdings snapshots dropped so a read replays
+    from the rows. The half-written row the failure interrupted is rolled back
+    first. Never raises over the original error."""
+    try:
+        conn.rollback()
+        for (import_id,) in conn.execute("SELECT id FROM imports WHERE id > ?",
+                                         (last_import,)).fetchall():
+            for aid in ledger.account_max_dates_for_import(conn, import_id):
+                ledger.rebuild_checkpoints(conn, aid)
+            for (aid,) in conn.execute(
+                    "SELECT DISTINCT account_id FROM investment_transactions "
+                    "WHERE import_id=?", (import_id,)).fetchall():
+                conn.execute("DELETE FROM holdings_checkpoints WHERE account_id=?",
+                             (aid,))
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _import_records(
@@ -536,7 +566,7 @@ def _loan_payment_splits(conn, account_id, r):
     if len(legs) < 2:                      # a single leg is just a plain category
         return None
     if sum(amt for _cat, amt, _memo, _tag in legs) != r.amount_cents:
-        return None                        # safety: never post a mis-totalled split
+        return None                        # safety: never post a mis-totaled split
     return legs
 
 
@@ -1164,125 +1194,3 @@ def _upsert_payee(conn, payee) -> None:
         (payee, normalize_payee(payee)),
     )
     conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# account <-> institution mapping (institutional ongoing-import; plan G5/G6)
-# ---------------------------------------------------------------------------
-#
-# An ongoing download knows only WHICH institution it pulled from (a
-# ``downloads.Institution.key``) and the external account number carried in the
-# file (an OFX ``<ACCTID>``, a CSV account column, ...). The legacy import path
-# (:func:`_resolve_account`) matched a file to a Mammon account by NAME only,
-# which breaks the moment an institution renames an account or two institution
-# variants share a display name (e.g. Anytown CU checking vs savings both
-# report name "Anytown Credit Union"). This adds a stable
-# ``(Institution.key, external_account) -> account_id`` map so imports can
-# resolve by institution+account instead of by name.
-#
-# Storage REUSES the existing ``import_mappings`` table (plan item 1: "reuse the
-# ... import_mappings table") rather than inventing a new store. Account-link
-# rows are namespaced so they can never collide with categorize.py's
-# payee->category rows, which key strictly on a normalized-payee
-# ``payee_pattern``:
-#   * source        = 'account_link'  -- categorize.py only ever writes
-#                     'learned'/'user' and never filters reads by source, so it
-#                     never touches these rows;
-#   * payee_pattern = '@acct:{institution_key}:{external_account}'  -- a real
-#                     payee normalized by record.normalize_payee can never
-#                     contain '@' or ':', so categorize.py's ``payee_pattern=?``
-#                     lookups can never resolve to one of these keys;
-#   * mapped_payee  = the account's display name (human-readable);
-#   * hit_count     = the linked account_id (authoritative + rename-proof).
-ACCOUNT_LINK_SOURCE = "account_link"
-_ACCT_LINK_PREFIX = "@acct:"
-
-
-def _account_link_pattern(institution_key: str, external_account: str) -> str:
-    return f"{_ACCT_LINK_PREFIX}{institution_key.strip()}:{external_account.strip()}"
-
-
-def _split_link_pattern(pattern: str) -> tuple[str, str]:
-    body = pattern[len(_ACCT_LINK_PREFIX):] if pattern.startswith(_ACCT_LINK_PREFIX) else pattern
-    key, _, external = body.partition(":")
-    return key, external
-
-
-def set_account_institution_link(
-    conn: sqlite3.Connection,
-    account_id: int,
-    institution_key: str,
-    external_account: str,
-) -> None:
-    """Map ``account_id`` to ``(institution_key, external_account)``.
-
-    Idempotent upsert into the account-link namespace of ``import_mappings``.
-    Re-linking the same ``(institution_key, external_account)`` pair just moves
-    the link to the given account; never touches a payee->category row.
-    """
-    institution_key = (institution_key or "").strip()
-    external_account = (external_account or "").strip()
-    if not (institution_key and external_account):
-        raise ValueError("institution_key and external_account are required")
-    row = conn.execute("SELECT name FROM accounts WHERE id=?", (account_id,)).fetchone()
-    if row is None:
-        raise ValueError(f"no such account id: {account_id}")
-    pattern = _account_link_pattern(institution_key, external_account)
-    existing = conn.execute(
-        "SELECT id FROM import_mappings WHERE payee_pattern=?", (pattern,)
-    ).fetchone()
-    if existing is None:
-        conn.execute(
-            "INSERT INTO import_mappings"
-            "(payee_pattern, mapped_payee, mapped_category_id, source, hit_count) "
-            "VALUES (?,?,?,?,?)",
-            (pattern, row["name"], None, ACCOUNT_LINK_SOURCE, account_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE import_mappings SET mapped_payee=?, mapped_category_id=NULL, "
-            "source=?, hit_count=? WHERE id=?",
-            (row["name"], ACCOUNT_LINK_SOURCE, account_id, existing["id"]),
-        )
-    conn.commit()
-
-
-def account_id_for_institution(
-    conn: sqlite3.Connection, institution_key: str, external_account: str
-) -> Optional[int]:
-    """The Mammon account_id linked to ``(institution_key, external_account)``, or None."""
-    pattern = _account_link_pattern(institution_key or "", external_account or "")
-    row = conn.execute(
-        "SELECT hit_count FROM import_mappings WHERE payee_pattern=? AND source=?",
-        (pattern, ACCOUNT_LINK_SOURCE),
-    ).fetchone()
-    return int(row["hit_count"]) if row is not None else None
-
-
-def institution_link_for_account(
-    conn: sqlite3.Connection, account_id: int
-) -> Optional[tuple[str, str]]:
-    """The ``(institution_key, external_account)`` linked to ``account_id``, or None."""
-    row = conn.execute(
-        "SELECT payee_pattern FROM import_mappings WHERE hit_count=? AND source=?",
-        (account_id, ACCOUNT_LINK_SOURCE),
-    ).fetchone()
-    return _split_link_pattern(row["payee_pattern"]) if row is not None else None
-
-
-def account_institution_links(conn: sqlite3.Connection) -> list[dict]:
-    """Every account-link row, newest-independent, for inspection/tests."""
-    out: list[dict] = []
-    for r in conn.execute(
-        "SELECT payee_pattern, mapped_payee, hit_count FROM import_mappings "
-        "WHERE source=? ORDER BY hit_count",
-        (ACCOUNT_LINK_SOURCE,),
-    ):
-        key, external = _split_link_pattern(r["payee_pattern"])
-        out.append({
-            "account_id": int(r["hit_count"]),
-            "institution_key": key,
-            "external_account": external,
-            "account_name": r["mapped_payee"],
-        })
-    return out

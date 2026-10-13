@@ -644,7 +644,7 @@ UPDATE transactions
 # ---------------------------------------------------------------------------
 # Migration 21: one-time DEDUPE of doubled scheduled loan-payment rows. The
 # balance-driven recast/regenerate work (dated loan_payments, _V19) had a path
-# that re-materialised a loan's scheduled principal legs from a change's
+# that re-materialized a loan's scheduled principal legs from a change's
 # effective date forward WITHOUT first clearing the prior generation, so on the
 # LOAN side every regenerated payment landed twice while the mirrored checking
 # leg (a one-sided transfer, transfer_pair_id NULL) was untouched -- i.e. the
@@ -1191,7 +1191,7 @@ ALTER TABLE accounts ADD COLUMN asset_class TEXT;
 # ``accounts.property_address`` is what a valuation source looks the account up
 # by. It is NULLABLE and must be CONFIRMED by the user, never derived from the
 # account name: a name is not an address ("Condo (Asset)"), a name that looks
-# like one may be incomplete ("240 Birch" needs a city), and a neighbouring
+# like one may be incomplete ("240 Birch" needs a city), and a neighboring
 # account's address is not this account's -- inferring 118 Cedar from a
 # liability of that name returned a real, correctly-scraped $400,000 for a house
 # the user had sold years earlier. Same discipline as `investments.ticker_of`:
@@ -1352,7 +1352,7 @@ CREATE INDEX idx_security_mixtures_symbol ON security_mixtures(symbol);
 """
 
 # PER-ACCOUNT NATIVE CURRENCY + an FX-rate store, so net worth can be reported
-# per-currency and (optionally) totalled through FX into one presentation
+# per-currency and (optionally) totaled through FX into one presentation
 # currency. `accounts.currency` already exists (ISO 4217, NOT NULL DEFAULT
 # 'USD') from the initial schema, so there is nothing to ALTER -- an account
 # with no explicit currency IS USD, the base. This migration only adds the rate
@@ -1452,7 +1452,7 @@ ALTER TABLE price_history ADD COLUMN price_high TEXT;
 # `holdings_checkpoints`, kept SEPARATE because a coin position is not an equity
 # lot: quantities are wei-scale (up to 18 decimals), the event taxonomy adds
 # swaps, on-chain transfers, staking/airdrop/mining income and network gas fees
-# that have no equity analogue, and the natural exact-dedup key is an on-chain
+# that have no equity analog, and the natural exact-dedup key is an on-chain
 # `tx_hash`. Quantities and per-unit prices are Decimal-encoded TEXT (exact at
 # any decimal count); the fiat that moves is signed integer cents.
 # `mammon/crypto.py` is the SOLE writer of these tables (mirroring
@@ -1496,11 +1496,11 @@ CREATE TABLE crypto_transactions (
 
 # 52 -- the replay caches. `crypto_holdings` is the current position per
 # (account, symbol), the crypto twin of `holdings`. `crypto_holdings_checkpoints`
-# is the per-(account, year, symbol) replay snapshot, the exact analogue of
+# is the per-(account, year, symbol) replay snapshot, the exact analog of
 # `holdings_checkpoints`, so a 40-year multi-wallet file opens and scrolls fast:
 # a position as of a later date is computed from the prior year's snapshot plus
 # only that year's rows. `income` is staking/airdrop/mining income to date (the
-# 'dividends' analogue); `lots` is the JSON lot list (same shape investments use).
+# 'dividends' analog); `lots` is the JSON lot list (same shape investments use).
 _V52 = """
 CREATE TABLE crypto_holdings (
     id         INTEGER PRIMARY KEY,
@@ -2159,7 +2159,7 @@ CREATE TABLE IF NOT EXISTS report_item_refs (
 """
 
 
-# An ACCOUNT's own asset mixture: the exact analogue of security_mixtures.
+# An ACCOUNT's own asset mixture: the exact analog of security_mixtures.
 #
 # accounts.asset_class could hold only ONE class, so "this sleeve is a
 # conservative 30/70" was unsayable -- the user had to pick one class and be
@@ -3253,6 +3253,139 @@ INSERT INTO category_meta(key, value)
     WHERE EXISTS (SELECT 1 FROM review_items WHERE state = 'accepted');
 """
 
+# _V117: the multi-debt payoff plans go (SRD 5.12h). The Budget page's pay-down
+# line projects one debt from its own ``debt_terms`` and never had a surface for
+# a named plan over several, so ``debt_plans`` and ``debt_plan_members`` held
+# nothing any code read. ``debt_terms`` stays. Members first: they reference
+# the plans.
+_V117 = """
+DROP TABLE debt_plan_members;
+DROP TABLE debt_plans;
+"""
+
+# _V118: recompute every year-end balance checkpoint from the rows. The cache is
+# what the Accounts list reads (``ledger.account_balance``: last checkpoint plus
+# the rows after it), and four write paths changed rows without refreshing it --
+# ``create_transfer``, a split's transfer-leg mirrors, the loan-leg dedupe and a
+# review match that adopts the bank's amount -- so a ledger could show one total
+# in the Accounts list and another at the bottom of the register. Those paths are
+# fixed; this repairs what they left behind. Pure cache, rebuilt by the same rule
+# as ``ledger.rebuild_checkpoints``: a year's running sum, plus the opening
+# balance once its year end is on or after the opening date (or always, with
+# none).
+_V118 = """
+DELETE FROM balance_checkpoints;
+INSERT INTO balance_checkpoints(account_id, year, balance)
+SELECT y.account_id, CAST(y.yr AS INTEGER),
+       SUM(y.total) OVER (PARTITION BY y.account_id ORDER BY y.yr)
+       + CASE WHEN a.opening_date IS NULL OR a.opening_date = ''
+                   OR y.yr || '-12-31' >= a.opening_date
+              THEN COALESCE(a.opening_balance, 0) ELSE 0 END
+  FROM (SELECT account_id, substr(date, 1, 4) AS yr, SUM(amount) AS total
+          FROM transactions GROUP BY account_id, yr) AS y
+  JOIN accounts a ON a.id = y.account_id;
+"""
+
+# _V119: the rename tree learns ONLY from corrections, and by account (SRD 5.5,
+# the user's ruling).
+#
+# * Seeded examples go. Migration 60 copied every accepted review row of the day
+#   into ``rename_examples`` -- review history from before the learner existed,
+#   carrying older naming habits -- and those rows outvoted the user's own
+#   consistent corrections, so a payee corrected again and again never filled.
+#   A seeded row is the one stamped with its review row's own ``created_at``
+#   (60's ``COALESCE(ri.created_at, ...)``); ``learn`` stamps the accept.
+# * Each example records the account its row was reviewed in (backfilled from
+#   the review row), so a row is answered from its own account's corrections.
+# * A deleted transaction releases its id. ``transactions.id`` is an INTEGER
+#   PRIMARY KEY, so SQLite hands the id of a deleted newest row to the next
+#   insert; ``rename_examples.txn_id`` and ``review_items.accepted_txn_id`` /
+#   ``matched_txn_id`` kept pointing at it, and an example then read an
+#   unrelated row's payee as the user's correction (and an Unmatch would have
+#   acted on that row). The triggers clear those references on delete -- an
+#   example falls back to the label stored at the accept -- and the repair
+#   clears the ones already pointing at a different transaction (another
+#   account, or another amount AND date).
+_V119 = """
+ALTER TABLE rename_examples ADD COLUMN account_id INTEGER
+    REFERENCES accounts(id) ON DELETE SET NULL;
+DELETE FROM rename_examples
+ WHERE review_id IS NOT NULL
+   AND created_at = (SELECT r.created_at FROM review_items r
+                      WHERE r.id = rename_examples.review_id);
+UPDATE rename_examples
+   SET account_id = (SELECT r.account_id FROM review_items r
+                      WHERE r.id = rename_examples.review_id)
+ WHERE account_id IS NULL;
+DELETE FROM rename_meta WHERE key IN ('bootstrapped', 'action_bootstrapped');
+
+UPDATE rename_examples SET txn_id = NULL
+ WHERE kind = 'payee' AND id IN (
+   SELECT e.id FROM rename_examples e
+     JOIN review_items r ON r.id = e.review_id
+     JOIN transactions t ON t.id = e.txn_id
+    WHERE r.account_id <> t.account_id
+       OR (ABS(r.amount) <> ABS(t.amount) AND r.date <> t.date));
+UPDATE review_items SET accepted_txn_id = NULL
+ WHERE id IN (
+   SELECT r.id FROM review_items r JOIN transactions t ON t.id = r.accepted_txn_id
+    WHERE r.label = 'NEW'
+      AND COALESCE(r.is_investment, 0) = 0 AND COALESCE(r.is_crypto, 0) = 0
+      AND (r.account_id <> t.account_id
+           OR (ABS(r.amount) <> ABS(t.amount) AND r.date <> t.date)));
+
+CREATE INDEX idx_rename_examples_account ON rename_examples(kind, account_id);
+CREATE INDEX idx_review_items_accepted_txn ON review_items(accepted_txn_id);
+CREATE INDEX idx_review_items_matched_txn ON review_items(matched_txn_id);
+
+CREATE TRIGGER transactions_release_references AFTER DELETE ON transactions
+BEGIN
+    UPDATE rename_examples SET txn_id = NULL
+     WHERE kind = 'payee' AND txn_id = OLD.id;
+    UPDATE review_items SET accepted_txn_id = NULL
+     WHERE accepted_txn_id = OLD.id
+       AND COALESCE(is_investment, 0) = 0 AND COALESCE(is_crypto, 0) = 0;
+    UPDATE review_items
+       SET matched_txn_id = NULL, match_method = '',
+           label = CASE WHEN state = 'pending' AND label = 'MATCHING'
+                        THEN 'NEW' ELSE label END
+     WHERE matched_txn_id = OLD.id
+       AND COALESCE(is_investment, 0) = 0 AND COALESCE(is_crypto, 0) = 0;
+END;
+
+CREATE TRIGGER investment_transactions_release_references
+AFTER DELETE ON investment_transactions
+BEGIN
+    UPDATE rename_examples SET txn_id = NULL
+     WHERE kind = 'action' AND txn_id = OLD.id;
+    UPDATE review_items SET accepted_txn_id = NULL
+     WHERE accepted_txn_id = OLD.id AND COALESCE(is_investment, 0) = 1;
+    UPDATE review_items
+       SET matched_txn_id = NULL, match_method = '',
+           label = CASE WHEN state = 'pending' AND label = 'MATCHING'
+                        THEN 'NEW' ELSE label END
+     WHERE matched_txn_id = OLD.id AND COALESCE(is_investment, 0) = 1;
+END;
+"""
+
+# _V120: the category tree starts empty and relearns (the user's ruling: nothing
+# is seeded). Its votes are pooled tallies with no record of where each came
+# from, and some were grown by seeding steps -- migration 116's one-time replay
+# of accepted review rows (``ensure_seeded``) and the explicit history rebuild
+# (``bootstrap``), both removed -- so the only clean tree is an empty one. Every
+# vote from here on is a row the user accepts in review or a register edit.
+# ``category_forgotten`` existed only to keep a rebuild from resurrecting what
+# the user forgot, and ``category_meta`` only held the seed flag.
+_V120 = """
+DELETE FROM category_node_labels;
+DELETE FROM category_nodes;
+DELETE FROM category_payee_stats;
+DELETE FROM category_token_labels;
+DELETE FROM category_token_freq;
+DROP TABLE category_forgotten;
+DROP TABLE category_meta;
+"""
+
 
 MIGRATIONS: list[str] = [
     _V1,
@@ -3371,6 +3504,10 @@ MIGRATIONS: list[str] = [
     _V114,
     _V115,
     _V116,
+    _V117,
+    _V118,
+    _V119,
+    _V120,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

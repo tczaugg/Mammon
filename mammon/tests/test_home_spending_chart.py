@@ -221,7 +221,7 @@ def test_bar_chart_dark_to_light_toggle_restores_light(qapp, monkeypatch):
 # (``NetWorthCanvas``) and Asset Allocation (``SlicesPieCanvas``) must follow the
 # ACTIVE theme on screen using the SAME idiom as ``SpendingBarCanvas`` (re-read
 # ``style.theme()`` on every ``render()``), while a printed/exported chart
-# (``for_print=True``) is forced white regardless of theme -- the chart analogue
+# (``for_print=True``) is forced white regardless of theme -- the chart analog
 # of the always-white report/register HTML export.
 def _spending_pie() -> SpendingPie:
     return SpendingPie(
@@ -303,7 +303,7 @@ def test_report_canvas_dark_to_light_toggle_restores_light(qapp, monkeypatch, wh
 def test_report_canvas_print_path_is_white_under_dark_theme(qapp, monkeypatch, which):
     """PRINT/PDF export forces white regardless of theme: even in DARK mode a
     canvas built with ``for_print=True`` paints a white figure, so a printed or
-    exported chart is legible on paper -- the chart analogue of the always-white
+    exported chart is legible on paper -- the chart analog of the always-white
     report/register HTML export."""
     from matplotlib.colors import to_rgba
 

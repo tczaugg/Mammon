@@ -41,7 +41,7 @@ read for a file-level as-of date when no per-row date column exists.
 Numbers are kept as Decimal-encoded TEXT, exactly as they were printed, and
 never become floats: share quantities and per-share prices are Decimal TEXT
 everywhere in this codebase (SRD 5.8). Thousands separators, currency symbols
-and parenthesised negatives are stripped; nothing is rounded here.
+and parenthesized negatives are stripped; nothing is rounded here.
 
 Synthetic-fixture note: a real snapshot is PII (plan name, account number,
 balances). This parser is exercised only against synthetic ANON fixtures under
@@ -128,7 +128,7 @@ def _find_col(header: list, names) -> Optional[int]:
 def _dec_text(value) -> str:
     """A printed number as exponent-free Decimal TEXT, or "" when it is not a
     number. Strips currency symbols, thousands separators and percent signs, and
-    reads a parenthesised figure as negative (statements print "(12.34)")."""
+    reads a parenthesized figure as negative (statements print "(12.34)")."""
     s = str(value or "").strip()
     if not s:
         return ""

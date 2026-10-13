@@ -10,7 +10,7 @@ server behind a tiny client so:
     date range, an export file format, an account number/username, and sometimes
     a bank TOTP the user set up for MFA), and
   * the per-account *Download* action can run the script and hand the resulting
-    file to the existing import pipeline (see ``downloads.run_and_import``).
+    file to the existing import pipeline (see ``downloads.download_rows_for_review``).
 
 The concrete :class:`McpWebSlingerClient` speaks newline-delimited JSON-RPC over
 stdio to the MCP server named by ``$MAMMON_WEBSLINGER_MCP_CMD`` (or an explicit
@@ -39,7 +39,7 @@ import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Callable, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 _log = logging.getLogger("mammon.webslinger")
 
@@ -738,7 +738,7 @@ class McpWebSlingerClient(WebSlingerClient):
         # valid data (ACU 'Anytown CU Pat' 0000000: range data + 17 errors was
         # wrongly rejected). So failed actions are now a SURFACED WARNING, never a
         # rejection. An empty result (no records, no export file) is returned as-is
-        # so download_account can fall through to the Downloads-file scan and, only
+        # so download_rows_for_review can fall through to the Downloads-file scan and, only
         # if nothing is found there either, report failure.
         if result.has_failures:
             has_data = bool(result.records) or bool(result.file_path)
@@ -988,23 +988,6 @@ def download_readiness(*, client: Optional[WebSlingerClient],
     pf = preflight_download(client=client, script_name=script_name,
                             input_data=input_data)
     return pf.ok, pf.message
-
-
-def mcp_runner(client: WebSlingerClient) -> Callable[[str, dict], object]:
-    """Adapt a :class:`WebSlingerClient` to the ``downloads.Runner`` contract
-    (``Callable[[script, inputs], downloads.RunOutput]``) so a webSlinger run can
-    feed straight into ``downloads.run_and_import``."""
-    from mammon import downloads  # local import: downloads is heavier
-
-    def _run(script: str, inputs: dict):
-        result = client.run_script(script, inputs)
-        return downloads.RunOutput(
-            file_path=result.file_path,
-            records=result.records,
-            raw=result.raw,
-        )
-
-    return _run
 
 
 def default_client() -> WebSlingerClient:

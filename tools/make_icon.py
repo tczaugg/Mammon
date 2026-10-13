@@ -66,7 +66,7 @@ def build() -> Image.Image:
                         width=int(px(8)))
 
     # Courses bottom-up, so each covers the top faces of the one beneath; bars
-    # left-to-right within a course, so each front face covers its neighbour's
+    # left-to-right within a course, so each front face covers its neighbor's
     # right face. Painted in any other order the stack falls apart into
     # floating slabs.
     courses = (4, 3, 2, 1)
@@ -107,7 +107,7 @@ def main() -> None:
         master.resize((n, n), Image.LANCZOS).save(OUT / f"mammon-{n}.png")
 
     if "--previews" in sys.argv:
-        # Magnified nearest-neighbour blowups of the small sizes, for judging
+        # Magnified nearest-neighbor blowups of the small sizes, for judging
         # what actually survives in a taskbar. Working aids, not assets, so they
         # are opt-in and land outside the committed set.
         out = ROOT / "build" / "icon-previews"

@@ -81,19 +81,23 @@ Now it is an application you can use to master your finances. Enjoy.
   carried, most used first. Tools ▸ Learned Categories shows what was learned
   and forgets a payee on request.
 - **Investments** — holdings, cost basis, price history, and account valuation,
-  and share balance reconcilation, even handling splits and reverse splits. Price
+  and share balance reconciliation, even handling splits and reverse splits. Price
   history is also corrected for splits and can be downloaded for securities with tickers.
 - **Investment Dashboard** — the whole portfolio on one page: allocation by
   account, security or asset class, performance over any period, and a
   projected range of future value with a What If for a different mix — with
-  the retirement plan's draws and conversions applied when it is on.
+  the retirement plan's draws and conversions applied when it is on. A Roth
+  the plan opens but you don't hold yet shows as a gray "(planned)" wedge,
+  never counted as money you have.
 - **Retirement Planner** — Social Security from the earnings record (spousal,
   survivor and earnings-test rules included), required minimums, a household
   spending plan drawn from IRAs, Roths and taxable accounts in the order you
   choose, and Roth conversions filled to a bracket top or under the next IRMAA
   tier, with federal and state tax, IRMAA and the ACA credit paid from the
   accounts and totaled in today's dollars. Every rule cites its source in the
-  Retirement FAQ.
+  Retirement FAQ. When later downloads or prices move the ledger under an
+  applied plan, the Withdrawal Schedule flags the years that no longer match
+  instead of quietly rewriting them; re-applying is your call.
 - **Budget planner** — one month on one page: take-home income on top, then
   Planned, Spent and Remaining for each line, with amounts proposed from your own
   history. Lines can also save toward a goal or pay down a debt early.
@@ -107,7 +111,7 @@ Now it is an application you can use to master your finances. Enjoy.
 - **Multi-currency** — accounts carry their own currency with a dated FX-rate
   store, so net worth reports per currency or totals through FX into one
   presentation currency. Rates are `Decimal` text, never floats.
-- **Cryptocurrency** — two kinds of account, wallet (just the cyrptocurrency, 
+- **Cryptocurrency** — two kinds of account, wallet (just the cryptocurrency,
   no cash) and exchanges (multiple coins and/or currencies).
 - **Backups** — an automatic snapshot every minute, stored as only the database
   pages that changed, so changes in the current session cost kilobytes rather 
@@ -321,6 +325,13 @@ cash flow, spending by category or payee, balances over time, holdings,
 upcoming bills, loan terms), with a bounded transaction listing, free-text
 search and a read-only SQL tool for the long tail. Account numbers and login
 details are never returned.
+
+The retirement plan is there too: the household and settings the planner runs
+on, its year-by-year projection (income, withdrawals, tax, Medicare surcharges,
+and the year the money runs out, if it does), and the most the plan sustains.
+A model can ask "what if we spent $80,000 starting in 2030?" and get the
+planner's own answer without anything being saved. The projection reflects the
+plan as it stood the last time the Retirement Planner was open in Mammon.
 
 The `mcp` package is part of `requirements.txt`. An installed copy has the
 server ready as `%LOCALAPPDATA%\Mammon\mammon-mcp.bat`: use that path as the

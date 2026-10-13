@@ -783,6 +783,7 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
     # created BEFORE deleting it -- the split rows (which remember the mirror
     # ids) cascade away with the parent, so read them first.
     link_split_mirrors(conn, txn_id)
+    mirror_edits = _split_edits(conn, txn_id)
     _delete_split_mirrors(conn, txn_id)
     pair_id = row["transfer_pair_id"]
     pair_row = get_transaction(conn, pair_id) if pair_id is not None else None
@@ -799,7 +800,7 @@ def delete_transaction(conn: sqlite3.Connection, txn_id: int) -> None:
         conn.execute("DELETE FROM transactions WHERE id=?", (pair_id,))
     conn.commit()
 
-    edits = [(row["account_id"], int(row["date"][:4]))]
+    edits = [(row["account_id"], int(row["date"][:4])), *mirror_edits]
     if pair_row is not None:
         edits.append((pair_row["account_id"], int(pair_row["date"][:4])))
     _touch_checkpoints(conn, *edits)
@@ -874,6 +875,8 @@ def create_transfer(
     conn.execute("UPDATE transactions SET transfer_pair_id=? WHERE id=?", (to_id, from_id))
     conn.execute("UPDATE transactions SET transfer_pair_id=? WHERE id=?", (from_id, to_id))
     conn.commit()
+    year = int(date[:4])
+    _touch_checkpoints(conn, (from_account_id, year), (to_account_id, year))
     return from_id, to_id
 
 
@@ -996,12 +999,13 @@ def retarget_transfer(
         "UPDATE transactions SET transfer_account_id=?, transfer_pair_id=? WHERE id=?",
         (new_target, new_pair_id, txn_id),
     )
+    mirror_edits = _split_edits(conn, old_pair_id)
     _delete_split_mirrors(conn, old_pair_id)  # normally none; belt-and-braces
     conn.execute("DELETE FROM transactions WHERE id=?", (old_pair_id,))
     conn.commit()
 
     edits = [(row["account_id"], int(row["date"][:4])),
-             (new_target, int(row["date"][:4]))]
+             (new_target, int(row["date"][:4])), *mirror_edits]
     if old_pair is not None:
         edits.append((old_pair["account_id"], int(old_pair["date"][:4])))
     _touch_checkpoints(conn, *edits)
@@ -1455,6 +1459,9 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
                 f"to [{name}] -- the other side of the transfer lives there")
         adopt_pair = txn["transfer_pair_id"]
     preserved = _capture_split_mirror_flags(conn, txn_id)
+    edits = _split_edits(conn, txn_id)
+    if adopt_pair is not None:
+        edits |= _row_edits(conn, adopt_pair)
     _delete_split_mirrors(conn, txn_id)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
     if split_a_transfer:
@@ -1491,6 +1498,7 @@ def set_splits(conn: sqlite3.Connection, txn_id: int, lines) -> None:
         )
     conn.execute("UPDATE transactions SET category_id=NULL WHERE id=?", (txn_id,))
     conn.commit()
+    _touch_checkpoints(conn, *(edits | _split_edits(conn, txn_id)))
 
 
 def rebalance_splits(conn: sqlite3.Connection, txn_id: int) -> None:
@@ -1568,6 +1576,7 @@ def clear_splits(conn: sqlite3.Connection, txn_id: int,
             keep = int(row["transfer_pair_id"])
     else:
         restore_transfer_to = None
+    edits = _split_edits(conn, txn_id)
     _delete_split_mirrors(conn, txn_id, skip_id=keep)
     conn.execute("DELETE FROM splits WHERE transaction_id=?", (txn_id,))
     if restore_transfer_to is not None:
@@ -1580,6 +1589,7 @@ def clear_splits(conn: sqlite3.Connection, txn_id: int,
                 "transfer_pair_id=? WHERE id=?",
                 (-int(txn["amount"]), txn["account_id"], txn_id, keep))
     conn.commit()
+    _touch_checkpoints(conn, *edits)
 
 
 def _split_line(ln):
@@ -1695,6 +1705,37 @@ def link_split_mirrors(conn: sqlite3.Connection,
             conn.execute("UPDATE splits SET transfer_pair_id=? WHERE id=?", (rid, sid))
             linked += 1
     return linked
+
+
+def _row_edits(conn: sqlite3.Connection, txn_id: int) -> set:
+    """``{(account_id, year)}`` of one transaction row, or empty if it is gone."""
+    row = conn.execute("SELECT account_id, date FROM transactions WHERE id=?",
+                       (int(txn_id),)).fetchone()
+    return {(int(row["account_id"]), int(row["date"][:4]))} if row else set()
+
+
+def _split_edits(conn: sqlite3.Connection, txn_id: int) -> set:
+    """``{(account_id, year)}`` of a transaction AND every counter-account mirror
+    its transfer split legs own -- the rows a split rebuild can create, delete
+    or re-amount. Taken before a rebuild and again after it, the union is what
+    :func:`_touch_checkpoints` must refresh: a mirror lives in ANOTHER account,
+    and a cached balance there that is not refreshed disagrees with that
+    account's register from then on."""
+    rows = conn.execute(
+        "SELECT t.account_id, t.date FROM splits s "
+        "JOIN transactions t ON t.id = s.transfer_pair_id "
+        "WHERE s.transaction_id=?", (int(txn_id),)).fetchall()
+    return _row_edits(conn, txn_id) | {
+        (int(r["account_id"]), int(r["date"][:4])) for r in rows}
+
+
+def touch_balance_cache(conn: sqlite3.Connection, *account_years) -> None:
+    """Refresh the year-end balance cache after a write made outside this
+    module's own functions (``(account_id, year)`` pairs; see
+    :func:`_touch_checkpoints`). Every write that changes an amount, adds a row
+    or removes one has to end here or in a function that does, or the Accounts
+    list stops agreeing with the register."""
+    _touch_checkpoints(conn, *account_years)
 
 
 def _delete_split_mirrors(conn: sqlite3.Connection, txn_id: int,

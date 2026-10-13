@@ -121,7 +121,7 @@ def test_pre_split_transaction_prices_join_the_adjusted_series(conn):
     assert got["2026-06-01"] == Decimal("63.00")
 
     # No spike: nothing in the series is an order of magnitude off its
-    # neighbours. Before the fix the first three points were 400/440/480
+    # neighbors. Before the fix the first three points were 400/440/480
     # against a ~62 downloaded curve.
     values = [p for _, p in series]
     assert max(values) < 2 * min(values)

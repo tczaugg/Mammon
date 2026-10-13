@@ -600,12 +600,10 @@ def test_action_tree_generalizes_across_securities(conn):
         "PSCT(US73936T6688) Cash Dividend USD 0.06 per Share (Ordinary Dividend)",
         "ALTY(US37954Y8066) Cash Dividend USD 0.081 per Share (Ordinary Dividend)",
     )):
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO investment_transactions(account_id,date,action,amount,memo)"
             " VALUES (?,?,?,?,?)", (aid, "2026-01-0%d" % (i + 1), "Div", 100, desc))
-    conn.commit()
-    assert rename_tree.bootstrap_actions(conn) == 4
-    assert rename_tree.bootstrap_actions(conn) == 0          # idempotent
+        rename_tree.learn(conn, desc, "Div", kind="action", txn_id=cur.lastrowid)
     s = rename_tree.suggest(
         conn, "SCHD(US78468R6633) Cash Dividend USD 0.25 per Share (Ordinary Dividend)",
         kind="action")
@@ -631,33 +629,13 @@ def test_action_label_is_read_live(conn):
 
 
 # ---------------------------------------------------------------------------
-# bootstrap (explicit; nothing calls it on open)
+# migrations v60 + v119: nothing is learned from history
 # ---------------------------------------------------------------------------
-def test_bootstrap_replays_register_history_once(conn, account):
-    for i in range(3):
-        ledger.add_transaction(conn, account, "2026-01-0%d" % (i + 1), -500,
-                               payee="Netflix", memo="POS NETFLIX.COM %d" % i)
-    ledger.add_transaction(conn, account, "2026-01-09", -500,
-                           payee="Deposit", memo="DEPOSIT")            # memo == payee: no rename
-    assert rename_tree.bootstrap(conn) == 4
-    assert rename_tree.bootstrap(conn) == 0
-    assert [e["label"] for e in rename_tree.examples(conn)] == ["Netflix"] * 3
-    assert rename_tree.suggest(conn, "POS NETFLIX.COM 999").payee == "Netflix"
-
-
-def test_bootstrap_skips_transfers(conn):
-    a = ledger.create_account(conn, "Checking", "checking")
-    b = ledger.create_account(conn, "Savings", "savings")
-    ledger.create_transfer(conn, a, b, "2026-01-01", 1000,
-                           memo="XFER TO SAVINGS 42", payee="Transfer to Savings")
-    assert rename_tree.ensure_bootstrapped(conn) == 0
-    assert rename_tree.suggest(conn, "XFER TO SAVINGS 42").action == rename_tree.ACTION_LEAVE
-
-
-# ---------------------------------------------------------------------------
-# migration v60: the example log is seeded from the accepted review rows
-# ---------------------------------------------------------------------------
-def test_v60_seeds_examples_from_accepted_review_rows(tmp_path):
+def test_v119_removes_the_examples_v60_seeded_from_review_history(tmp_path):
+    """Migration 60 copied every accepted review row into the example log --
+    history from before the learner existed, not corrections the user made to
+    it. Migration 119 removes them (the user's ruling: no seeding), so an
+    upgraded ledger learns only from its accepts from then on."""
     path = tmp_path / "old.db"
     c = db.connect(path)
     for m in db.MIGRATIONS[:59]:
@@ -693,13 +671,48 @@ def test_v60_seeds_examples_from_accepted_review_rows(tmp_path):
     conn = fresh_db(path)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert "rename_nodes" not in db.table_names(conn)
-    rows = conn.execute(
-        "SELECT kind, text, extra, label FROM rename_examples ORDER BY id").fetchall()
-    assert [tuple(r) for r in rows] == [
-        ("payee", "POS NETFLIX.COM 88", "", "Netflix"),
-        ("payee", "", "COSTCO WHSE #1234", "Costco"),
-        ("action", "Credit Interest", "Credit Interest", "IntInc"),
-    ]
-    assert rename_tree.suggest(conn, "Credit Interest", kind="action").action == rename_tree.ACTION_LEAVE
-    assert rename_tree.suggest(conn, "", extra="COSTCO WHSE #9").payees == []   # one sighting
+    assert conn.execute("SELECT COUNT(*) FROM rename_examples").fetchone()[0] == 0
+    assert rename_tree.suggest(conn, "POS NETFLIX.COM 88").action == rename_tree.ACTION_LEAVE
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# by account
+# ---------------------------------------------------------------------------
+def test_the_same_text_is_answered_from_the_rows_own_account(conn):
+    """One bank text, two meanings: in checking a cashout is a transfer, in a
+    business account it is a client. Each account's own corrections answer
+    its rows once it has two; an account with none falls back to all of them,
+    where the two names are contested and only offered."""
+    a = ledger.create_account(conn, "Checking", "checking")
+    b = ledger.create_account(conn, "Business", "checking")
+    c = ledger.create_account(conn, "Other", "checking")
+    text = "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD"
+    for _ in range(3):
+        rename_tree.learn(conn, text, "Standard Transfer", account_id=a)
+        rename_tree.learn(conn, text, "Client Payments", account_id=b)
+    assert rename_tree.suggest(conn, text, account_id=a).payee == "Standard Transfer"
+    assert rename_tree.suggest(conn, text, account_id=a).action == rename_tree.ACTION_AUTO
+    assert rename_tree.suggest(conn, text, account_id=b).payee == "Client Payments"
+    assert rename_tree.suggest(conn, text, account_id=b).action == rename_tree.ACTION_AUTO
+    pooled = rename_tree.suggest(conn, text, account_id=c)
+    assert pooled.action == rename_tree.ACTION_DROPDOWN
+    assert set(pooled.payees) == {"Standard Transfer", "Client Payments"}
+
+
+def test_a_deleted_transactions_id_never_relabels_its_example(conn):
+    """SQLite gives a deleted newest row's id to the next insert. An example
+    whose transaction was deleted must keep the label the user chose, not read
+    whatever unrelated row inherits the id."""
+    acct = ledger.create_account(conn, "Checking", "checking")
+    text = "AUTOMATIC DEPOSIT, VENMO CASHOUT PPD"
+    for _ in range(2):
+        tid = ledger.add_transaction(conn, acct, "2026-08-05", 1_550_00,
+                                     payee="Standard Transfer")
+        rename_tree.learn(conn, text, "Standard Transfer", txn_id=tid,
+                          account_id=acct)
+    ledger.delete_transaction(conn, tid)
+    reused = ledger.add_transaction(conn, acct, "2026-05-05", 60_00, payee="A Stranger")
+    assert reused == tid                      # the id really was handed on
+    labels = [e["label"] for e in rename_tree.examples(conn)]
+    assert labels == ["Standard Transfer", "Standard Transfer"]

@@ -68,8 +68,8 @@ tags reach every leg.
 
 **The per-tag breakdown is ONE widget and no new row path.** It is ON by
 default, so the editor carries a single opt-OUT box, "Do not subtotal by tag",
-and no tag-entry field at all: nobody should have to type the names of his own
-properties to see them subtotalled, and typing them was also how a tag got
+and no tag-entry field at all: nobody should have to type the names of their own
+properties to see them subtotaled, and typing them was also how a tag got
 silently left out. Unchecked writes nothing; checked stores
 ``no_tag_breakdown`` in the item's ``options`` blob, and the tree then shows
 categories directly under the line item with no tag level at all. A stored
@@ -190,7 +190,7 @@ def kind_label(kind: str) -> str:
 
 
 # There is deliberately no parse/format pair for a tag list here any more. The
-# editor used to carry a "Limit to tags:" box; subtotalling by tag is now the
+# editor used to carry a "Limit to tags:" box; subtotaling by tag is now the
 # default and discovers the tags itself, so the box -- and the chance to leave a
 # property out of it by forgetting to type it -- is gone.
 
@@ -362,7 +362,7 @@ def definition_report_name(definition) -> str:
 def definition_choice_label(definition, path, user_root=None) -> str:
     """One line of the chooser: title, year, id and WHICH root it came from.
 
-    The root matters: a file the user edited in his own directory shadows the
+    The root matters: a file the user edited in their own directory shadows the
     shipped one of the same name, and a chooser that did not say so would make
     that shadowing look like the shipped file changing under him."""
     year = f" {definition.year}" if definition.year else ""
@@ -591,7 +591,7 @@ class CustomReportWindow(QDialog):
         self.tag_check = QCheckBox("Allow per-transaction tag override")
         # An opt-OUT, unchecked, and the only breakdown widget there is. It used
         # to be an opt-in checkbox plus a "Limit to tags:" box, and both halves
-        # were wrong: a Schedule E wants its properties subtotalled every time,
+        # were wrong: a Schedule E wants its properties subtotaled every time,
         # and asking the user to TYPE the tag names meant a property he forgot
         # to type quietly emptied into the untagged remainder. The evaluator
         # discovers the tags, so the question left for the user is only whether
