@@ -118,7 +118,7 @@ def report_defs_dir() -> Path:
     """The user's own report (tax-form) year definitions.
 
     ``$MAMMON_REPORT_DEFS_DIR``, else ``data_dir()/'report_defs'``. It sits
-    under the data directory on purpose: a definition a user writes for his own
+    under the data directory on purpose: a definition a user writes for their own
     return names his forms and his lines, so it is his data, it follows
     ``$MAMMON_DATA_DIR``, and it is gitignored with the rest of ``data/``.
     Definitions SHIPPED with the app are the other search root --

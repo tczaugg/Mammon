@@ -79,7 +79,7 @@ def test_report_rows_to_html_header_rows_and_negatives():
 
 
 def test_report_rows_to_html_escapes_markup_like_csv_quotes():
-    # The HTML analogue of the CSV writer quoting a delimiter-bearing field:
+    # The HTML analog of the CSV writer quoting a delimiter-bearing field:
     # special characters must render as text, never as markup.
     rows = [ReportRow("Expense", "Food & <Dining>", -100)]
     html = report_rows_to_html(rows, "R&D <Report>")

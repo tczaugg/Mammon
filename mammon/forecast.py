@@ -78,7 +78,7 @@ the household plan moves all of it. Taken as a rate, a quarter of it moved
 holding a third of a million, a fill split its conversion by that, and the
 plan cut it back short of the line). A CONTRIBUTION is a stream, so its
 caller prorates it to the months left before handing it here
-(``retirement_planner.planned_contributions``, the dashboard's measured
+(``retirement_plan.planned_contributions``, the dashboard's measured
 inflows). A projection in plain "years from now" (the dashboard with the plan
 off) passes nothing and keeps whole years.
 
@@ -890,3 +890,4 @@ def fan(start_cents: int, annual_contribution_cents: int, mu: float,
     return fan_from_steps(start_cents, plan,
                           periods_per_year=periods_per_year,
                           inflation=inflation)
+

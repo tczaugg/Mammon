@@ -79,7 +79,7 @@ BAR_RADIUS = 3
 #: an allocation.
 BAR_MIN_SEPARATOR = 3
 #: A segment narrower than its own label plus this padding is left BLANK rather
-#: than labeled: a percentage clipped to "4" or spilling over its neighbour is
+#: than labeled: a percentage clipped to "4" or spilling over its neighbor is
 #: worse than none, and the tooltip carries every figure anyway.
 BAR_LABEL_PADDING = 8
 

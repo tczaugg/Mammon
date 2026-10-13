@@ -148,10 +148,15 @@ def test_every_tool_returns_json_without_identifying_data(conn, seeded):
         "budget_vs_actual": {"budget_id": seeded["budget"], "start": "2026-01",
                              "end": "2026-03"},
         "budget_ytd": {"budget_id": seeded["budget"], "year": 2026},
+        "retirement_plan": {},
+        "retirement_projection": {"yearly_spending": "30000", "by_account": True},
+        "retirement_max_spending": {},
         "schema": {},
         "query": {"sql": "SELECT id, name, account_number, url FROM accounts"},
     }
     assert set(calls) == set(mcp_tools.TOOLS)
+    # The retirement tools need someone with a birth year for a horizon.
+    retirement.add_person(conn, "ANON Saver", "self", birth_year=1961)
     for name, kwargs in calls.items():
         out = mcp_tools.TOOLS[name](conn, **kwargs)
         text = json.dumps(out)                       # JSON-serializable
@@ -411,6 +416,130 @@ def test_server_lists_every_tool_and_answers_calls(dbfile, conn, seeded):
 
     assert asyncio.run(run()) is True
     ro.close()
+
+
+# --- the retirement plan ------------------------------------------------------
+@pytest.fixture
+def retiree(conn):
+    """A synthetic ANON household with an IRA, a Roth and a stored plan."""
+    ira = ledger.create_account(conn, "ANON IRA", "investment")
+    roth = ledger.create_account(conn, "ANON Roth", "investment")
+    rebalance.set_account_treatment(conn, ira, "deferred")
+    rebalance.set_account_treatment(conn, roth, "roth")
+    ledger.add_transaction(conn, ira, "2024-01-05", 400_000_00)
+    ledger.add_transaction(conn, roth, "2024-01-05", 100_000_00)
+    me = retirement.add_person(conn, "ANON Saver", "self", birth_year=1961,
+                               birth_month=3, planned_claim_age_months=67 * 12)
+    for year in range(2012, 2026):
+        retirement.set_earnings(conn, me, year, 70_000_00)
+    retirement.set_account_owner(conn, ira, me)
+    retirement.set_conversion(conn, ira, roth, 2028, 20_000_00)
+    conn.commit()
+    return {"ira": ira, "roth": roth, "me": me}
+
+
+def test_retirement_plan_tool_reports_the_inputs(conn, retiree):
+    out = mcp_tools.retirement_plan(conn)
+    _json(out)
+    person = out["people"][0]
+    assert person["name"] == "ANON Saver" and person["relationship"] == "self"
+    assert person["birth_year"] == 1961 and person["planned_claim_age"] == "67"
+    assert Decimal(person["monthly_benefit_at_claim"]) > 0
+    kinds = {a["name"]: a["treatment"] for a in out["accounts"]}
+    assert kinds["ANON IRA"] == "deferred" and kinds["ANON Roth"] == "roth"
+    assert {a["name"]: a["owner"] for a in out["accounts"]}["ANON IRA"] == "ANON Saver"
+    assert out["roth_conversions"] == [{"year": 2028, "from": "ANON IRA",
+                                        "to": "ANON Roth", "amount": "20000.00"}]
+    assert out["spending_plan"]["set"] is False
+
+
+def test_retirement_projection_without_a_spending_plan_says_so(conn, retiree):
+    out = mcp_tools.retirement_projection(conn)
+    assert out["basis"] == "stored plan"
+    assert set(out["summary"]) == {"total_income_tax", "total_income_tax_in_todays_dollars"}
+    assert "no household spending plan" in out["note"]
+    assert out["years"] and out["years"][0]["year"] == _dt_today().year
+    conv = {r["year"]: r["roth_conversions"] for r in out["years"]}
+    assert conv[2028] == "20000.00"
+
+
+def test_retirement_what_if_projects_and_saves_nothing(dbfile, conn, retiree):
+    """A what-if runs the page's engine on the read-only connection the server
+    uses, and the stored plan is exactly what it was."""
+    ro = mcp_server.open_readonly(str(dbfile))
+    try:
+        before = (retirement.get_withdrawal_plan(ro), retirement.list_withdrawals(ro))
+        out = mcp_tools.retirement_projection(ro, yearly_spending="50000",
+                                              increase_pct="2", start_year=2027,
+                                              ira_bracket="22", by_account=True)
+        assert out["basis"] == "what-if (nothing saved)"
+        assert out["parameters"] == {"yearly_spending": "50000.00",
+                                     "increase_pct_per_year": "2", "start_year": 2027,
+                                     "ira_draws_capped_at_bracket": "22"}
+        years = {r["year"]: r for r in out["years"]}
+        assert Decimal(years[2026]["spending"]) == 0
+        assert Decimal(years[2027]["spending"]) == Decimal("50000.00")
+        assert Decimal(years[2028]["spending"]) == Decimal("51000.00")
+        assert set(years[2027]["accounts"]) == {"ANON IRA", "ANON Roth"}
+        summary = out["summary"]
+        assert summary["last_year"] == 1961 + retirement.get_plan_through_age(ro)
+        # Two tax figures, each named for what it is: the year's whole tax
+        # (the page's) and what the plan draws from the accounts to pay it -
+        # only the conversion's tax before spending starts.
+        assert Decimal(summary["total_income_tax"]) == sum(
+            Decimal(r["income_tax"]) for r in out["years"])
+        assert Decimal(summary["total_tax_paid_from_accounts"]) == sum(
+            Decimal(r["tax_paid_from_accounts"]) for r in out["years"])
+        assert Decimal(summary["total_income_tax_in_todays_dollars"]) <= \
+            Decimal(summary["total_income_tax"])
+        assert Decimal(years[2026]["tax_paid_from_accounts"]) <= \
+            Decimal(years[2026]["income_tax"])
+        if summary["runs_out_year"] is not None:
+            assert summary["runs_out_age"] == summary["runs_out_year"] - 1961
+        assert (retirement.get_withdrawal_plan(ro), retirement.list_withdrawals(ro)) == before
+
+        most = mcp_tools.retirement_max_spending(ro, increase_pct="2", start_year=2027)
+        assert Decimal(most["yearly_spending"]) > 0
+        assert Decimal(most["yearly_spending"]) % 1000 == 0
+        assert retirement.get_withdrawal_plan(ro) == before[0]
+    finally:
+        ro.close()
+
+
+def test_retirement_projection_says_when_the_stored_draws_are_out_of_date(conn, retiree):
+    """The stored plan's bars read the stored withdrawals; the projection says
+    from which year they no longer match the plan computed from today's
+    ledger (the page's amber triangle), and null once they do."""
+    from mammon import retirement_plan as rplan
+    params = retirement.set_withdrawal_plan(conn, 45_000_00, 2, start_year=2027)
+    out = mcp_tools.retirement_projection(conn)
+    assert out["summary"]["stored_withdrawals_out_of_date_from"] is not None
+    # What Apply writes: the plan's own draws.
+    planner = rplan.HouseholdPlanner(conn)
+    plan = planner.plan_for(params.start_cents, params.increase_pct,
+                            start_year=params.start_year)
+    for account_id, by_year in plan.amounts_by_account().items():
+        for year, cents in by_year.items():
+            retirement.set_withdrawal(conn, account_id, year, cents)
+    out = mcp_tools.retirement_projection(conn)
+    assert out["summary"]["stored_withdrawals_out_of_date_from"] is None
+    # A what-if has no stored draws to compare, and says nothing about them.
+    assert "stored_withdrawals_out_of_date_from" not in mcp_tools.retirement_projection(
+        conn, yearly_spending="45000")["summary"]
+
+
+def test_retirement_tools_refuse_bad_arguments(conn, retiree):
+    with pytest.raises(ValueError, match="ira_bracket"):
+        mcp_tools.retirement_projection(conn, yearly_spending="40000", ira_bracket="23")
+    with pytest.raises(ValueError, match="terminal_age"):
+        mcp_tools.retirement_projection(conn, terminal_age=200)
+    with pytest.raises(ValueError, match="yearly_spending"):
+        mcp_tools.retirement_projection(conn, increase_pct="2")
+
+
+def _dt_today():
+    import datetime as _dt
+    return _dt.date.today()
 
 
 # --- the health guard -------------------------------------------------------

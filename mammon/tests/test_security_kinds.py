@@ -114,7 +114,7 @@ def test_plan_fund_is_dropped_even_when_a_ticker_is_offered(conn):
     assert src.calls == []
 
 
-def test_quotable_neighbours_still_go_out(conn):
+def test_quotable_neighbors_still_go_out(conn):
     """Skipping is per-security: the equity beside it is fetched as always."""
     _security(conn, PLAN, kind=instruments.Kind.MUTUAL_FUND.value)
     _security(conn, EQUITY)

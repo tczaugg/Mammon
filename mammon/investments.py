@@ -23,7 +23,7 @@ writer of ``security_aliases`` (:func:`add_alias` / :func:`remove_alias`).
 ``security_aliases`` MEANS RENAME AND ONLY RENAME. It is not a place to record
 that one instrument derives from another, and specifically an option contract is
 never an alias of its underlying -- it has its own terms, its own price series
-and its own expiry. The pull towards that mistake is real, because
+and its own expiry. The pull toward that mistake is real, because
 :func:`ticker_of` reads the first token of "XYZ 260117C00150000 XYZ 17JAN26 150
 C" as "XYZ" and a QIF option block states the root ticker outright, so every
 derivation path in this codebase is one step from proposing the collapse.
@@ -176,7 +176,7 @@ _DISPOSE_ACTIONS = {
 # ---------------------------------------------------------------------------
 # Option life-cycle actions (SRD 5.8e-7)
 # ---------------------------------------------------------------------------
-# An option contract has four ways in and out that a share has no analogue for,
+# An option contract has four ways in and out that a share has no analog for,
 # and Part 1.2 of the instrument taxonomy names them: buy/sell TO OPEN (the
 # position is created, long or short) and buy/sell TO CLOSE (it is unwound), plus
 # the three ENDINGS that are not trades at all -- EXERCISE (the long holder takes
@@ -2186,7 +2186,7 @@ def _kind_canon(conn, symbol):
     :func:`_kind_identity_symbols` leaves whole -- which is every identity in an
     unclassified ledger -- so this is a no-op there.
 
-    It exists because canonicalising FIRST is how a hand-written alias row
+    It exists because canonicalizing FIRST is how a hand-written alias row
     fusing a contract onto its underlying would still win: ask to reconcile the
     contract, resolve to the stock, and reconcile the stock's shares under the
     contract's name. The partition has to be applied to the resolution itself,
@@ -2439,7 +2439,7 @@ def drop_delivery_strike_closes(conn, account_ids, sources=("qif",)) -> int:
     from one of ``sources`` for that security and date whose close EQUALS the leg's
     price is removed. Run after the investment rows land, so it holds whichever
     order a yearly set of files arrives in. A genuine close that happens to equal
-    the strike that day is lost too; the neighbouring closes stand in for it.
+    the strike that day is lost too; the neighboring closes stand in for it.
     Returns rows deleted."""
     ids = sorted({int(a) for a in account_ids or () if a is not None})
     if not ids:

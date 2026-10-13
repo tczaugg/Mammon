@@ -2,9 +2,9 @@
 living *inside* its hole, a left band of inflow arrows, and four corner
 launchers.
 
-Why this shape rather than another stack of tables: the Investment Center
-(``ui/investment_center.py``) already renders the tabular views -- allocation,
-per-account performance, top holdings, drift. This page is deliberately NOT a
+Why this shape rather than another stack of tables: the tabular views --
+allocation, per-account performance, top holdings, drift -- belong to the
+windows the corner launchers open, and this page is deliberately NOT a
 rehash of those. Everything it draws is either a *picture* of the portfolio
 (the ring, the arrows) or a single line of numbers that no existing report
 states in one place. Anything that wants a table is a corner launcher opening
@@ -214,7 +214,7 @@ from PyQt5.QtWidgets import (
 # through portfolio.account_valuation, which dispatches on the account's kind
 # (a crypto wallet is not valued by the brokerage engine). Importing the
 # brokerage engine directly is how the accounts ring lost crypto wallets.
-from mammon import forecast, ledger, portfolio, retirement, security_mix
+from mammon import forecast, ledger, portfolio, retirement
 from mammon.ui import charts, prefs, style
 from mammon.ui.models import fmt_date
 from mammon.ui.delegates import NoWheelComboBox
@@ -391,11 +391,9 @@ RING_MODES = (MODE_ACCOUNTS, MODE_SECURITIES, MODE_CLASSES)
 #: something is MISSING, not name a category.
 UNALLOCATED_LABEL = "Unallocated"
 
-#: Inflows in the trailing year at or above this count make an account
-#: "regular" and give it an arrow (design section 3). Four catches quarterly
-#: and everything denser, and rejects a one-off rollover.
-ARROW_MIN_INFLOWS = 4
-INFLOW_WINDOW_DAYS = 365
+# The inflow count and window, and the measurement itself, live in
+# mammon.portfolio: the retirement plan's projection reads them too.
+from mammon.portfolio import InflowArrow, inflow_arrows  # noqa: F401 - re-exported
 
 #: The horizons the center line annualizes over, longest history first.
 ANNUALIZED_YEARS = (1, 3, 5, 10)
@@ -778,7 +776,7 @@ class RingCanvas(charts.SlicesPieCanvas):
     identity (an account id as a string, or a ticker) that coloring and the
     click filter work in, the *label* is what a human reads in the tooltip.
 
-    ``render`` is overridden whole rather than parameterised, because the base
+    ``render`` is overridden whole rather than parameterized, because the base
     draws ``ax.pie`` inline with no ``wedgeprops`` seam; a donut cannot be
     reached from the base as it stands. The base's ``_on_click`` (drill into
     Other / zoom out) is replaced by wedge selection, which is this ring's
@@ -793,6 +791,7 @@ class RingCanvas(charts.SlicesPieCanvas):
     _keys: dict = {}
     _labels: dict = {}
     _color_by_key: dict = {}
+    _unselectable: frozenset = frozenset()
     _selected = None
 
     def __init__(self, slices=(), parent=None, *, empty_text=RING_EMPTY_TEXT):
@@ -802,22 +801,30 @@ class RingCanvas(charts.SlicesPieCanvas):
         self.set_slices(slices)
 
     # -- state ------------------------------------------------------------
-    def set_slices(self, slices, colors=None) -> None:
+    def set_slices(self, slices, colors=None, unselectable=()) -> None:
         """Replace what the ring is a picture of. A selection that survives the
         new slice set is kept, so a refresh does not silently drop the filter.
 
         ``colors`` overrides the palette for keys it names. Asset-class mode
         passes the Asset Allocation report's map, so a class is the same hue in
         both pictures; every other mode leaves it None and keys are colored by
-        :func:`ring_colors` as before."""
+        :func:`ring_colors` as before.
+
+        ``unselectable`` names keys that are drawn but cannot become a
+        selection -- the hypothetical Roth wedge, which stands for money the
+        plan projects rather than an account anything can be filtered to. The
+        guard lives in :meth:`pick`, the one gate both a click and the page's
+        programmatic selection pass through."""
         rows = [(str(k), str(lab), int(c)) for k, lab, c in slices if int(c) > 0]
         self._keys = {lab: k for k, lab, _ in rows}
         self._labels = {k: lab for k, lab, _ in rows}
         self._color_by_key = ring_colors([k for k, _, _ in rows])
+        self._unselectable = frozenset(str(k) for k in unselectable)
         if colors:
             self._color_by_key.update(
                 {str(k): v for k, v in colors.items() if str(k) in self._labels})
-        if self._selected is not None and self._selected not in self._labels:
+        if self._selected is not None and (self._selected not in self._labels
+                                           or self._selected in self._unselectable):
             self._selected = None
         self._base = [(lab, c) for _, lab, c in rows]
         self._stack = []
@@ -856,8 +863,12 @@ class RingCanvas(charts.SlicesPieCanvas):
     def pick(self, key) -> None:
         """Select ``key``; selecting the current selection (or ``None``, which
         is what a click on the ring's background gives) clears back to the
-        whole portfolio. Emits :attr:`sliceClicked` either way."""
+        whole portfolio. An unselectable key clears too, rather than being
+        ignored, so a click on it reads as "show me everything" instead of as a
+        dead wedge. Emits :attr:`sliceClicked` either way."""
         key = None if key is None else str(key)
+        if key in self._unselectable:
+            key = None
         new = None if key is None or key == self._selected else key
         self._selected = new
         self.render()
@@ -1479,51 +1490,6 @@ class RingArea(QWidget):
 # ---------------------------------------------------------------------------
 # the inflow arrows (design section 3)
 # ---------------------------------------------------------------------------
-@dataclass
-class InflowArrow:
-    """One qualifying account's trailing-year inflows."""
-    account_id: int
-    name: str
-    count: int
-    total: int                          # cents, the SUM of the year's inflows
-
-
-def inflow_arrows(conn, as_of: Optional[str] = None, *, account_ids=None,
-                  min_inflows: int = ARROW_MIN_INFLOWS,
-                  window_days: int = INFLOW_WINDOW_DAYS) -> list:
-    """Every investment account with at least ``min_inflows`` positive external
-    flows in the trailing window, with the plain sum of those flows.
-
-    ``account_ids`` narrows it to the page's account scope (the gear); ``None``
-    means every investment account, as it does everywhere else on this page.
-
-    Deliberately a count, not a cadence fit: the design threw the interval
-    grid away because biweekly and semimonthly intervals overlap while their
-    counts (26 vs 24) do not, and the dashboard needs neither. Nothing here is
-    annualized -- eight months of contributions say eight months' worth."""
-    end = as_of or _today()
-    start = (_dt.date.fromisoformat(end)
-             - _dt.timedelta(days=window_days - 1)).isoformat()
-    out = []
-    # A deposit is NEW money: a transfer from another of the user's investment
-    # accounts (a sweep from the brokerage into the IRA, shares moved between
-    # custodians) has not entered the portfolio, and counting it here made
-    # the receiving account's arrow - and the portfolio's summed contribution
-    # - project money that was only moving around (reported by audit).
-    internal = portfolio.investment_like_ids(conn)
-    moves = portfolio.share_move_details(conn)      # one scan, not one per account
-    for account_id in (_account_ids(conn) if account_ids is None
-                       else list(account_ids)):
-        flows = [c for _, c, counter in portfolio.external_flows(
-                     conn, account_id, start, end, moves=moves, detailed=True)
-                 if c > 0 and counter not in internal]
-        if len(flows) >= min_inflows:
-            row = conn.execute("SELECT name FROM accounts WHERE id=?",
-                               (account_id,)).fetchone()
-            out.append(InflowArrow(account_id, (row["name"] if row else ""),
-                                   len(flows), sum(flows)))
-    out.sort(key=lambda a: (-a.total, a.name))
-    return out
 
 
 #: The arrows are drawn per GROUP, not per account (reported: "consolidate
@@ -1566,6 +1532,12 @@ class ArrowGroup:
     draws: tuple = ()                   # (year, cents out) from the plan
     planned: tuple = ()                 # (year, cents) planned contributions
     planned_members: list = field(default_factory=list)   # accounts in ``planned``
+    #: The ring nodes the planned conversions land on -- a real Roth of the same
+    #: owner where there is one, else the hypothetical Roth's own wedge. Without
+    #: it a Roth whose only inflow is a conversion had no account at all, and
+    #: the arrow borrowed the unmatched gray and pointed at bare ring
+    #: (reported).
+    conversion_members: list = field(default_factory=list)
 
     def shown(self) -> int:
         """The inscribed figure: the measured inflow, else the first planned
@@ -1584,12 +1556,16 @@ class ArrowGroup:
 
     def first_account(self) -> int:
         """The account whose ring color the arrow borrows: the largest measured
-        member, else the first planned one, else none (-1)."""
+        member, else the first planned one, else the first conversion target,
+        else none (0 - no account has that id, and a negative sentinel would
+        collide with a planned account's key)."""
         if self.members:
             return int(self.members[0])
         if self.planned_members:
             return int(self.planned_members[0])
-        return -1
+        if self.conversion_members:
+            return int(self.conversion_members[0])
+        return 0
 
 
 def arrow_group_tooltip(group: ArrowGroup, retirement_on: bool) -> str:
@@ -1818,8 +1794,8 @@ def outflow_arrows(conn, year: Optional[int] = None, *,
     not (its ``outflow_cents`` is zero, and drawing an outflow arrow on the Roth
     side of a conversion would state the opposite of what the plan says). The
     scope is :func:`plan_scope_ids`: what the fan draws from, and nothing else.
-    A planned Roth's draws count - its arrow is the Roth GROUP's, so it needs
-    no wedge of its own.
+    A planned Roth's draws count - its arrow is the Roth GROUP's, drawn beside
+    whichever node receives that money (:func:`roth_ring_targets`).
 
     Only the one year is asked for, because only the one year is drawn. The
     projection behind the page reads the whole series instead - see
@@ -2539,41 +2515,7 @@ def class_series(conn, years: Optional[int] = DEFAULT_HISTORY_YEARS, *,
     return _trim_leading_zeros(out)
 
 
-def current_mix(conn, account_ids=None, as_of: Optional[str] = None, *,
-                symbol: Optional[str] = None,
-                asset_class: Optional[str] = None) -> dict:
-    """Today's actual asset-class weights for a scope, summing to 1.
-
-    Straight off ``portfolio.allocation().by_class`` -- the dashboard does not
-    classify anything itself. An empty or unpriced scope is all cash, which is
-    ladder level 0 and the honest answer for "no risk taken yet".
-
-    ``symbol`` narrows to ONE security, whose mix is its own: its stated mixture,
-    or its single class, or unclassified. Reported: selecting a security wedge
-    left the thermometer where the whole portfolio's mix had put it, because the
-    scope was expressed as account ids and a security is not one -- so a bond
-    fund and an equity fund in the same account measured identically. A security
-    HAS a mix; there is no reason to answer with its account's.
-
-    ``asset_class`` narrows to a class, which is all of itself by definition.
-    """
-    end = as_of or _today()
-    if asset_class:
-        return forecast.normalize_weights({asset_class: 1.0})
-    if symbol:
-        mix = security_mix.get_mixture(conn, symbol)
-        if mix:
-            return forecast.normalize_weights(
-                {cls: float(pct) for cls, pct in mix.items()})
-        row = portfolio.get_security(conn, symbol)
-        cls = (row["asset_class"] if row is not None else None) or "unclassified"
-        return forecast.normalize_weights({cls: 1.0})
-    ids = list(_account_ids(conn) if account_ids is None else account_ids)
-    alloc = portfolio.allocation(conn, account_ids=ids, as_of=end)
-    weights = {s.key: float(s.value) for s in alloc.by_class if s.value > 0}
-    if not weights:
-        return forecast.normalize_weights({"cash": 1.0})
-    return forecast.normalize_weights(weights)
+from mammon.portfolio import current_mix  # noqa: E402,F401 - re-exported
 
 
 def current_risk(conn, account_ids=None, as_of: Optional[str] = None, *,
@@ -3942,8 +3884,106 @@ class CornerButton(QPushButton):
                               rule_h))
 
 
+#: The muted swatch a hypothetical (planned) Roth wedge wears. Deliberately
+#: outside :func:`ring_colors`' palette: money the plan merely projects must not
+#: read as a funded account at a glance.
+PLANNED_WEDGE_COLOR = "#b4b8c4"
+
+
+def roth_ring_targets(conn, as_of: Optional[str] = None, *,
+                      account_ids=None) -> dict:
+    """``{planned Roth key: the ring node its conversions land on}``.
+
+    A conversion lands in a Roth of the same owner, and when the ledger holds
+    none the plan invents a hypothetical account for it
+    (``retirement.conversion_target``). That account has no balance, so the
+    ring drew no wedge for it and the Roth inflow arrow - which finds its node
+    by COLOR, through :meth:`RingCanvas.color_for` - matched nothing and
+    pointed at bare ring (reported).
+
+    Two readings close that, in the user's order of preference: attribute the
+    money to a REAL Roth the same owner already holds and the ring already
+    draws, else give the hypothetical account a wedge of its own
+    (:func:`planned_roth_slices`).
+
+    ONE mapping, read by :func:`ring_slices` to decide membership and by
+    ``InvestmentDashboardPage._add_plan_to_groups`` to decide attribution, so
+    an arrow cannot end anywhere the ring does not draw. It is pure in
+    ``(conn, as_of, account_ids)``, which is why the two callers agree without
+    sharing state.
+    """
+    end = as_of or _today()
+    ids = {int(a) for a in (_account_ids(conn) if account_ids is None
+                            else account_ids)}
+    out = {}
+    for planned in retirement.planned_accounts(conn):
+        key = int(planned.account_id)
+        out[key] = key
+        for real in retirement.owner_roth_accounts(conn, key):
+            # The substitute has to be an account the ring actually DRAWS, so
+            # the test here is ring_slices' own wedge test; anything looser
+            # would move the arrow onto an account with no wedge.
+            if int(real) in ids and portfolio.account_valuation(
+                    conn, int(real), end).total > 0:
+                out[key] = int(real)
+                break
+    return out
+
+
+def planned_roth_slices(conn, as_of: Optional[str] = None, *, account_ids=None,
+                        flows_by_year: Optional[dict] = None,
+                        targets: Optional[dict] = None) -> list:
+    """``[(key, label, cents)]``: a wedge per hypothetical Roth the plan
+    converts into and that no real Roth of the same owner stands in for.
+
+    Hypothetical money, and part of no valuation: nothing here comes from
+    ``portfolio``, nothing reaches a balance, net worth or a report, and the
+    wedge exists for exactly one reason - so the Roth inflow arrow ends on a
+    node. It is sized by the first planned conversion into it, which is the
+    figure the arrow inscribes (:meth:`ArrowGroup.shown`), so wedge and arrow
+    state one number; ``retirement.planned_account_name`` already names it
+    "... (planned)", and :data:`PLANNED_WEDGE_COLOR` keeps it visibly apart
+    from the funded accounts beside it.
+    """
+    end = as_of or _today()
+    year = int(str(end)[:4])
+    if targets is None:
+        targets = roth_ring_targets(conn, end, account_ids=account_ids)
+    flows_by_year = (plan_flows_by_year(conn, year) if flows_by_year is None
+                     else flows_by_year)
+    first: dict = {}
+    for flow_year in sorted(flows_by_year):
+        if flow_year < year:
+            continue
+        for account_id, flow in flows_by_year[flow_year].items():
+            cents = int(flow.conversion_in_cents)
+            if cents > 0:
+                first.setdefault(int(account_id), cents)
+    out = []
+    for planned in retirement.planned_accounts(conn):
+        key = int(planned.account_id)
+        if targets.get(key, key) != key:
+            continue            # a real Roth of the same owner is the node
+        cents = first.get(key, 0)
+        if cents > 0:
+            out.append((str(key), planned.name, cents))
+    return out
+
+
+def unselectable_keys(mode: str, slices) -> list:
+    """Which of ``slices``' keys may be drawn but not selected: the
+    hypothetical Roth wedges, which carry negative keys by the planned-account
+    convention (``retirement.is_planned``). Filtering the page to one would
+    ask every chart below for the holdings of an account that does not
+    exist."""
+    if mode != MODE_ACCOUNTS:
+        return []
+    return [k for k, _label, _cents in slices if int(k) < 0]
+
+
 def ring_slices(conn, mode: str, as_of: Optional[str] = None, *,
-                account_ids=None) -> list:
+                account_ids=None, plan: bool = False,
+                flows_by_year: Optional[dict] = None) -> list:
     """``[(key, label, cents)]`` for the ring in ``mode``.
 
     accounts: one slice per investment account, valued by
@@ -3959,7 +3999,14 @@ def ring_slices(conn, mode: str, as_of: Optional[str] = None, *,
     ``account_ids`` is the page's account scope (the gear); ``None`` means
     every investment account. It bounds BOTH modes -- narrowing the accounts
     narrows the securities the ring can show, because a security is only ever
-    held in an account."""
+    held in an account.
+
+    ``plan`` is the Retirement Plan toggle. With it on, accounts mode appends
+    a wedge for each hypothetical Roth the plan converts into
+    (:func:`planned_roth_slices`) -- the ONE place ring membership is decided,
+    including the nodes that are not accounts. ``flows_by_year`` is
+    :func:`plan_flows_by_year`, passed by the page so the plan is read once per
+    refresh."""
     if mode not in RING_MODES:
         raise ValueError(f"unknown ring mode {mode!r}; one of {RING_MODES}")
     end = as_of or _today()
@@ -3974,6 +4021,9 @@ def ring_slices(conn, mode: str, as_of: Optional[str] = None, *,
                                (account_id,)).fetchone()
             out.append((str(account_id), (row["name"] if row else str(account_id)),
                         total))
+        if plan:
+            out.extend(planned_roth_slices(conn, end, account_ids=ids,
+                                           flows_by_year=flows_by_year))
         return out
     alloc = portfolio.allocation(conn, account_ids=ids, as_of=end,
                                  scope="investments")
@@ -4022,6 +4072,9 @@ class InvestmentDashboardPage(QWidget):
         self._plan_flows: dict = {}
         self._plan_schedule: dict = {}
         self._plan_start_year: Optional[int] = None
+        #: ``roth_ring_targets`` for this refresh: where each hypothetical
+        #: Roth's conversions land, shared by the ring and the Roth arrow.
+        self._roth_targets: dict = {}
         # The gear's account selection; None means "every investment account",
         # the same contract ``ReportFilterBar.selected_account_ids`` uses. Set
         # before _build, which builds the gear and then refreshes on it.
@@ -4746,10 +4799,13 @@ class InvestmentDashboardPage(QWidget):
             self._plan_flows = {}
             self._plan_schedule = {}
             self._plan_start_year = None
+            self._roth_targets = {}
             return
-        from mammon.ui.retirement_planner import (planned_contributions,
-                                                  retirement_start_year)
+        from mammon.retirement_plan import (planned_contributions,
+                                            retirement_start_year)
         self._plan_flows = plan_flows_by_year(self.conn, self.plan_year())
+        self._roth_targets = roth_ring_targets(self.conn, self.as_of,
+                                               account_ids=self.account_scope())
         self._plan_start_year = retirement_start_year(self.conn)
         self._plan_schedule = planned_contributions(
             self.conn, _dt.date.fromisoformat(str(self.as_of)[:10]),
@@ -4762,9 +4818,12 @@ class InvestmentDashboardPage(QWidget):
 
     def refresh(self) -> None:
         self._read_plan()
-        self.ring.set_slices(ring_slices(self.conn, self._mode, self.as_of,
-                                         account_ids=self.account_scope()),
-                             colors=self._ring_palette())
+        slices = ring_slices(self.conn, self._mode, self.as_of,
+                             account_ids=self.account_scope(),
+                             plan=self._retirement_on,
+                             flows_by_year=self._plan_flows)
+        self.ring.set_slices(slices, colors=self._ring_palette(),
+                             unselectable=unselectable_keys(self._mode, slices))
         filter_changed = self._sync_filter_to_ring()
         # The ring's mask depends on whether it drew any wedges at all, so it is
         # recomputed whenever the slices change -- not just on resize.
@@ -4782,8 +4841,15 @@ class InvestmentDashboardPage(QWidget):
             self.filterChanged.emit(self._filter)
 
     def _ring_palette(self):
-        """The class palette in asset-class mode, else None (keys are colored by
-        identity). Imported lazily: the report imports this module back."""
+        """The class palette in asset-class mode; in accounts mode the muted
+        swatch for a hypothetical Roth wedge, so projected money does not read
+        as a funded account; else None (keys are colored by identity).
+        Imported lazily: the report imports this module back."""
+        if self._mode == MODE_ACCOUNTS:
+            # Keys absent from the slice set are ignored by set_slices, so the
+            # planned Roths that a real account stands in for cost nothing.
+            return {str(k): PLANNED_WEDGE_COLOR
+                    for k in self._roth_targets} or None
         if self._mode != MODE_CLASSES:
             return None
         from mammon.ui.asset_allocation import class_colors, unclassified_color
@@ -4912,21 +4978,33 @@ class InvestmentDashboardPage(QWidget):
                     rows.append((year, cents))
             groups[key].planned = tuple(rows)
             groups[key].planned_members = members
-        ins, outs = [], []
+        ins, outs, landing = [], [], []
         for year in sorted(self._plan_flows):
             if year < start:
                 continue
-            flows = self._plan_flows[year]
-            cin = sum(int(f.conversion_in_cents) for aid, f in flows.items()
-                      if group_of.get(int(aid)) == "roth" and int(aid) in scope)
-            cout = sum(int(f.distribution_cents) for aid, f in flows.items()
-                       if group_of.get(int(aid)) == "roth" and int(aid) in scope)
+            cin = cout = 0
+            for aid, flow in self._plan_flows[year].items():
+                aid = int(aid)
+                if group_of.get(aid) != "roth" or aid not in scope:
+                    continue
+                cin += int(flow.conversion_in_cents)
+                cout += int(flow.distribution_cents)
+                if flow.conversion_in_cents:
+                    # Which NODE receives this: the account itself when the
+                    # ring draws one for it, else the real Roth standing in for
+                    # a hypothetical account (roth_ring_targets). Recorded so
+                    # the arrow can borrow that wedge's color instead of the
+                    # unmatched gray.
+                    node = int(self._roth_targets.get(aid, aid))
+                    if node not in landing:
+                        landing.append(node)
             if cin:
                 ins.append((year, cin))
             if cout:
                 outs.append((year, cout))
         groups["roth"].conversions = tuple(ins)
         groups["roth"].draws = tuple(outs)
+        groups["roth"].conversion_members = landing
 
     def _grouped_outflows(self, arrows: list) -> list:
         """The outflow arrows merged by group, schedules summed by year."""
@@ -5119,6 +5197,14 @@ class InvestmentDashboardPage(QWidget):
             # wedge, but money converted into it has not left the portfolio:
             # counted here, a conversion into one nets to zero like any other.
             scope |= {aid for aid in self._group_of if retirement.is_planned(aid)}
+        else:
+            # A selected real Roth also carries the planned Roths the ring
+            # attributes to it (roth_ring_targets): the Roth arrow points at
+            # that wedge, so selecting it must project the conversions the
+            # arrow states. Keyed by the planned account, they were filtered
+            # out and the selected Roth's fan grew by none of them (reported).
+            scope |= {int(key) for key, node in self._roth_targets.items()
+                      if int(node) in scope}
         start = self.plan_year()
         out = []
         for offset in range(int(years)):
@@ -5228,7 +5314,7 @@ class InvestmentDashboardPage(QWidget):
         plan"). Off, the entry goes."""
         years = None
         if self._retirement_on:
-            from mammon.ui.retirement_planner import plan_last_year
+            from mammon.retirement_plan import plan_last_year
             last = plan_last_year(self.conn, _dt.date.fromisoformat(str(self.as_of)[:10]))
             if last is not None and last >= self.plan_year():
                 years = last - self.plan_year() + 1

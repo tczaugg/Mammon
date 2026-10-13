@@ -48,7 +48,6 @@ import csv
 import datetime as _dt
 import json
 import re
-import sqlite3
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Optional

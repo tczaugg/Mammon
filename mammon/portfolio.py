@@ -1017,7 +1017,7 @@ def allocation(conn, account_ids: Optional[Iterable[int]] = None,
         # engine on a wallet reported instead.
         v = account_valuation(conn, aid, as_of, prices,
                               money_market_as_cash=money_market_as_cash)
-        # Option contracts come OUT before anything is totalled (SRD 5.8e-9).
+        # Option contracts come OUT before anything is totaled (SRD 5.8e-9).
         # An allocation answers "how much of what do I own", and a contract has
         # no honest answer: counting one as 100 shares of the underlying
         # overstates equity by the notional the premium did not buy, and
@@ -1210,3 +1210,109 @@ def price_freshness(conn, symbols: Iterable[str], as_of: Optional[str] = None) -
     return sorted(out, key=lambda f: (f.latest is not None,
                                       -(f.days if f.days is not None else 0),
                                       f.symbol))
+
+
+# ---------------------------------------------------------------------------
+# trailing-year inflows (the dashboard's arrows, the plan's contributions)
+# ---------------------------------------------------------------------------
+#: Inflows in the trailing year at or above this count make an account
+#: "regular" and give it an arrow (Investment Dashboard design section 3). Four
+#: catches quarterly and everything denser, and rejects a one-off rollover.
+ARROW_MIN_INFLOWS = 4
+INFLOW_WINDOW_DAYS = 365
+
+
+@dataclass
+class InflowArrow:
+    """One qualifying account's trailing-year inflows."""
+    account_id: int
+    name: str
+    count: int
+    total: int                          # cents, the SUM of the year's inflows
+
+
+def inflow_arrows(conn, as_of: Optional[str] = None, *, account_ids=None,
+                  min_inflows: int = ARROW_MIN_INFLOWS,
+                  window_days: int = INFLOW_WINDOW_DAYS) -> list:
+    """Every investment account with at least ``min_inflows`` positive external
+    flows in the trailing window, with the plain sum of those flows.
+
+    ``account_ids`` narrows it to the page's account scope (the gear); ``None``
+    means every investment account, as it does everywhere else on this page.
+
+    Deliberately a count, not a cadence fit: the design threw the interval
+    grid away because biweekly and semimonthly intervals overlap while their
+    counts (26 vs 24) do not, and the dashboard needs neither. Nothing here is
+    annualized -- eight months of contributions say eight months' worth."""
+    end = as_of or _dt.date.today().isoformat()
+    start = (_dt.date.fromisoformat(end)
+             - _dt.timedelta(days=window_days - 1)).isoformat()
+    out = []
+    # A deposit is NEW money: a transfer from another of the user's investment
+    # accounts (a sweep from the brokerage into the IRA, shares moved between
+    # custodians) has not entered the portfolio, and counting it here made
+    # the receiving account's arrow - and the portfolio's summed contribution
+    # - project money that was only moving around (reported by audit).
+    internal = investment_like_ids(conn)
+    moves = share_move_details(conn)      # one scan, not one per account
+    for account_id in (scope_account_ids(conn, "investments")
+                       if account_ids is None
+                       else list(account_ids)):
+        flows = [c for _, c, counter in external_flows(
+                     conn, account_id, start, end, moves=moves, detailed=True)
+                 if c > 0 and counter not in internal]
+        if len(flows) >= min_inflows:
+            row = conn.execute("SELECT name FROM accounts WHERE id=?",
+                               (account_id,)).fetchone()
+            out.append(InflowArrow(account_id, (row["name"] if row else ""),
+                                   len(flows), sum(flows)))
+    out.sort(key=lambda a: (-a.total, a.name))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# a scope's mix today (the dashboard's thermometer, the plan's projection)
+# ---------------------------------------------------------------------------
+def current_mix(conn, account_ids=None, as_of: Optional[str] = None, *,
+                symbol: Optional[str] = None,
+                asset_class: Optional[str] = None) -> dict:
+    """Today's actual asset-class weights for a scope, summing to 1.
+
+    The Investment Dashboard's thermometer and the retirement plan's
+    projection both read it, so a holding is classified once.
+
+    Straight off ``allocation().by_class`` -- the dashboard does not
+    classify anything itself. An empty or unpriced scope is all cash, which is
+    ladder level 0 and the honest answer for "no risk taken yet".
+
+    ``symbol`` narrows to ONE security, whose mix is its own: its stated mixture,
+    or its single class, or unclassified. Reported: selecting a security wedge
+    left the thermometer where the whole portfolio's mix had put it, because the
+    scope was expressed as account ids and a security is not one -- so a bond
+    fund and an equity fund in the same account measured identically. A security
+    HAS a mix; there is no reason to answer with its account's.
+
+    ``asset_class`` narrows to a class, which is all of itself by definition.
+    """
+    # Imported here: forecast imports this module, and stays free of
+    # connections (test_forecast pins that), so the read lives on this side.
+    from mammon import forecast
+
+    end = as_of or _dt.date.today().isoformat()
+    if asset_class:
+        return forecast.normalize_weights({asset_class: 1.0})
+    if symbol:
+        mix = security_mix.get_mixture(conn, symbol)
+        if mix:
+            return forecast.normalize_weights(
+                {cls: float(pct) for cls, pct in mix.items()})
+        row = get_security(conn, symbol)
+        cls = (row["asset_class"] if row is not None else None) or "unclassified"
+        return forecast.normalize_weights({cls: 1.0})
+    ids = list(scope_account_ids(conn, "investments")
+               if account_ids is None else account_ids)
+    alloc = allocation(conn, account_ids=ids, as_of=end)
+    weights = {s.key: float(s.value) for s in alloc.by_class if s.value > 0}
+    if not weights:
+        return forecast.normalize_weights({"cash": 1.0})
+    return forecast.normalize_weights(weights)

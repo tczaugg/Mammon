@@ -26,7 +26,7 @@ set "INSTALL_DIR=%~f2"
 set "QUIET="
 if /i "%~3"=="/quiet" set "QUIET=1"
 
-rem (No echo of a path inside a parenthesised block anywhere below: a path
+rem (No echo of a path inside a parenthesized block anywhere below: a path
 rem containing ")" would end the block early.)
 if exist "%INSTALL_DIR%\mammon-install.json" goto :installed
 echo %INSTALL_DIR% is not a Mammon installation. Nothing was removed.

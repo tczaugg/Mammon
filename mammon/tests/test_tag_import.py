@@ -128,7 +128,7 @@ def test_the_echoed_l_tag_does_not_tag_the_whole_split(conn):
 
 def test_an_untagged_leg_stays_untagged(conn):
     """A split may be partly tagged; the untagged legs must not inherit a
-    neighbour's tag, or untagged money disappears into a project."""
+    neighbor's tag, or untagged money disappears into a project."""
     _import(conn, "!Type:Bank\nD2/20'18\nT-300.00\nPMixed\n"
                   "SBusiness:Consulting/Project A\n$-100.00\n"
                   "SOffice\n$-200.00\n^\n")

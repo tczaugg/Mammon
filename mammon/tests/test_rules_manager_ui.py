@@ -122,14 +122,6 @@ def test_forget_asks_first(qapp, conn, book, monkeypatch):
     dlg.deleteLater()
 
 
-def test_a_forgotten_payee_stays_forgotten_through_a_rebuild(conn, book):
-    """The explicit seed-from-history rebuild must not bring back what the
-    user told Mammon to forget."""
-    category_tree.forget_payee(conn, "Costco")
-    category_tree.bootstrap(conn)
-    assert category_tree.known_categories(conn, "Costco") == []
-
-
 def test_label_text(conn, book):
     assert label_text(conn, book["fuel"]) == "Auto:Fuel"
     assert label_text(conn, category_tree.account_label(book["card"])) == "[Store Card]"

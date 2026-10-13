@@ -1178,16 +1178,6 @@ class ClassDrift:
         return "buy" if self.move_cents > 0 else "sell"
 
 
-#: How each :attr:`ClassDrift.action` reads to a person. Here rather than in a
-#: UI because two surfaces render it -- the Target & Drift dialog and the
-#: Investment Center's card, which was showing the raw lowercase verb -- and a
-#: word this easy to misread should be defined once.
-ACTION_LABELS = {
-    "buy": "Buy", "sell": "Sell",
-    "spend": "Spend", "raise": "Raise",
-    "hold": "Hold", "classify": "Classify",
-}
-
 #: Why the cash row's verb is not the others'. Shown as a tooltip beside it:
 #: the figure is right but its DIRECTION is the thing a reader has to get, and
 #: the cell has room for a word, not a sentence.
@@ -1197,12 +1187,6 @@ CASH_ACTION_NOTE = {
     "raise": ("You hold less cash than the target. It is raised by the sells "
               "above -- cash is never sold, only produced."),
 }
-
-
-def action_label(action: str) -> str:
-    """The human verb for a drift action. Unknown actions pass through
-    capitalized rather than raising: a label is not worth a crash."""
-    return ACTION_LABELS.get(action, (action or "").capitalize())
 
 
 @dataclass

@@ -26,9 +26,9 @@ import datetime as _dt
 import re
 import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Callable, Iterable, Optional
+from typing import Callable, Optional
 
-from mammon import (budgets, category_types, crypto, db, investments, ledger,
+from mammon import (budgets, category_types, crypto, investments, ledger,
                     loans, portfolio, rebalance, retirement, scheduled,
                     security_mix)
 from mammon.reports import balances as _balances
@@ -575,6 +575,424 @@ def loan(conn, account, upcoming_payments: int = 3) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# the retirement plan (SRD 5.8o): its inputs, its projection, what it sustains
+# ---------------------------------------------------------------------------
+# The projection is the Retirement Planner page's own engine
+# (mammon/retirement_plan.py), built with no widget, so a model reads the same
+# years the page draws. What-if parameters re-plan in memory and write nothing;
+# the connection is query_only regardless. Names, relationships and birth
+# month/year cross; the health columns on `people` never do (retirement.
+# HEALTH_COLUMNS, denied below and in the SQL tool alike).
+
+def _pct(value) -> Optional[str]:
+    return None if value is None else str(value)
+
+
+def _plan_people(conn) -> list:
+    """Everyone on file, their plain columns only - never a health column."""
+    out = []
+    for p in retirement.list_people(conn):
+        out.append({k: p[k] for k in retirement.PEOPLE_PLAIN_COLUMNS
+                    if k in p.keys() and k not in retirement.HEALTH_COLUMNS})
+    return out
+
+
+def _months_text(months) -> Optional[str]:
+    if months is None:
+        return None
+    years, rest = divmod(int(months), 12)
+    return f"{years}" if not rest else f"{years} and {rest} months"
+
+
+def _bracket_arg(ira_bracket) -> Optional[str]:
+    if ira_bracket in (None, ""):
+        return None
+    rate = str(ira_bracket).strip().rstrip("%")
+    if retirement.bracket_top_cents(rate, "single") is None:
+        rates = [str(b.rate_percent) for b in retirement.tax_brackets("single")][:-1]
+        raise ValueError(f"ira_bracket must be a bracket with a top, one of {rates}; "
+                         f"got {ira_bracket!r}")
+    return rate
+
+
+def _terminal_age_arg(terminal_age) -> Optional[int]:
+    if terminal_age is None:
+        return None
+    from mammon import retirement_plan as rplan
+    age = int(terminal_age)
+    if not rplan.MIN_TERMINAL_AGE <= age <= rplan.MAX_TERMINAL_AGE:
+        raise ValueError(f"terminal_age must be {rplan.MIN_TERMINAL_AGE}.."
+                         f"{rplan.MAX_TERMINAL_AGE}, got {age}")
+    return age
+
+
+def retirement_plan(conn) -> dict:
+    """The retirement plan's INPUTS: the household (names, relationships,
+    birth year/month, Social Security claim age and the monthly benefit it
+    pays in today's dollars), the accounts the plan spends from with today's
+    balances, the other income sources, the stored spending plan, the Roth
+    conversions on file, and every setting the projection runs on. No
+    projection here -- see `retirement_projection`."""
+    from mammon import retirement_plan as rplan
+    today = _dt.date.today()
+    people = _plan_people(conn)
+    planning = rplan.planning_people(conn)
+    records = rplan.benefit_records(conn, planning) if planning else {}
+    names = {int(p["id"]): p.get("name") for p in people}
+    out_people = []
+    for p in people:
+        rec = records.get(int(p["id"]))
+        born = p.get("birth_year")
+        claim = rplan.claim_age_months(p) if born else None
+        out_people.append({
+            "id": int(p["id"]), "name": p.get("name"),
+            "relationship": p.get("relationship"),
+            "birth_year": born, "birth_month": p.get("birth_month"),
+            "age_this_year": (today.year - int(born)) if born else None,
+            "planned_claim_age": _months_text(claim),
+            "full_retirement_age": (_months_text(retirement.full_retirement_age_months(int(born)))
+                                    if born else None),
+            "monthly_benefit_at_claim": dollars(rec.own_monthly_cents) if rec else None,
+            "spousal_monthly_benefit": (dollars(rec.spousal_monthly_cents)
+                                        if rec and rec.spousal_monthly_cents else None),
+            "medicare_part_d": None if p.get("part_d") is None else bool(p.get("part_d")),
+            "social_security_statement_date": p.get("ss_statement_date"),
+        })
+    exempt = retirement.spending_exempt_ids(conn)
+    accounts = []
+    for a in retirement.spending_accounts(conn):
+        accounts.append({
+            "id": int(a.account_id), "name": a.name,
+            "treatment": "taxable" if a.is_taxable else a.treatment,
+            "owner": names.get(a.owner_person_id) if a.owner_person_id else None,
+            "balance": dollars(0 if a.planned else rplan.account_value_cents(conn, a.account_id)),
+            "planned_roth_not_yet_opened": bool(a.planned),
+            "current_employer_plan": bool(a.current_employer_plan),
+            "is_ira": bool(a.is_ira),
+            "after_tax_basis": dollars(a.after_tax_basis_cents) if a.after_tax_basis_cents else None,
+            "inherited_death_year": a.inherited_death_year,
+            "never_drawn_for_spending": int(a.account_id) in exempt,
+        })
+    sources = [{"name": s.name, "kind": s.kind, "amount_per_year": dollars(s.amount_cents),
+                "start_year": s.start_year, "end_year": s.end_year,
+                "change_pct_per_year": _pct(s.change_pct), "taxable": bool(s.taxable),
+                "person": names.get(s.person_id) if s.person_id else None,
+                "deferral_pct": _pct(s.deferral_pct) if s.kind == "salary" else None,
+                "employer_match_pct": _pct(s.match_pct) if s.kind == "salary" else None,
+                "qualified_dividends_or_ltcg": bool(s.preferential),
+                "survivor_pct": _pct(s.survivor_pct) if s.kind == "pension" else None}
+               for s in retirement.list_income_sources(conn)]
+    params = retirement.get_withdrawal_plan(conn)
+    scenario = retirement.get_survivor_scenario(conn)
+    shortfall = retirement.get_ss_shortfall(conn)
+    mix = retirement.get_plan_mix(conn)
+    acct_names = {a["id"]: a["name"] for a in accounts}
+
+    def acct_name(aid):
+        aid = int(aid)
+        if aid in acct_names:
+            return acct_names[aid]
+        row = ledger.get_account(conn, aid) if aid > 0 else None
+        return row["name"] if row else f"planned Roth {aid}"
+
+    return {
+        "today": today.isoformat(),
+        "plan_through_age": retirement.get_plan_through_age(conn),
+        "filing_status": rplan.default_filing_status(conn),
+        "people": out_people,
+        "accounts": accounts,
+        "income_sources": sources,
+        "spending_plan": {
+            "set": params.is_set,
+            "yearly_spending": dollars(params.start_cents) if params.is_set else None,
+            "increase_pct_per_year": _pct(params.increase_pct) if params.is_set else None,
+            "start_year": params.start_year,
+            "ira_draws_capped_at_bracket": params.bracket_rate,
+        },
+        "roth_conversions": [{"year": int(r["year"]), "from": acct_name(r["from_account_id"]),
+                              "to": acct_name(r["to_account_id"]),
+                              "amount": dollars(r["amount_cents"])}
+                             for r in retirement.list_conversions(conn)],
+        "settings": {
+            "spending_order_after_minimums": list(retirement.get_spending_order(conn)),
+            "tax_paid_from": retirement.get_tax_paid_from(conn),
+            "bracket_index_pct": _pct(retirement.get_bracket_index_pct(conn)),
+            "social_security_cola_pct": _pct(retirement.get_cola_pct(conn)),
+            "social_security_shortfall": {"from_year": shortfall.year,
+                                          "payable_pct": _pct(shortfall.payable_pct)},
+            "state_tax_pct": _pct(retirement.get_state_tax_pct(conn)),
+            "state_taxes_social_security": retirement.get_state_taxes_ss(conn),
+            "state_excludes_retirement_income": retirement.get_state_excludes_retirement(conn),
+            "medicare_growth_pct": _pct(retirement.get_medicare_growth_pct(conn)),
+            "ssa44_appeal": retirement.get_ssa44_appeal(conn),
+            "aca_benchmark_premium": dollars(retirement.get_aca_benchmark_cents(conn)),
+            "defer_first_rmd_to_april": retirement.get_defer_first_rmd(conn),
+            "community_property_state": retirement.get_community_property(conn),
+            "end_of_plan_ira_tax_pct": _pct(retirement.get_end_ira_tax_pct(conn)),
+            "projection_mix": (None if mix is None else
+                               dict(zip(("stocks_pct", "bonds_pct", "cash_pct"),
+                                        (str(v) for v in mix)))),
+            "survivor_scenario": (None if scenario is None else {
+                "deceased": names.get(scenario.deceased_id),
+                "death_year": scenario.death_year,
+                "survivor_spending_pct": _pct(scenario.spending_pct),
+                "pension_survivor_pct": _pct(scenario.pension_pct)}),
+        },
+    }
+
+
+def retirement_projection(conn, terminal_age: Optional[int] = None,
+                          yearly_spending: Optional[str] = None,
+                          increase_pct: Optional[str] = None,
+                          start_year: Optional[int] = None,
+                          ira_bracket: Optional[str] = None,
+                          by_account: bool = False) -> dict:
+    """The retirement plan year by year, as the Retirement Planner page
+    projects it: each year's Social Security and other income, the spending
+    the accounts must fund (plus the income tax and Medicare IRMAA / ACA cost
+    that drawing it causes), what the pool can actually supply, the draws by
+    account kind (IRA/401(k), taxable brokerage, Roth), the required minimum,
+    the Roth conversions on file, and the invested pool entering each year
+    (the median of the projection). `summary.runs_out_year` is the year the
+    money runs out, or null if it lasts through `terminal_age` (default: the
+    age stored in the planner).
+
+    Two tax figures, both true: `income_tax` is the year's WHOLE income tax
+    (federal, state, and the 10% on early withdrawals) -- the planner page's
+    own figure: `summary.total_income_tax_in_todays_dollars` is the page's
+    "Federal tax" plus "State tax" (its figures row is in today's dollars),
+    and `total_income_tax` the same in each year's dollars.
+    `summary.stored_withdrawals_out_of_date_from` is the first year whose
+    stored withdrawals no longer match the plan computed from today's ledger
+    (the planner flags this; re-applying the plan in Mammon updates them), or
+    null. `tax_paid_from_accounts` is what the plan
+    draws from the accounts to pay tax: before the plan's start year only the
+    tax a Roth conversion adds (the paycheck pays the rest), the whole year's
+    from then on.
+
+    With no other arguments it projects the STORED spending plan. Giving
+    `yearly_spending` (and optionally `increase_pct`, `start_year` -- the year
+    spending starts, i.e. retirement -- and `ira_bracket`, e.g. "22", which
+    caps IRA draws at that bracket's top and lets Roth pay the rest) runs a
+    WHAT-IF instead: the same projection with those values, saved nowhere.
+    Unspecified what-if values default to the stored plan's. `by_account`
+    adds each account's draw and entering balance per year."""
+    from mammon import retirement_plan as rplan
+    age = _terminal_age_arg(terminal_age)
+    bracket = _bracket_arg(ira_bracket)
+    stored = retirement.get_withdrawal_plan(conn)
+    what_if = any(v not in (None, "") for v in (yearly_spending, increase_pct,
+                                                start_year, ira_bracket))
+    with rplan.inflows_measured_once():
+        planner = rplan.HouseholdPlanner(conn, terminal_age=age)
+        years_shown = list(planner._years)
+        people = rplan.planning_people(conn)
+        accounts = planner.accounts()
+        kind = {a.account_id: ("taxable" if a.is_taxable else a.treatment) for a in accounts}
+        name = {a.account_id: a.name for a in accounts}
+        out = {"today": planner._today.isoformat(), "terminal_age": planner.terminal_age,
+               "filing_status": planner.filing_status,
+               "basis": "what-if (nothing saved)" if what_if else "stored plan",
+               "money": "nominal dollars of each year"}
+        if not years_shown:
+            out.update(summary=None, years=[],
+                       note="nobody on file has a birth year, so there is no plan "
+                            "horizon - add the household in the planner's Social "
+                            "Security dialog")
+            return out
+
+        if what_if:
+            spend = cents_of(yearly_spending) if yearly_spending not in (None, "") \
+                else (stored.start_cents if stored.is_set else None)
+            if not spend or spend <= 0:
+                raise ValueError("a what-if needs yearly_spending (no spending plan is stored)")
+            pct = Decimal(str(increase_pct)) if increase_pct not in (None, "") \
+                else stored.increase_pct
+            first = int(start_year) if start_year not in (None, "") else stored.start_year
+            rate = bracket if ira_bracket not in (None, "") else stored.bracket_rate
+        elif stored.is_set:
+            spend, pct, first, rate = (stored.start_cents, stored.increase_pct,
+                                       stored.start_year, stored.bracket_rate)
+        else:
+            spend = None
+
+        born = min((int(p["birth_year"]) for p in rplan.horizon_people(conn)), default=None)
+        ages_of = [(p.get("name") or p.get("relationship"), int(p["birth_year"]))
+                   for p in people if p.get("birth_year")]
+
+        def ages(year):
+            return {n: year - b for n, b in ages_of}
+
+        def conversions_in(year):
+            return sum(int(f.conversion_out_cents)
+                       for aid, f in planner.flows_for(year).items()
+                       if kind.get(aid) == "deferred")
+
+        def whole_year_taxes(bars, plan):
+            # The page's own figure (retirement_plan.PlanTaxes): each year's
+            # whole income tax, and its total nominal and in today's dollars.
+            taxes = rplan.PlanTaxes(conn, bars, plan, planner.filing_status, planner)
+            total, today_total = taxes.tax_totals(planner._today.year)
+            return taxes.tax_by_year(), total, today_total
+
+        if spend is None:
+            # No household spending plan: the stored per-account withdrawals
+            # (the required minimums the page seeds, and any typed by hand).
+            rows = rplan.income_rows(conn, terminal_age=planner.terminal_age,
+                                     today=planner._today)
+            by_year, total, today_total = whole_year_taxes(rows, None)
+            out["note"] = ("no household spending plan is stored, so this is the "
+                           "per-account withdrawals on file (at least the required "
+                           "minimums) - pass yearly_spending for a what-if")
+            out["summary"] = {"total_income_tax": dollars(total),
+                              "total_income_tax_in_todays_dollars": dollars(today_total)}
+            out["years"] = [{"year": r.year, "ages": ages(r.year),
+                             "social_security": dollars(r.social_security_cents),
+                             "other_income": dollars(r.other_income_cents),
+                             "ira_draws": dollars(r.deferred_draw_cents),
+                             "taxable_account_draws": dollars(r.taxable_draw_cents),
+                             "roth_draws": dollars(r.roth_draw_cents),
+                             "roth_conversions": dollars(r.conversion_cents),
+                             "income_tax": dollars(by_year.get(r.year, 0)),
+                             "pool_value": dollars(r.fund_value_cents)}
+                            for r in rows]
+            return out
+
+        plan = planner.plan_for(spend, pct, start_year=first, bracket_rate=rate)
+        covered, _room = planner.household_income(planner.apply_years(), accounts, None)
+        first_year = int(first) if first is not None else years_shown[0]
+        scenario = retirement.get_survivor_scenario(conn)
+        shown = set(years_shown)
+        if what_if:
+            # The bars a what-if would draw, from its own plan: the stored ones
+            # are the stored plan's withdrawals.
+            sources = retirement.plan_income_sources(conn)
+            bars = []
+            for e in plan.years:
+                if e.year not in shown:
+                    continue
+                drawn = {"deferred": 0, "roth": 0, "taxable": 0}
+                for aid, cents in e.amounts.items():
+                    drawn[kind.get(int(aid), "taxable")] += int(cents)
+                bars.append(rplan.IncomeYear(
+                    year=e.year, age=(e.year - born) if born is not None else None,
+                    social_security_cents=rplan.social_security_cents(
+                        conn, e.year, people, base_year=planner._today.year),
+                    deferred_draw_cents=drawn["deferred"], roth_draw_cents=drawn["roth"],
+                    conversion_cents=conversions_in(e.year),
+                    fund_value_cents=int(e.pool_cents),
+                    other_income_cents=sum(src.cents_in(e.year) for src in sources),
+                    taxable_draw_cents=drawn["taxable"]))
+        else:
+            bars = rplan.income_rows(conn, terminal_age=planner.terminal_age,
+                                     today=planner._today)
+        whole_tax, whole_total, whole_today = whole_year_taxes(bars, plan)
+        rows = []
+        for e in plan.years:
+            if e.year not in shown:
+                continue
+            ss = rplan.social_security_cents(conn, e.year, people,
+                                             base_year=planner._today.year)
+            spending = 0
+            if e.year >= first_year:
+                spending = retirement.household_amount_cents(spend, pct, e.year - first_year)
+                if scenario is not None and scenario.widowed(e.year):
+                    spending = int((Decimal(spending) * scenario.spending_pct / 100)
+                                   .quantize(Decimal(1), rounding=ROUND_HALF_UP))
+            by_kind = {"deferred": 0, "roth": 0, "taxable": 0}
+            for aid, cents in e.amounts.items():
+                by_kind[kind.get(int(aid), "taxable")] += int(cents)
+            row = {"year": e.year, "ages": ages(e.year),
+                   "spending": dollars(spending),
+                   "social_security": dollars(ss),
+                   "other_income": dollars(covered.get(e.year, 0) - ss),
+                   "needed_from_accounts": dollars(e.target_cents),
+                   "drawn": dollars(e.drawn_cents),
+                   "shortfall": dollars(e.shortfall_cents),
+                   "required_minimum": dollars(e.floor_cents),
+                   "ira_draws": dollars(by_kind["deferred"]),
+                   "taxable_account_draws": dollars(by_kind["taxable"]),
+                   "roth_draws": dollars(by_kind["roth"]),
+                   "roth_conversions": dollars(conversions_in(e.year)),
+                   "income_tax": dollars(whole_tax.get(e.year, 0)),
+                   "tax_paid_from_accounts": dollars(e.tax_cents),
+                   "early_withdrawal_penalty": dollars(e.penalty_cents),
+                   "irmaa_and_aca_cost": dollars(e.surcharge_cents),
+                   "realized_capital_gains": dollars(e.gains_cents),
+                   "pool_value_entering_year": dollars(e.pool_cents)}
+            if by_account:
+                row["accounts"] = {name.get(int(aid), str(aid)): {
+                    "draw": dollars(e.amounts.get(aid, 0)),
+                    "balance_entering_year": dollars(e.balances.get(aid, 0))}
+                    for aid in sorted(set(e.amounts) | set(e.balances))}
+            rows.append(row)
+        last = years_shown[-1]
+        runs_out = plan.depleted_year if (plan.depleted_year is not None
+                                          and plan.depleted_year <= last) else None
+        out["parameters"] = {"yearly_spending": dollars(spend),
+                             "increase_pct_per_year": _pct(pct),
+                             "start_year": first_year,
+                             "ira_draws_capped_at_bracket": rate}
+        out["summary"] = {
+            "first_year": years_shown[0], "last_year": last,
+            "lasts_through_last_year": runs_out is None,
+            "runs_out_year": runs_out,
+            "runs_out_age": (runs_out - born) if (runs_out is not None and born) else None,
+            "ending_pool_value": dollars(planner.ending_balance_cents(plan, last)),
+            "total_income_tax": dollars(whole_total),
+            "total_income_tax_in_todays_dollars": dollars(whole_today),
+            "total_tax_paid_from_accounts": dollars(sum(int(r.tax_cents) for r in plan.years
+                                                        if r.year in shown)),
+            "total_irmaa_and_aca_cost": dollars(sum(int(r.surcharge_cents) for r in plan.years
+                                                    if r.year in shown)),
+            "years_where_required_minimums_exceed_spending":
+                [y for y in plan.floor_raised_years if y in shown],
+        }
+        if not what_if:
+            # The stored withdrawals (what the page's bars and tax read) as
+            # against the plan computed from today's ledger: when the data
+            # moved since the last Apply, the page flags its schedule.
+            stale = rplan.stale_withdrawal_years(conn, plan)
+            out["summary"]["stored_withdrawals_out_of_date_from"] = \
+                stale[0] if stale else None
+        out["years"] = rows
+        return out
+
+
+def retirement_max_spending(conn, increase_pct: Optional[str] = None,
+                            start_year: Optional[int] = None,
+                            ira_bracket: Optional[str] = None,
+                            reserve: Optional[str] = None,
+                            terminal_age: Optional[int] = None) -> dict:
+    """The largest starting yearly spending the retirement plan sustains
+    through `terminal_age` (default: the age stored in the planner) and still
+    leaves `reserve` dollars in the pool at the end -- the planner's "most we
+    can spend" search, to the nearest $1,000. `increase_pct`, `start_year` and
+    `ira_bracket` default to the stored spending plan's. Nothing is saved.
+    A computed figure, not advice: it says what the projection sustains."""
+    from mammon import retirement_plan as rplan
+    age = _terminal_age_arg(terminal_age)
+    bracket = _bracket_arg(ira_bracket)
+    stored = retirement.get_withdrawal_plan(conn)
+    pct = Decimal(str(increase_pct)) if increase_pct not in (None, "") else stored.increase_pct
+    first = int(start_year) if start_year not in (None, "") else stored.start_year
+    rate = bracket if ira_bracket not in (None, "") else stored.bracket_rate
+    keep = cents_of(reserve) or 0
+    with rplan.inflows_measured_once():
+        planner = rplan.HouseholdPlanner(conn, terminal_age=age)
+        if not planner._years:
+            raise ValueError("nobody on file has a birth year, so there is no plan horizon")
+        most = planner.most_we_can_spend(pct, start_year=first, bracket_rate=rate,
+                                         reserve_cents=keep)
+    return {"yearly_spending": dollars(most),
+            "increase_pct_per_year": _pct(pct),
+            "start_year": first if first is not None else planner._years[0],
+            "ira_draws_capped_at_bracket": rate,
+            "reserve_at_end": dollars(keep),
+            "through_year": planner._years[-1], "terminal_age": planner.terminal_age}
+
+
+# ---------------------------------------------------------------------------
 # the long tail: schema + read-only SQL
 # ---------------------------------------------------------------------------
 def schema(conn) -> dict:
@@ -961,6 +1379,9 @@ TOOLS: dict[str, Callable[..., dict]] = {
     "list_budgets": list_budgets,
     "budget_vs_actual": budget_vs_actual,
     "budget_ytd": budget_ytd,
+    "retirement_plan": retirement_plan,
+    "retirement_projection": retirement_projection,
+    "retirement_max_spending": retirement_max_spending,
     "schema": schema,
     "query": query,
 }
@@ -986,6 +1407,12 @@ INSTRUCTIONS = (
     "`allocation` leaves option contracts out of every number and names them in "
     "`excluded_options`, with a `note` to show the user. "
     "For budgets: `list_budgets`, then `budget_vs_actual` (a month or "
-    "range) or `budget_ytd` (year-to-date). Account numbers and login details "
+    "range) or `budget_ytd` (year-to-date). "
+    "For retirement: `retirement_plan` (the household, accounts, income and "
+    "settings the plan runs on), `retirement_projection` (year by year: income, "
+    "draws, tax, IRMAA, the pool, the year the money runs out; give "
+    "yearly_spending etc. for a what-if that saves nothing) and "
+    "`retirement_max_spending`. Report the plan's figures as computed results "
+    "with their assumptions, not as advice. Account numbers and login details "
     "are never available."
 )

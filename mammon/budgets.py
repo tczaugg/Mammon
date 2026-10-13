@@ -877,7 +877,7 @@ def _claim_row(dates: Optional[list[str]], when: str, window: int) -> bool:
     """Consume the candidate row closest to ``when`` within ``window`` days.
 
     Consuming rather than merely matching is what stops one payment from
-    cancelling two occurrences of the same bill.
+    canceling two occurrences of the same bill.
     """
     if not dates:
         return False

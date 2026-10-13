@@ -258,7 +258,7 @@ def test_fingerprint_survives_a_missing_file(tmp_path):
 # Incremental (page-delta) snapshots
 # ---------------------------------------------------------------------------
 def _restored(path, tmp_path, name="restored.db"):
-    """Materialise a snapshot and open it, so assertions run against a REAL
+    """Materialize a snapshot and open it, so assertions run against a REAL
     database rather than against the delta's own bookkeeping."""
     import sqlite3
     out = backup.restore_backup(path, tmp_path / name)

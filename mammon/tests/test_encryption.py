@@ -169,7 +169,7 @@ def test_password_change_keeps_the_data_and_the_version(tmp_path):
 
 @needs_cipher
 def test_a_password_with_a_quote_still_works(tmp_path):
-    """PRAGMA key cannot be parameterised, so the password is quoted by hand. An
+    """PRAGMA key cannot be parameterized, so the password is quoted by hand. An
     apostrophe is ordinary in a passphrase, and mis-quoting it reads as 'wrong
     password' for a password that is right."""
     src = tmp_path / "ledger.db"

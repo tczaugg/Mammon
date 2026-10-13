@@ -5,7 +5,7 @@ into it, or routed through :mod:`mammon.ledger`:
 
 - A coin position is not an equity lot. Quantities are wei-scale (up to 18
   decimals), the event taxonomy adds swaps, on-chain transfers, staking/airdrop/
-  mining income and network gas fees that have no equity analogue, and the
+  mining income and network gas fees that have no equity analog, and the
   natural exact-dedup key is an on-chain ``tx_hash``. So crypto gets its OWN
   tables (``crypto_transactions`` / ``crypto_holdings`` /
   ``crypto_holdings_checkpoints``, schema v51-53), the twins of
@@ -48,7 +48,7 @@ Two crypto account KINDS share that type, recorded explicitly in
 like securities (a quantity per token, priced at market):
 
 - ``'wallet'`` -- a single address / paper wallet holding coins/ERC-20 tokens
-  ONLY, no fiat. Coin arrives/leaves with NO USD leg (the ShrsIn/ShrsOut analogue),
+  ONLY, no fiat. Coin arrives/leaves with NO USD leg (the ShrsIn/ShrsOut analog),
   the network fee is paid IN the coin, and the on-chain ``From``/``To`` counterparty
   IS the row's payee (stored in ``crypto_transactions.payee``, migration 61 -- there
   is no separate "counterparty" concept). Coin-native moves go through
@@ -68,7 +68,7 @@ Event taxonomy (schema v51 ``action`` enum) mapped to primitives:
   (``amount<0``); SELL disposes coin for cash (``amount>0``) and books realized
   gain (proceeds - the cost relieved from lots, per ``accounts.lot_method``).
 - ``SWAP_OUT`` + ``SWAP_IN`` -- a coin-for-coin trade is TWO single-asset legs
-  in ONE account, linked by ``swap_group_id`` (the intra-account analogue of
+  in ONE account, linked by ``swap_group_id`` (the intra-account analog of
   ``transfer_pair_id``, distinct because a swap is two coins in one account, not
   one coin across two accounts). SWAP_OUT is a disposal at fair-market value;
   SWAP_IN establishes a new lot whose basis is that same FMV.
@@ -82,7 +82,7 @@ Event taxonomy (schema v51 ``action`` enum) mapped to primitives:
   RECEIVE is ordinary income at FMV (basis = FMV).
 - ``REWARD`` / ``INTEREST`` / ``AIRDROP`` / ``MINING`` -- in-kind income credited
   as coin QUANTITY (not cents), basis = FMV at receipt, accruing to the
-  checkpoint ``income`` column (the crypto analogue of an investments dividend).
+  checkpoint ``income`` column (the crypto analog of an investments dividend).
 - ``FEE`` -- a network/gas fee. When it rides an existing action it is carried
   in ``fee_symbol`` / ``fee_quantity`` / ``fee_amount`` on the parent row (on
   Ethereum, moving 100 USDC costs gas IN ETH -- one action, two holdings deltas);
@@ -115,7 +115,7 @@ CRYPTO_ASSET_CLASS = "crypto"
 # BOTH multi-token, valued like securities -- a quantity per token, priced at market).
 # They differ only in whether an internal fiat cash sleeve exists:
 #   * WALLET   -- a single address / paper wallet holding coins/ERC-20 tokens ONLY.
-#                 Movements are coin-native (the ShrsIn/ShrsOut analogue): a quantity
+#                 Movements are coin-native (the ShrsIn/ShrsOut analog): a quantity
 #                 in or out, NO fiat leg, the on-chain From/To counterparty as the
 #                 payee, and any network fee paid IN the coin.
 #   * EXCHANGE -- coins PLUS fiat currencies: the existing BUY/SELL/SWAP model with an
@@ -795,7 +795,7 @@ def rebuild_holdings_checkpoints(conn, account_id: int) -> None:
 def recompute_holdings_checkpoints_from_year(conn, account_id: int, from_year: int) -> None:
     """Cascade a change dated in ``from_year``: drop snapshots for that year and
     all later, reseed from the ``from_year - 1`` snapshot, replay each affected
-    year forward. Earlier snapshots are untouched (the analogue of
+    year forward. Earlier snapshots are untouched (the analog of
     ledger._touch_checkpoints)."""
     conn.execute(
         "DELETE FROM crypto_holdings_checkpoints WHERE account_id=? AND year>=?",
@@ -1033,7 +1033,7 @@ def record_income(conn, account_id: int, date: str, action: str, symbol: str,
 
 
 # ---------------------------------------------------------------------------
-# Coin-native WALLET writers (SRD §5.8h; the ShrsIn/ShrsOut analogue). A wallet
+# Coin-native WALLET writers (SRD §5.8h; the ShrsIn/ShrsOut analog). A wallet
 # moves coin with NO fiat leg -- a quantity arrives or leaves, valued at market
 # like a security -- so ``price``/``amount``/``basis`` stay NULL and the counterparty
 # address IS the payee. These route through ``record_event``, so :mod:`mammon.crypto`
@@ -1060,7 +1060,7 @@ REMOVE_ACTIONS = _REMOVE_ACTIONS
 def record_wallet_credit(conn, account_id: int, date: str, symbol: str, quantity, *,
                          payee=None, action: str = "RECEIVE", price=None, basis=None,
                          memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
-    """A coin-native INCREASE (the ShrsIn analogue): ``quantity`` of ``symbol``
+    """A coin-native INCREASE (the ShrsIn analog): ``quantity`` of ``symbol``
     arrives with NO fiat leg. ``payee`` is the on-chain ``From`` counterparty and
     populates the register's Payee directly (there is no separate "counterparty"
     field). ``price``/``basis`` stay NULL for a bare receive; supply an FMV ``basis``
@@ -1084,7 +1084,7 @@ def record_wallet_debit(conn, account_id: int, date: str, symbol: str, quantity,
                         payee=None, action: str = "SEND", price=None,
                         fee_symbol=None, fee_quantity=None,
                         memo=None, tx_hash=None, fitid=None, import_id=None, time=None) -> int:
-    """A coin-native DECREASE (the ShrsOut analogue): ``quantity`` of ``symbol``
+    """A coin-native DECREASE (the ShrsOut analog): ``quantity`` of ``symbol``
     leaves with NO fiat proceeds. ``payee`` is the on-chain ``To`` recipient. An
     optional network fee is a COIN-NATIVE leg on this SAME row -- ``fee_symbol`` /
     ``fee_quantity`` (e.g. ETH gas), never a USD amount -- and only the sender books
@@ -1125,19 +1125,6 @@ def record_cash(conn, account_id: int, date: str, amount_cents: int, *,
     return record_event(conn, account_id, date, act, amount=cents, payee=payee,
                         memo=memo, tx_hash=tx_hash, fitid=fitid,
                         import_id=import_id, time=time)
-
-
-def record_fee(conn, account_id: int, date: str, symbol: str, quantity, *,
-               usd_value=None, memo=None, tx_hash=None, fitid=None,
-               import_id=None, time=None) -> int:
-    """A STANDALONE network/gas fee row (use this only when the fee is not carried
-    on a parent action's ``fee_*`` fields -- e.g. a periodic fee sweep). Removes
-    ``quantity`` of ``symbol`` as a plain expense; ``usd_value`` (cents) is stored
-    on ``fee_amount`` for reference and does not move the fiat cash sleeve."""
-    q = abs(_D(quantity))
-    return record_event(conn, account_id, date, "FEE", symbol=symbol, quantity=-q,
-                        fee_amount=usd_value, memo=memo, tx_hash=tx_hash,
-                        fitid=fitid, import_id=import_id, time=time)
 
 
 def record_swap(conn, account_id: int, date: str, symbol_out: str, quantity_out,
@@ -1196,22 +1183,6 @@ def _carry_from(conn, account_id: int, date: str, symbol: str,
 def _stamp_lots(conn, in_id: int, lots: Optional[str]) -> None:
     """Record on a transfer's incoming leg the lots it carried."""
     _apply_update(conn, int(in_id), {"lots": lots})
-
-
-def _basis_to_move(conn, account_id: int, date: str, symbol: str,
-                   q: Decimal, method: str) -> int:
-    """The cost basis (cents) that ``q`` coin of ``symbol`` carries out of the
-    source wallet as of ``date`` -- computed by relieving ``q`` from a THROWAWAY
-    replay of the source, so it equals exactly what the TRANSFER_OUT leg will
-    relieve on replay. Stamped on both transfer legs so basis is conserved."""
-    with decimal.localcontext(quantity_context()):
-        positions = _replay_positions(conn, account_id, as_of=date)
-        pos = positions.get(symbol)
-        if pos is None or pos.qty <= 0:
-            return 0
-        cost_before = pos.cost
-        _relieve(pos, min(q, pos.qty), method)   # mutates the throwaway copy
-        return cost_before - pos.cost
 
 
 def record_wallet_transfer(conn, from_account_id: int, to_account_id: int,
@@ -1277,7 +1248,7 @@ def link_as_transfer(conn, txn_id: int, other_account_id: int, *, basis=None):
     disposal: no gain is realized and the cost basis rides along. Left as a
     SEND on one side and a RECEIVE on the other, the same movement books a
     realized gain that never happened AND restarts the basis at market -- the
-    coin analogue of the double-counted transfer CLAUDE.md warns about.
+    coin analog of the double-counted transfer CLAUDE.md warns about.
 
     It LINKS an existing counter-leg when one is there, and only creates the
     mirror when there is none. That distinction is the whole point: a
@@ -1988,64 +1959,6 @@ def update_event(conn, txn_id: int, **fields) -> None:
     for aid, d in affected:
         _invalidate_holdings_checkpoints_from(conn, aid, d)
     conn.commit()
-
-
-def fill_income_prices(conn, account_id: int, prices_by_hash) -> list[int]:
-    """Give a wallet's value-less receipts their historical price and a basis
-    at it, from ``{tx_hash: price}`` (an Etherscan export's ``Historical
-    $Price/Eth``). Returns the ids changed.
-
-    The repair for receipts imported before the wallet path kept the price:
-    mined coin came in at a $0 basis. Only a plain RECEIVE with no price, no
-    basis, no amount and no transfer link is touched - a transfer's basis
-    rides from its source, and a typed-in value is the user's."""
-    prices = {str(k).lower(): _D(v) for k, v in dict(prices_by_hash).items() if v}
-    changed = []
-    for row in conn.execute(
-            "SELECT id, quantity, tx_hash FROM crypto_transactions "
-            "WHERE account_id=? AND action='RECEIVE' AND price IS NULL "
-            "AND basis IS NULL AND amount IS NULL AND transfer_pair_id IS NULL "
-            "AND transfer_account_id IS NULL AND tx_hash IS NOT NULL "
-            "ORDER BY date, id", (int(account_id),)).fetchall():
-        price = prices.get(str(row["tx_hash"]).lower())
-        if not price or price <= 0:
-            continue
-        with decimal.localcontext(quantity_context()):
-            basis = _cents(_D(row["quantity"]) * price * _HUNDRED)
-        update_event(conn, int(row["id"]), price=price, basis=basis)
-        changed.append(int(row["id"]))
-    return changed
-
-
-def restamp_transfer_basis(conn, from_account_id: int) -> list[tuple[int, int, int]]:
-    """Recompute the basis carried by every transfer OUT of ``from_account_id``
-    (each incoming leg elsewhere naming it), oldest first, from the source's
-    lots as they stand now. Returns ``(id, old, new)`` for each change.
-
-    After a repair to the source's basis (:func:`fill_income_prices`), the
-    transfers it made still carry the basis it had before."""
-    method = get_lot_method(conn, from_account_id)
-    changed = []
-    for row in conn.execute(
-            "SELECT id, account_id, date, symbol, quantity, basis FROM crypto_transactions "
-            "WHERE transfer_account_id=? AND account_id<>? AND symbol IS NOT NULL "
-            "ORDER BY date, id", (int(from_account_id), int(from_account_id))).fetchall():
-        qty = _D(row["quantity"])
-        if qty <= 0:
-            continue
-        # The source as it stood BEFORE this day: measured "as of" the date,
-        # its own outgoing leg has already left, and what remains is measured.
-        before = (_dt.date.fromisoformat(row["date"]) - _dt.timedelta(days=1)).isoformat()
-        new, lots = _carry_from(conn, from_account_id, before, row["symbol"], qty, method)
-        old = int(row["basis"] or 0)
-        if new != old:
-            update_event(conn, int(row["id"]), basis=new)
-            changed.append((int(row["id"]), old, new))
-        if lots:
-            _stamp_lots(conn, int(row["id"]), lots)
-            _invalidate_holdings_checkpoints_from(conn, int(row["account_id"]), row["date"])
-            conn.commit()
-    return changed
 
 
 def delete_event(conn, txn_id: int) -> bool:

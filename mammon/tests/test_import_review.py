@@ -13,7 +13,8 @@ from mammon.import_review import (
     build_review,
     map_row,
 )
-from mammon.tests import fresh_db
+from mammon.tests import (assert_balance_cache_matches, fresh_db,
+                          seed_balance_cache)
 
 
 @pytest.fixture
@@ -905,7 +906,7 @@ def test_transfer_account_id_for_name_resolves_bracket_text(conn, account):
 # discard a single review row (the fix 2): stray blank-line rows.
 # ---------------------------------------------------------------------------
 def test_discard_one_removes_only_that_row(conn, account):
-    """One discarded row leaves the list and the table; its neighbour is
+    """One discarded row leaves the list and the table; its neighbor is
     untouched; and downloading it again offers it again."""
     entries = build_review(conn, account, [
         {"transactionId": "A", "postedDate": "2026-08-15", "amount": "5.00",
@@ -1067,7 +1068,6 @@ def test_accept_all_learns_nothing_from_rows_nobody_read(conn, account):
     def taught():
         return len(rename_tree.examples(conn))
 
-    rename_tree.ensure_bootstrapped(conn)
     before = taught()
     entries = build_review(conn, account, [
         {"transactionId": "N-7", "postedDate": "2026-08-15", "amount": "4.00",
@@ -1440,3 +1440,43 @@ def test_a_user_made_transfer_still_learns_its_payee(conn, account):
                                transfer_account_id=venmo,
                                review_id=entry.review_id)
     assert rename_tree.suggest(conn, desc).payee == "Venmo"
+
+
+def test_a_match_that_adopts_the_banks_amount_keeps_the_balance_cache(conn, account):
+    """Accepting a match writes the BANK's amount over a forecast; undoing the
+    accept (revert, or unmatch from the saved list) writes the forecast back.
+    Each changes a balance, so each must refresh the Accounts list's cache."""
+    import dataclasses
+    forecast = ledger.add_transaction(conn, account, "2024-08-20", -2500,
+                                      payee="Grocer")
+    ledger.add_transaction(conn, account, "2023-01-05", 10_000, payee="Seed")
+    seed_balance_cache(conn)
+
+    def matched_entry():
+        [entry] = build_review(conn, account, [{
+            "transactionId": "FEED-9", "postedDate": "2024-08-21",
+            "amount": "25.00", "isDebit": True,
+            "statementDescription": "GROCER"}])
+        assert entry.matched_txn_id == forecast
+        # The bank's figure differs from the forecast the line carries.
+        return dataclasses.replace(
+            entry, mapped=dataclasses.replace(entry.mapped, amount_cents=-2_731))
+
+    entry = matched_entry()
+    prior = import_review.accept_match(conn, entry)
+    assert _txn(conn, forecast)["amount"] == -2_731
+    assert_balance_cache_matches(conn)
+    import_review.revert_match(conn, entry, prior)
+    assert _txn(conn, forecast)["amount"] == -2500
+    assert_balance_cache_matches(conn)
+
+    entry = matched_entry()
+    import_review.persist_entries(conn, account, [entry])
+    [saved] = import_review.load_pending(conn, account)
+    saved = dataclasses.replace(
+        saved, mapped=dataclasses.replace(saved.mapped, amount_cents=-2_731))
+    import_review.accept_match(conn, saved)
+    assert_balance_cache_matches(conn)
+    assert import_review.unmatch_one(conn, saved.review_id)
+    assert _txn(conn, forecast)["amount"] == -2500
+    assert_balance_cache_matches(conn)

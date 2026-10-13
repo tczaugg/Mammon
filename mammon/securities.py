@@ -1324,7 +1324,7 @@ def set_kinds(conn, updates: Iterable) -> int:
     goes near ``holdings``, ``lots`` or any transaction table.
 
     That narrowness is the point. ``apply_splits`` is the destructive
-    neighbour: it re-keys, and ``_rekey`` deletes the rows that lose. Saying
+    neighbor: it re-keys, and ``_rekey`` deletes the rows that lose. Saying
     "this is an option" must not be able to do any of that, so the two are
     separate functions with separate confirmations, and reclassification stays
     additive and reversible -- re-run it with ``kind=None`` and the row is

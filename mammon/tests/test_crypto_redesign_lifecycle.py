@@ -3,8 +3,8 @@ review 55a2d8a0).
 
 ONE scenario, exercised entirely through the :mod:`mammon.crypto` domain API -- the
 SOLE writer of the ``crypto_*`` tables. It creates a coin-native WALLET account,
-credits two DIFFERENT tokens (the ShrsIn analogue: a quantity in, no fiat leg), then
-debits each with a coin-native fee leg (the ShrsOut analogue), and asserts the
+credits two DIFFERENT tokens (the ShrsIn analog: a quantity in, no fiat leg), then
+debits each with a coin-native fee leg (the ShrsOut analog), and asserts the
 per-token quantities/holdings are correct and DISTINCT -- 'ETH' and 'LINK' never
 merge, the fee is coin-denominated (never USD), and the From/To counterparty rides on
 the row's Payee. Addresses are synthetic ANON placeholders (never a real address).

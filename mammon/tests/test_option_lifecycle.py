@@ -1,7 +1,7 @@
 """What an option DOES at the end -- the basis rules (SRD 5.8e-7).
 
 Item 5b of the instrument taxonomy: an option contract has four endings a share
-has no analogue for, and in three of them the premium does not become a gain or
+has no analog for, and in three of them the premium does not become a gain or
 a loss, it MOVES. Part 1.2 of ``docs/instrument_taxonomy.md`` states the rules
 this file proves, one test per row of its table (IRS Pub 550, "Options"):
 

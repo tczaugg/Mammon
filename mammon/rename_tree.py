@@ -41,8 +41,20 @@ that id at query time (a payee edited in the register is the correction of a
 correction), falling back to the stored label only when the transaction is gone.
 Review retention (:func:`mammon.import_review.purge_old_batches`) never touches
 this table, so a rename taught a year ago -- an annual bill -- survives the
-review rows it came from. The table is seeded from the review rows that existed
-at migration.
+review rows it came from.
+
+**Nothing is seeded** (the user's ruling): every example is a correction the
+user made in review, recorded by :func:`learn` at the accept. Review history from
+before the learner existed, register history and bulk replays are not
+corrections -- they carry old conventions and other code's output, and seeded
+examples once outvoted the user's own consistent corrections so a payee never
+filled. Migration 119 removed the ones migration 60 had copied in.
+
+**By account.** Each example records the account its row was reviewed in, and a
+row is answered from its OWN account's examples once that account has
+:data:`MIN_FILL` candidates for it, else from every account's -- the same rule
+the category tree applies (``category_tree._answering_key``). The same bank text
+can mean different payees in different accounts.
 
 **Only corrections train the payee domain.** An example whose label is the
 text it was shown with -- the description, its title-cased form, or the
@@ -123,9 +135,7 @@ the pattern rule buys back the rows whose only novelty sits in a slot the
 examples had already shown to vary.)
 
 Management (``rename_stats``: applied / overridden per payee, and
-:func:`forget_payee`) is unchanged in shape. :func:`bootstrap` and friends still
-exist as an explicit seed-from-history action; nothing calls them on open (see
-CLAUDE.md: hand-typed memos taught the old tree payees never chosen in review).
+:func:`forget_payee`) is unchanged in shape.
 """
 from __future__ import annotations
 
@@ -167,9 +177,6 @@ __all__ = [
     "forget_examples",
     "examples",
     "sources_for",
-    "bootstrap",
-    "bootstrap_actions",
-    "ensure_bootstrapped",
     "clear",
 ]
 
@@ -223,11 +230,11 @@ HIGH_CONFIDENCE_MIN_COUNT = MIN_FILL
 _DOMAINS = {
     "payee": {
         "live_table": "transactions", "live_col": "payee",
-        "meta_key": "bootstrapped", "corrections_only": True,
+        "corrections_only": True,
     },
     "action": {
         "live_table": "investment_transactions", "live_col": "action",
-        "meta_key": "action_bootstrapped", "corrections_only": False,
+        "corrections_only": False,
     },
 }
 
@@ -335,7 +342,8 @@ class Example:
 
     ``seq`` is the usable tokens of the text in order, ``fseq`` those of the
     supplied payee field; ``tokens`` is their union (the tree's features);
-    ``features`` is the pattern vocabulary of step 3 (see :func:`features`).
+    ``features`` is the pattern vocabulary of step 3 (see :func:`features`);
+    ``account_id`` is the account the row was reviewed in.
     """
     id: int
     seq: tuple
@@ -343,6 +351,7 @@ class Example:
     label: str
     text: str = ""
     extra: str = ""
+    account_id: Optional[int] = None
 
     @property
     def tokens(self) -> frozenset:
@@ -358,7 +367,7 @@ def features(seq, fseq=()) -> dict:
     itself (``has:T``), the token before it (``prev:T``) and after it
     (``next:T``); the same over the payee field under an ``f:`` prefix; and
     :data:`_NO_FIELD` when there is no field. ``prev``/``next`` exist only where
-    a neighbour exists, so a first or last token has none -- that absence is
+    a neighbor exists, so a first or last token has none -- that absence is
     what lets a pattern learned from ``June rent`` reject a bare ``rent``."""
     out: dict = {}
     for prefix, toks in (("", tuple(seq)), ("f:", tuple(fseq))):
@@ -405,23 +414,25 @@ def _raw_tokens(text: str, extra: str) -> set:
     return toks
 
 
-def make_example(id_: int, text: str, label: str, extra: str = "") -> Example:
+def make_example(id_: int, text: str, label: str, extra: str = "",
+                 account_id: Optional[int] = None) -> Example:
     """An :class:`Example` outside any corpus (tests, inspection): every token
     is kept, mixed letter+digit ones included."""
     return Example(id_, tuple(normalize_tokens(text)), tuple(normalize_tokens(extra)),
-                   label, text, extra)
+                   label, text, extra, account_id)
 
 
 class _Corpus:
     """The examples of one domain plus the indexes :func:`suggest` reads."""
 
     def __init__(self, rows):
-        # rows: (id, text, extra, label). Mixed letter+digit tokens count only
-        # once at least two examples carry them (see the module docstring).
+        # rows: (id, text, extra, label, account_id). Mixed letter+digit tokens
+        # count only once at least two examples carry them (see the module
+        # docstring).
         freq: Counter = Counter()
         staged = []
-        for rid, text, extra, label in rows:
-            staged.append((rid, text, extra, label))
+        for rid, text, extra, label, account_id in rows:
+            staged.append((rid, text, extra, label, account_id))
             freq.update(_raw_tokens(text, extra))
         self._freq = freq
         self.examples: list[Example] = []
@@ -429,13 +440,14 @@ class _Corpus:
         self.labels_of: dict = defaultdict(set)
         self.by_set: dict = defaultdict(set)
         self.sightings: Counter = Counter()
-        for rid, text, extra, label in staged:
+        for rid, text, extra, label, account_id in staged:
             seq, fseq = self.sequences(text, extra)
             toks = frozenset(seq) | frozenset(fseq)
             if not toks:
                 continue
             i = len(self.examples)
-            self.examples.append(Example(rid, seq, fseq, label, text, extra))
+            self.examples.append(Example(rid, seq, fseq, label, text, extra,
+                                         account_id))
             for t in toks:
                 self.by_token[t].add(i)
                 self.labels_of[t].add(label)
@@ -459,11 +471,12 @@ _CACHE: dict = {}   # kind -> (fingerprint, _Corpus)
 
 
 def _corpus_rows(conn, kind: str) -> list[tuple]:
-    """``(id, text, extra, label)`` for every usable example of ``kind``, with
-    the label read LIVE from the transaction the accept created."""
+    """``(id, text, extra, label, account_id)`` for every usable example of
+    ``kind``, with the label read LIVE from the transaction the accept created."""
     dom = _DOMAINS[kind]
     rows = conn.execute(
         f"SELECT e.id AS id, e.text AS text, e.extra AS extra, e.label AS label, "
+        f"       e.account_id AS account_id, "
         f"       live.id AS live_id, live.{dom['live_col']} AS live_label "
         f"FROM rename_examples e "
         f"LEFT JOIN {dom['live_table']} live ON live.id = e.txn_id "
@@ -488,7 +501,8 @@ def _corpus_rows(conn, kind: str) -> list[tuple]:
             extra = ""      # a canonical action is the answer, not evidence
         if dom["corrections_only"] and not is_correction(label, text, extra):
             continue
-        out.append((int(r["id"]), text, extra, label))
+        out.append((int(r["id"]), text, extra, label,
+                    None if r["account_id"] is None else int(r["account_id"])))
     return out
 
 
@@ -660,9 +674,11 @@ def _shape_group(examples: list, toks: frozenset) -> list:
     return examples
 
 
-def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "") -> Suggestion:
+def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "",
+            account_id: Optional[int] = None) -> Suggestion:
     """Decide how to map ``desc`` (+ ``extra``, the source's own payee field)
-    for the ``kind`` domain. See the module docstring for the four steps."""
+    for the ``kind`` domain, for a row in ``account_id``. See the module
+    docstring for the four steps and the account scope."""
     corpus = _corpus(conn, kind)
     seq, fseq = corpus.sequences(desc, extra)
     toks = frozenset(seq) | frozenset(fseq)
@@ -672,6 +688,10 @@ def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "") -> Suggest
     if not idx:
         return Suggestion(ACTION_LEAVE)
     cands = [corpus.examples[i] for i in idx]
+    if account_id is not None:
+        own = [e for e in cands if e.account_id == int(account_id)]
+        if len(own) >= MIN_FILL:
+            cands = own
     leaf, depth = _walk(build_tree(cands), toks)
     counts = leaf.labels
     top, n_top = counts.most_common(1)[0]
@@ -701,12 +721,14 @@ def suggest(conn, desc: str, *, kind: str = "payee", extra: str = "") -> Suggest
 # ---------------------------------------------------------------------------
 def learn(conn, desc: str, payee: str, *, kind: str = "payee", extra: str = "",
           txn_id: Optional[int] = None, review_id: Optional[int] = None,
-          commit: bool = True) -> bool:
+          account_id: Optional[int] = None, commit: bool = True) -> bool:
     """Record one accepted example: ``desc`` (+ ``extra``) was labeled
     ``payee`` (the action, in the action domain).
 
     ``txn_id`` is the register row the accept created; when given, the label
     is read from that row at query time, so an edit or undo there is honored.
+    ``account_id`` is the account the row was reviewed in (see the module
+    docstring's account scope).
     Returns ``False`` for a blank label or text with no usable tokens (nothing
     to learn). Whether a kept default counts is decided when the corpus is
     loaded, not here (``_DOMAINS[kind]['corrections_only']``).
@@ -717,9 +739,10 @@ def learn(conn, desc: str, payee: str, *, kind: str = "payee", extra: str = "",
     if not _raw_tokens(desc or "", extra or ""):
         return False
     conn.execute(
-        "INSERT INTO rename_examples(kind, txn_id, review_id, text, extra, label) "
-        "VALUES (?,?,?,?,?,?)",
-        (kind, txn_id, review_id, (desc or "").strip(), (extra or "").strip(), label))
+        "INSERT INTO rename_examples(kind, txn_id, review_id, text, extra, label, "
+        "account_id) VALUES (?,?,?,?,?,?,?)",
+        (kind, txn_id, review_id, (desc or "").strip(), (extra or "").strip(), label,
+         None if account_id is None else int(account_id)))
     if commit:
         conn.commit()
     return True
@@ -845,89 +868,9 @@ def forget_payee(conn, payee: str, *, kind: str = "payee", commit: bool = True) 
 
 
 def clear(conn, *, kind: str = "payee", commit: bool = True) -> None:
-    """Wipe one domain's examples (and, for payees, the tallies) and its
-    bootstrap flag."""
-    dom = _DOMAINS[kind]
+    """Wipe one domain's examples (and, for payees, the tallies)."""
     conn.execute("DELETE FROM rename_examples WHERE kind=?", (kind,))
     if kind == "payee":
         conn.execute("DELETE FROM rename_stats")
-    conn.execute("DELETE FROM rename_meta WHERE key=?", (dom["meta_key"],))
-    if commit:
-        conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# bootstrap from register history (an EXPLICIT action; nothing calls it on open)
-# ---------------------------------------------------------------------------
-# The labeled history behind each domain: (row id, evidence text, label).
-_CORPUS_SQL = {
-    "payee": (
-        "SELECT id, memo AS txt, payee AS label FROM transactions "
-        "WHERE memo IS NOT NULL AND TRIM(memo) <> '' "
-        "  AND payee IS NOT NULL AND TRIM(payee) <> '' "
-        "  AND transfer_account_id IS NULL ORDER BY id ASC"
-    ),
-    "action": (
-        "SELECT id, memo AS txt, action AS label FROM investment_transactions "
-        "WHERE memo IS NOT NULL AND TRIM(memo) <> '' "
-        "  AND action IS NOT NULL AND TRIM(action) <> '' ORDER BY id ASC"
-    ),
-}
-
-
-def bootstrap(conn, *, force: bool = False) -> int:
-    """Replay register history into the PAYEE example log (idempotent).
-
-    Every posted non-transfer transaction pairs a ``memo`` with a ``payee``.
-    That is an accepted rename only for DOWNLOADED rows -- for hand-entered and
-    QIF-imported history the memo is a note the user typed -- which is why the
-    app no longer calls this on open. It remains for an explicit seed. Guarded
-    by a meta flag; returns the number of rows replayed.
-    """
-    return _bootstrap_kind(conn, "payee", force=force)
-
-
-def bootstrap_actions(conn, *, force: bool = False) -> int:
-    """Replay investment history (memo -> action the user kept) into the
-    ACTION example log (idempotent, own meta flag)."""
-    return _bootstrap_kind(conn, "action", force=force)
-
-
-def _bootstrap_kind(conn, kind: str, *, force: bool = False) -> int:
-    dom = _DOMAINS[kind]
-    if not force and _meta_get(conn, dom["meta_key"]) == "1":
-        return 0
-    n = 0
-    for r in conn.execute(_CORPUS_SQL[kind]).fetchall():
-        if learn(conn, r["txt"], r["label"], kind=kind, txn_id=int(r["id"]),
-                 commit=False):
-            n += 1
-    _meta_set(conn, dom["meta_key"], "1", commit=False)
-    conn.commit()
-    return n
-
-
-def ensure_bootstrapped(conn) -> int:
-    """Run both bootstraps once; a no-op after the first time. Callable API for
-    an explicit seed-from-history action; app startup does not invoke it."""
-    return bootstrap(conn, force=False) + bootstrap_actions(conn, force=False)
-
-
-# ---------------------------------------------------------------------------
-# meta: bootstrap flags
-# ---------------------------------------------------------------------------
-def _meta_get(conn, key: str, default=None):
-    row = conn.execute(
-        "SELECT value FROM rename_meta WHERE key=?", (key,)
-    ).fetchone()
-    return row["value"] if row is not None else default
-
-
-def _meta_set(conn, key: str, value, *, commit: bool = True) -> None:
-    conn.execute(
-        "INSERT INTO rename_meta(key, value) VALUES(?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(value)),
-    )
     if commit:
         conn.commit()

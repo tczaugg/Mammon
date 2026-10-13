@@ -3,15 +3,15 @@
 The learning lives in :mod:`mammon.category_tree`, the one learner for the
 Category cell: a category or a transfer account, under the payee and under the
 payee in each account, with vote counts. This module is the register's side of
-it -- QuickFill, the auto-fill hooks, the scheduled-entry inheritance, and the
+it -- QuickFill, the scheduled-entry inheritance, and the
 register edits that teach the tree.
 
 It used to keep its own ``payee -> category`` table in ``import_mappings``
 (``source='learned'`` from a history scan, ``'user'`` pinned by a register
 edit). Migration 116 removed those rows: every learned behavior is a tree (the
 user's ruling), and the tree's per-payee tally is the same evidence with counts
-attached. ``import_mappings`` still holds the importer's ``account_link`` rows
-(``importers/core.py``), which are not learning.
+attached. ``import_mappings`` holds only ``account_link`` rows from older
+ledgers, which are not learning and which no code reads.
 
 This module does NOT rename anything. Turning a bank's raw
 ``statementDescription`` into a payee name is the rename tree's job
@@ -25,16 +25,6 @@ from typing import Optional
 
 from mammon import category_tree, ledger
 from mammon.importers.record import normalize_payee
-
-
-# ---------------------------------------------------------------------------
-# normalization
-# ---------------------------------------------------------------------------
-def normalized_pattern(payee: Optional[str]) -> str:
-    """The normalized form of a payee -- the key the category tree learns it
-    under (:func:`mammon.category_tree.normalized_key`), so "SAFEWAY #123" and
-    "Safeway  #456" are one payee."""
-    return normalize_payee(payee or "")
 
 
 # ---------------------------------------------------------------------------
@@ -150,48 +140,3 @@ def record_user_categorization(
     if label is None or not normalize_payee(payee or ""):
         return
     category_tree.learn(conn, payee, "", label, account_id=account_id)
-
-
-# ---------------------------------------------------------------------------
-# auto-fill hook for new / imported transactions
-# ---------------------------------------------------------------------------
-def autofill_transaction(
-    conn: sqlite3.Connection, txn_id: int, *, overwrite: bool = False
-) -> Optional[int]:
-    """Fill a transaction's category from history when a confident pattern
-    exists. Skips transfers, and (unless ``overwrite``) transactions that already
-    carry a category. Returns the ``category_id`` applied, or ``None``.
-
-    This is the hook the ledger/import path calls after creating a row.
-    """
-    row = ledger.get_transaction(conn, txn_id)
-    if row is None:
-        return None
-    if row["transfer_account_id"] is not None:
-        return None  # transfers categorize as "[Other Account]", never learned
-    if row["category_id"] is not None and not overwrite:
-        return None
-    category_id = suggest_category(conn, row["payee"],
-                                   account_id=int(row["account_id"]))
-    if category_id is None:
-        return None
-    ledger.update_transaction(conn, txn_id, category_id=category_id)
-    return category_id
-
-
-def autocategorize_import(
-    conn: sqlite3.Connection, import_id: int, *, overwrite: bool = False
-) -> int:
-    """Auto-fill categories on every uncategorized row of a finished import.
-    Returns the count filled. A convenient hook for the download/import path to
-    call once a batch lands."""
-    rows = conn.execute(
-        "SELECT id FROM transactions WHERE import_id=? AND category_id IS NULL "
-        "AND transfer_account_id IS NULL",
-        (import_id,),
-    ).fetchall()
-    filled = 0
-    for r in rows:
-        if autofill_transaction(conn, r["id"], overwrite=overwrite) is not None:
-            filled += 1
-    return filled

@@ -52,7 +52,7 @@ PAYEES = {
     "Gifts": ["Fernwood Books", "Marigold Florist", "Kestrel Outfitters"],
     "Clothing": ["Willowbrook Apparel", "Ridge & Root", "Trellis Clothing"],
     "Books": ["Fernwood Books", "Paper Lantern Shop"],
-    "Recreation": ["Orpheum Cinema", "Blue Heron Theatre", "Foxglove Records",
+    "Recreation": ["Orpheum Cinema", "Blue Heron Theater", "Foxglove Records",
                    "Larkspur Lanes"],
     "Health:Doctor": ["Pinecrest Family Practice", "Anytown Dental"],
     "Health:Pharmacy": ["Pinecrest Pharmacy", "Corner Drug"],

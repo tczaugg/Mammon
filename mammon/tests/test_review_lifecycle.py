@@ -1857,28 +1857,6 @@ def test_accepting_corrected_actions_teaches_the_next_import(qapp, conn, tmp_pat
         win.close()
 
 
-def test_action_learning_survives_via_bootstrap_for_existing_history(qapp, conn):
-    """An install with years of accepted investment rows starts warm: app launch
-    bootstraps the action tree from that history (separate meta flag, so it
-    runs once even where the payee tree bootstrapped long ago)."""
-    from mammon import rename_tree
-
-    aid = ledger.create_account(conn, "IB", "investment", opening_balance=0)
-    for i in range(2):
-        conn.execute(
-            "INSERT INTO investment_transactions(account_id,date,action,amount,memo)"
-            " VALUES (?,?,?,?,?)",
-            (aid, "2026-01-0%d" % (i + 1), "MiscExp", -450,
-             "x*****99:US Equity and Options Add-On Streaming Bundle"))
-    conn.commit()
-    rename_tree.ensure_bootstrapped(conn)
-    s = rename_tree.suggest(
-        conn, "x*****99:US Equity and Options Add-On Streaming Bundle for Sep",
-        kind="action")
-    assert (s.action, s.payee, s.high_confidence) \
-        == (rename_tree.ACTION_AUTO, "MiscExp", True)
-
-
 def test_security_column_shows_the_description_for_cash_rows(qapp, conn, tmp_path):
     """Security/Category is a shared column (as in the register): a fee or
     interest row names no security, and the cell used to show the source's

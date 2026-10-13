@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from mammon import downloads, webslinger
 from mammon.webslinger import (
-    FakeWebSlingerClient, RunResult, ScriptSchema, download_readiness, mcp_runner,
+    FakeWebSlingerClient, RunResult, ScriptSchema, download_readiness,
     preflight_download,
 )
 
@@ -134,16 +134,6 @@ def test_preflight_returns_structured_code_per_branch():
     ready = code(client=up, script_name="GetCheckingTransactionsForRange",
                  input_data=filled)
     assert ready.ok is True and ready.code == "ok"
-
-
-def test_mcp_runner_adapts_to_runoutput():
-    client = FakeWebSlingerClient(
-        results={"s": RunResult(file_path="/tmp/f.ofx", records=None, raw={"a": 1})})
-    runner = mcp_runner(client)
-    out = runner("s", {})
-    assert isinstance(out, downloads.RunOutput)
-    assert out.file_path == "/tmp/f.ofx"
-    assert out.is_file is True
 
 
 def test_discover_mcp_command_from_claude_config(tmp_path, monkeypatch):
@@ -396,7 +386,7 @@ def test_run_script_accepts_data_despite_failed_actions():
 
 def test_run_script_returns_empty_result_when_no_data_despite_report_errors():
     """(b) Data ABSENT (even with report errors) -> run_script does NOT raise; it
-    returns an empty result so download_account can fall through to the Downloads
+    returns an empty result so download_rows_for_review can fall through to the Downloads
     scan. The full report is still consulted to surface the failure count."""
     stub = _StubMcp({
         "start_run": {"success": True, "run_id": "r1"},
@@ -486,17 +476,6 @@ def test_date_format_from_example_variants():
     assert downloads.date_format_from_example("garbage") == "%Y-%m-%d"
 
 
-def test_download_failed_error_mentions_keycocoon():
-    """fix 6: the failure message no longer claims we wait on a browser MFA
-    approval -- webSlinger signs in via keyCocoon, so that is what we surface."""
-    with pytest.raises(downloads.DownloadFailedError) as exc:
-        downloads._require_output(downloads.RunOutput(), "S")
-    assert "keyCocoon" in str(exc.value)
-
-
-# ---------------------------------------------------------------------------
-# payload extraction: a script's OTHER arrays are not transaction rows
-# ---------------------------------------------------------------------------
 def test_a_lookup_table_beside_the_rows_is_not_gathered():
     """Regression: eleven blank lines at the top of the review list after a
     fresh reload.

@@ -348,8 +348,11 @@ def test_how_often_biweekly_yearly_and_certain_months(qapp, conn, seeded, cats,
         rent = {ln.period: ln.amount_cents for ln in budgets.get_lines(conn, bid)
                 if ln.category_id == cats["rent"]}
         assert rent == {"2026-09": 250_00, "2027-03": 250_00}
-        # Paying down a loan is a line like any other.
+        # Paying down a loan is a line like any other. Only a debt that owes
+        # something is offered (debt.debt_accounts), so the loan has a balance.
         loan = ledger.create_account(conn, "Car Loan", "liability")
+        ledger.add_transaction(conn, loan, "2026-01-05", -6_000_00,
+                               payee="Opening Balance")
         page.refresh()
         monkeypatch.setattr(page, "_run_dialog", _accepting(
             purpose=FOR_DEBT, ids=[loan], amount="350.00"))

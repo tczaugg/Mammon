@@ -8,7 +8,7 @@ bulk and corrects one by hand; the write lands.
 The assertion that matters is the negative one. Recording what a security IS
 must not be able to change WHICH security it is, so every identity column and
 every holding, lot assignment and transaction row is snapshotted before the
-apply and compared after it. The destructive neighbour -- the old merge that
+apply and compared after it. The destructive neighbor -- the old merge that
 rekeys a symbol and deletes the losing row -- is exactly what this screen must
 not become, and a classification that quietly rewrote a symbol would take a
 40-year history's cost basis with it.

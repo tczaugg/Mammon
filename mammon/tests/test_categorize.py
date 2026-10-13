@@ -45,16 +45,6 @@ def _teach(conn, acct, payee, category_id, times=1):
 
 
 # ---------------------------------------------------------------------------
-# normalization
-# ---------------------------------------------------------------------------
-def test_normalized_pattern_strips_store_numbers_and_case():
-    assert categorize.normalized_pattern("SAFEWAY #123") == "SAFEWAY"
-    assert categorize.normalized_pattern("Safeway  #456") == "SAFEWAY"
-    assert categorize.normalized_pattern("  ") == ""
-    assert categorize.normalized_pattern(None) == ""
-
-
-# ---------------------------------------------------------------------------
 # teaching + suggesting
 # ---------------------------------------------------------------------------
 def test_a_consistent_payee_is_suggested_after_two_choices(conn, acct):
@@ -117,54 +107,6 @@ def test_a_transfer_teaches_its_account_not_a_category(conn, acct):
 def test_clearing_a_category_teaches_nothing(conn, acct):
     categorize.record_user_categorization(conn, "Kwik Stop", None, account_id=acct)
     assert category_tree.known_categories(conn, "Kwik Stop") == []
-
-
-# ---------------------------------------------------------------------------
-# auto-fill hook
-# ---------------------------------------------------------------------------
-def test_autofill_fills_empty_category_on_new_txn(conn, acct):
-    groceries = _cat(conn, "Groceries")
-    _teach(conn, acct, "Trader Joes", groceries, times=2)
-    new_id = _txn(conn, acct, "Trader Joes #22", -3100, None, date="2026-06-01")
-    assert categorize.autofill_transaction(conn, new_id) == groceries
-    assert ledger.get_transaction(conn, new_id)["category_id"] == groceries
-
-
-def test_autofill_does_not_overwrite_existing_category(conn, acct):
-    groceries = _cat(conn, "Groceries")
-    dining = _cat(conn, "Dining")
-    _teach(conn, acct, "Panera", groceries, times=2)
-    already = _txn(conn, acct, "Panera", -1600, dining, date="2026-06-01")
-    assert categorize.autofill_transaction(conn, already) is None
-    assert ledger.get_transaction(conn, already)["category_id"] == dining
-    # ...but overwrite=True honors the learned suggestion.
-    assert categorize.autofill_transaction(conn, already, overwrite=True) == groceries
-
-
-def test_autofill_no_confident_match_leaves_category_empty(conn, acct):
-    new_id = _txn(conn, acct, "Some New Merchant", -900, None, date="2026-06-02")
-    assert categorize.autofill_transaction(conn, new_id) is None
-    assert ledger.get_transaction(conn, new_id)["category_id"] is None
-
-
-def test_autofill_skips_transfers(conn, acct):
-    other = ledger.create_account(conn, "Savings", "savings")
-    from_id, _to = ledger.create_transfer(conn, acct, other, "2026-06-03", 5000)
-    assert categorize.autofill_transaction(conn, from_id) is None
-
-
-def test_autocategorize_import_batch(conn, acct):
-    groceries = _cat(conn, "Groceries")
-    _teach(conn, acct, "Aldi", groceries, times=2)
-    import_id = conn.execute(
-        "INSERT INTO imports(provider, status) VALUES ('test','done')"
-    ).lastrowid
-    conn.commit()
-    a = _txn(conn, acct, "Aldi #7", -2200, None, date="2026-06-01", import_id=import_id)
-    b = _txn(conn, acct, "Unknown Co", -500, None, date="2026-06-01", import_id=import_id)
-    assert categorize.autocategorize_import(conn, import_id) == 1
-    assert ledger.get_transaction(conn, a)["category_id"] == groceries
-    assert ledger.get_transaction(conn, b)["category_id"] is None
 
 
 # ---------------------------------------------------------------------------

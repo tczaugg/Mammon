@@ -172,7 +172,7 @@ def test_the_wrong_password_raises_rather_than_opening_something(tmp_path):
 
 @needs_cipher
 def test_a_password_with_an_apostrophe_round_trips(tmp_path):
-    """PRAGMA key cannot be parameterised, so the key is quoted by hand."""
+    """PRAGMA key cannot be parameterized, so the key is quoted by hand."""
     plain = _ledger(tmp_path / "l.db")
     pw = "don't guess 'this'"
     enc = encryption.encrypt_database(plain, pw)

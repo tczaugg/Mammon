@@ -27,7 +27,7 @@ Three rules are load-bearing, and each is a bug that was actually hit:
 
 * **An address is confirmed by a human and stored, never derived.** A name is not
   an address ("Condo (Asset)"); a name that looks like one may be incomplete
-  ("240 Birch" needs its city); and a neighbouring account's address is not
+  ("240 Birch" needs its city); and a neighboring account's address is not
   this account's. Inferring "118 Cedar Ln" from a liability of that name
   returned a real, cleanly-extracted $400,000 -- for a house the user sold years
   ago. Same discipline as ``investments.ticker_of``: suggest, confirm, store.

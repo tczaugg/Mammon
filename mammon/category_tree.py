@@ -97,22 +97,27 @@ Investment rows never reach here. ``investment_transactions`` has no
 
 Forgetting
 ----------
-:func:`forget_payee` drops a payee's trees, or one label from them, and records
-it in ``category_forgotten`` up to the newest transaction at that moment, so an
-explicit :func:`bootstrap` cannot quietly bring it back. New accepts after that
-teach normally.
+:func:`forget_payee` drops a payee's trees, or one label from them. New accepts
+after that teach normally.
+
+Nothing is seeded
+-----------------
+Every vote is one the user cast -- a row accepted in review, a register edit.
+Nothing replays register history or earlier review rows into the trees (the
+user's ruling); migration 120 emptied trees an earlier seeding step had grown,
+so they relearn from the user's own choices.
 
 Persistence (schema v55/v56/v116): ``category_nodes`` (the trie),
 ``category_node_labels`` (votes at a node), ``category_payee_stats`` (votes for
 the key overall -- the coherence gate and the dropdown ranking),
-``category_token_freq`` + ``category_token_labels`` (the ranking snapshot and the
-distribution its entropy is computed from), ``category_forgotten`` and
-``category_meta``. Every mutator self-commits unless ``commit=False``.
+``category_token_freq`` + ``category_token_labels`` (the token statistics the
+ranking reads, kept as rows are learned). Every mutator self-commits unless
+``commit=False``.
 """
 from __future__ import annotations
 
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
@@ -142,10 +147,6 @@ __all__ = [
     "known_categories",
     "coherence",
     "dominant",
-    "bootstrap",
-    "ensure_bootstrapped",
-    "ensure_seeded",
-    "snapshot_stats",
     "forget_payee",
     "merge_category",
     "payee_summary",
@@ -188,7 +189,6 @@ _NOISE_FLOOR = 10 ** 9        # boilerplate always sorts last (see rename_tree)
 # is normalized text and never holds a tab.
 _ACCOUNT_SEP = "\t"
 
-_SEED_FLAG = "seed_v116"
 
 
 @dataclass
@@ -346,8 +346,8 @@ def _stats_map(conn, toks: list[str]) -> dict:
 def _note_token(conn, token: str, label: int) -> None:
     """Record one (token, label) observation and refresh the token's entropy.
 
-    Entropy is recomputed here rather than only in :func:`snapshot_stats`
-    because ranking decides which token a walk descends on, and rows are learned
+    Entropy is recomputed here, on every observation, because ranking
+    decides which token a walk descends on, and rows are learned
     ONE AT A TIME during a review session. Left stale, a freshly seen token has
     no entropy, every token ties, the sort falls back to frequency, and the
     Costco tree splits on ``COSTCO`` -- a token both branches carry, which
@@ -649,7 +649,6 @@ def ranked_categories(conn, payee: Optional[str], desc: str = "", *,
     payee's remaining labels by frequency. Never includes a label the payee has
     not carried; the caller appends everything else alphabetically underneath.
     """
-    ensure_seeded(conn)
     key = normalized_key(payee)
     if not key:
         return []
@@ -675,7 +674,6 @@ def suggest(conn, payee: Optional[str], desc: str, *,
     ``ACTION_LEAVE`` when the payee is unknown -- a first sighting proposes
     nothing at all, which is the whole point during the learning period.
     """
-    ensure_seeded(conn)
     key = normalized_key(payee)
     if not key:
         return Suggestion(ACTION_LEAVE)
@@ -832,8 +830,7 @@ def _key_filter(key: str) -> tuple[str, tuple]:
 def forget_payee(conn, payee: Optional[str], *, label: Optional[int] = None,
                  commit: bool = True) -> None:
     """Drop what was learned for one payee -- everything, or just ``label`` (a
-    category or transfer account it carried) -- in every account. Recorded in
-    ``category_forgotten`` so :func:`bootstrap` does not bring it back. Token
+    category or transfer account it carried) -- in every account. Token
     ranking statistics are global and are left alone."""
     key = normalized_key(payee)
     if not key:
@@ -854,28 +851,8 @@ def forget_payee(conn, payee: Optional[str], *, label: Optional[int] = None,
         conn.execute(
             "DELETE FROM category_payee_stats WHERE category_id IS ? "
             f"AND account_id IS ? AND {where}", (cat, acct) + args)
-    newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM transactions").fetchone()[0]
-    conn.execute(
-        "INSERT INTO category_forgotten(payee_key, label, through_txn_id) "
-        "VALUES(?,?,?) ON CONFLICT(payee_key, label) "
-        "DO UPDATE SET through_txn_id=excluded.through_txn_id",
-        (key, 0 if label is None else int(label), int(newest)))
     if commit:
         conn.commit()
-
-
-def _forgotten(conn) -> dict:
-    """{(payee_key, label): through_txn_id}; label 0 is the whole payee."""
-    return {(r["payee_key"], int(r["label"])): int(r["through_txn_id"])
-            for r in conn.execute("SELECT * FROM category_forgotten")}
-
-
-def _is_forgotten(forgotten: dict, key: str, label: int, txn_id: int) -> bool:
-    for lab in (0, label):
-        through = forgotten.get((key, lab))
-        if through is not None and txn_id <= through:
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -895,165 +872,6 @@ def merge_category(conn, from_id: int, to_id: int) -> None:
         for r in rows:
             _bump(conn, table, keycol, r["k"], int(to_id), int(r["count"]))
         conn.execute(f"DELETE FROM {table} WHERE category_id=?", (int(from_id),))
-
-
-# ---------------------------------------------------------------------------
-# bootstrap and the one-time v116 seed
-# ---------------------------------------------------------------------------
-def _review_rows(conn) -> list[dict]:
-    """Every accepted review row joined to the transaction it created, in the
-    order it was accepted: the only place the raw bank text survives beside
-    the category or transfer account the user chose. Investment rows are
-    excluded (``investment_transactions`` has no category)."""
-    rows = conn.execute(
-        "SELECT t.id AS txn_id, t.payee AS payee, ri.memo AS memo, "
-        "       ri.payee AS src_payee, ri.payee_supplied AS supplied, "
-        "       ri.account_id AS account_id, t.category_id AS category_id, "
-        "       t.transfer_account_id AS transfer_account_id "
-        "FROM review_items ri JOIN transactions t ON t.id = ri.accepted_txn_id "
-        "WHERE ri.state='accepted' AND ri.is_investment=0 "
-        "  AND (t.category_id IS NOT NULL OR t.transfer_account_id IS NOT NULL) "
-        "  AND COALESCE(t.payee,'') != '' "
-        "ORDER BY ri.date, ri.id"
-    ).fetchall()
-    out = []
-    for r in rows:
-        out.append({
-            "txn_id": int(r["txn_id"]),
-            "payee": r["payee"],
-            "text": source_text(r["memo"], r["src_payee"], bool(r["supplied"] or 0)),
-            "account_id": int(r["account_id"]),
-            "label": label_for(r["category_id"], r["transfer_account_id"]),
-            "transfer": r["transfer_account_id"] is not None,
-        })
-    return out
-
-
-def _register_rows(conn) -> list[dict]:
-    """Every categorized or transfer register row (no text: tally only)."""
-    rows = conn.execute(
-        "SELECT id, payee, account_id, category_id, transfer_account_id "
-        "FROM transactions "
-        "WHERE (category_id IS NOT NULL OR transfer_account_id IS NOT NULL) "
-        "  AND scheduled=0 AND COALESCE(payee,'') != ''"
-    ).fetchall()
-    return [{"txn_id": int(r["id"]), "payee": r["payee"],
-             "account_id": int(r["account_id"]),
-             "label": label_for(r["category_id"], r["transfer_account_id"])}
-            for r in rows]
-
-
-def snapshot_stats(conn, *, commit: bool = True) -> int:
-    """Rebuild ``category_token_freq`` (frequency + label entropy) from the
-    accepted review rows. Ranking must be computed BEFORE the trees are grown,
-    because a trie built under one ranking is unreachable under another.
-    Returns the token count."""
-    counts: dict[str, Counter] = defaultdict(Counter)
-    for r in _review_rows(conn):
-        for tok in normalize_tokens(r["text"]):
-            counts[tok][r["label"]] += 1
-    conn.execute("DELETE FROM category_token_freq")
-    conn.execute("DELETE FROM category_token_labels")
-    for tok, labs in counts.items():
-        total = sum(labs.values())
-        ent = -sum((v / total) * math.log2(v / total) for v in labs.values())
-        conn.execute(
-            "INSERT INTO category_token_freq(token, freq, entropy) VALUES(?,?,?)",
-            (tok, total, ent))
-        for lab, n in labs.items():
-            _bump(conn, "category_token_labels", "token", tok, int(lab), int(n))
-    if commit:
-        conn.commit()
-    return len(counts)
-
-
-def bootstrap(conn, *, commit: bool = True) -> int:
-    """Build every tree from scratch out of what the user already accepted.
-
-    Three passes, in this order, and the order matters:
-
-    1. the tallies, from the WHOLE register -- so the coherence gate and the
-       picker ranking have every categorization and transfer the user ever
-       made, including the decades of imported history that carry no text;
-    2. the token ranking snapshot, from the review list (the only rows with
-       real bank text);
-    3. the tries themselves, replaying those review rows in the order they
-       were accepted.
-
-    Anything the user told Mammon to forget is skipped. Not run on open (by
-    request); an explicit seed-from-history action. Returns the number of
-    review rows replayed. Idempotent: clears first.
-    """
-    clear(conn, commit=False)
-    forgotten = _forgotten(conn)
-    for r in _register_rows(conn):
-        key = normalized_key(r["payee"])
-        if not key or _is_forgotten(forgotten, key, r["label"], r["txn_id"]):
-            continue
-        for k in _keys(key, r["account_id"]):
-            _bump(conn, "category_payee_stats", "payee_key", k, r["label"])
-    snapshot_stats(conn, commit=False)
-    rows = _review_rows(conn)
-    for r in rows:
-        key = normalized_key(r["payee"])
-        if not key or _is_forgotten(forgotten, key, r["label"], r["txn_id"]):
-            continue
-        # The tallies already counted this row via the register pass; grow
-        # only the tries here so a review row is not voted twice.
-        if normalize_tokens(r["text"]):
-            for k in _keys(key, r["account_id"]):
-                _grow(conn, k, r["text"], r["label"])
-    _meta_set(conn, _SEED_FLAG, "done")
-    if commit:
-        conn.commit()
-    return len(rows)
-
-
-def ensure_bootstrapped(conn) -> None:
-    """Build the trees once, on first use, if the tables are empty."""
-    row = conn.execute("SELECT COUNT(*) AS c FROM category_payee_stats").fetchone()
-    if int(row["c"]) == 0:
-        bootstrap(conn)
-
-
-def ensure_seeded(conn) -> int:
-    """Migration 116's one-time step, a no-op afterwards and in a ledger that
-    had nothing accepted when it upgraded.
-
-    The trees held category votes only, payee-wide only; transfer accounts
-    were learned by the keyword table the migration dropped. This replays the
-    ACCEPTED REVIEW ROWS -- the same evidence the trees were grown from, and
-    the only evidence: the app never seeds from register history
-    -- adding what the old shape could not hold: every transfer's vote, in the
-    payee's tree and its account's, and every category vote in the account's
-    tree (the payee's tree already has those). Returns the rows replayed."""
-    try:
-        if _meta_get(conn, _SEED_FLAG) != "pending":
-            return 0
-    except Exception:
-        return 0                        # a read-only or pre-v116 connection
-    n = 0
-    for r in _review_rows(conn):
-        key = normalized_key(r["payee"])
-        if not key:
-            continue
-        _learn(conn, key, r["text"], r["label"], r["account_id"],
-               payee_level=r["transfer"], note_tokens=r["transfer"])
-        n += 1
-    _meta_set(conn, _SEED_FLAG, "done")
-    conn.commit()
-    return n
-
-
-def _meta_get(conn, key: str) -> Optional[str]:
-    row = conn.execute("SELECT value FROM category_meta WHERE key=?", (key,)).fetchone()
-    return row["value"] if row is not None else None
-
-
-def _meta_set(conn, key: str, value: str) -> None:
-    conn.execute(
-        "INSERT INTO category_meta(key, value) VALUES(?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
 # ---------------------------------------------------------------------------
@@ -1119,8 +937,7 @@ def payee_summary(conn, payee: Optional[str]) -> dict:
 
 
 def clear(conn, *, commit: bool = True) -> None:
-    """Wipe every tree (a rebuild starts here). What was forgotten stays
-    forgotten."""
+    """Wipe every tree; learning starts again from the next accept."""
     for table in ("category_node_labels", "category_nodes",
                   "category_payee_stats", "category_token_freq",
                   "category_token_labels"):

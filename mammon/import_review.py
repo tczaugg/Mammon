@@ -912,7 +912,7 @@ def build_crypto_review(conn, account_id: int, records) -> list[ReviewEntry]:
 
     Everything reviewable here is NEW. There is no fuzzy amount/date matching
     because there is nothing to be fuzzy about: an on-chain ``tx_hash`` is a
-    globally unique, immutable exact key -- the crypto analogue of ``fitid`` and
+    globally unique, immutable exact key -- the crypto analog of ``fitid`` and
     strictly better -- so a row either already exists in this wallet (skip it,
     the way :mod:`mammon.importers.crypto_core` does) or it is new. Guessing a
     match on a coin quantity would be inventing ambiguity the chain does not have.
@@ -1164,7 +1164,8 @@ def _dominant_prior(rows):
     return None
 
 
-def predict_action(conn, mapped: MappedRow) -> str:
+def predict_action(conn, mapped: MappedRow, *,
+                   account_id: Optional[int] = None) -> str:
     """The action to seed an investment row with: the learned mapping when it is
     high-confidence, else the importer's own guess.
 
@@ -1183,7 +1184,7 @@ def predict_action(conn, mapped: MappedRow) -> str:
     try:
         raw = "" if investments.is_known_action(action) else action
         sugg = rename_tree.suggest(conn, mapped.memo or "", kind="action",
-                                   extra=raw)
+                                   extra=raw, account_id=account_id)
         if sugg.action == rename_tree.ACTION_AUTO and sugg.high_confidence:
             return sugg.payee
     except Exception:
@@ -1260,7 +1261,7 @@ def predict_fields(conn, mapped: MappedRow, *,
     # rename_tree.MIN_FILL corrections, the same bar a description clears.
     payee_supplied = bool(getattr(mapped, "payee_supplied", False)) and bool(mapped.payee)
     extra = mapped.payee if payee_supplied else ""
-    sugg = rename_tree.suggest(conn, mapped.memo, extra=extra)
+    sugg = rename_tree.suggest(conn, mapped.memo, extra=extra, account_id=account_id)
     # The dropdown candidates ride on the row so the register's payee editor can
     # offer them (transient; lost when a review row is reloaded). The tree has
     # already applied RENAME_MIN_SIGHTINGS: a payee chosen once is neither
@@ -1566,7 +1567,8 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
             conn, account_id, mapped, memo=memo, review_id=review_id, date=d,
             payee=payee, action=action, symbol=symbol, quantity=quantity)
         if learn:
-            _learn_crypto_rename(conn, mapped, final_payee, review_id=review_id)
+            _learn_crypto_rename(conn, mapped, final_payee, review_id=review_id,
+                                 account_id=account_id)
         return txn_id
     if mapped.is_investment:
         # Investment rows post into investment_transactions (their own table), not
@@ -1645,7 +1647,8 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
     # never one that kept the bank's text: a prediction nobody looked at is not
     # evidence, and a kept default is not a correction anyway.
     if not mapped.is_transfer and not learn:
-        _record_applied_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id)
+        _record_applied_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id,
+                               account_id=account_id)
     if learn:
         # Learn the transfer TARGET whenever the user pointed this row at an
         # account -- not only when the bank's text happened to parse as a
@@ -1659,7 +1662,8 @@ def save_new(conn, account_id: int, mapped: MappedRow, *,
             # A parser-detected transfer keeps its DERIVED payee, so there is no
             # rename to learn. A row the USER turned into a transfer has a payee
             # they chose, which is worth learning like any other.
-            _learn_payee_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id)
+            _learn_payee_rename(conn, mapped, p, txn_id=txn_id, review_id=review_id,
+                                account_id=account_id)
         # The Category cell -- a category OR a transfer account -- is learned by
         # one tree, under this payee and under this payee in this account
         # (:mod:`category_tree`). Every learned behavior is a tree: the keyword
@@ -1736,7 +1740,7 @@ def _save_investment(conn, account_id: int, mapped: MappedRow, *,
             rename_tree.learn(
                 conn, (m or mapped.memo or ""), use_action, kind="action",
                 extra="" if investments.is_known_action(raw) else raw,
-                txn_id=txn_id, review_id=review_id)
+                txn_id=txn_id, review_id=review_id, account_id=account_id)
         except Exception:
             pass
     if review_id is not None:
@@ -1755,8 +1759,8 @@ def _save_crypto(conn, account_id: int, mapped: MappedRow, *,
 
     Routes through :mod:`mammon.crypto`'s wallet writers so ``crypto.py`` stays the
     SOLE writer of the ``crypto_*`` tables. The direction decides which writer: a
-    coin INCREASE is the ShrsIn analogue (``record_wallet_credit``, no fiat leg, the
-    ``From`` address as payee), a coin DECREASE the ShrsOut analogue
+    coin INCREASE is the ShrsIn analog (``record_wallet_credit``, no fiat leg, the
+    ``From`` address as payee), a coin DECREASE the ShrsOut analog
     (``record_wallet_debit``, the ``To`` address as payee, the network fee carried
     as a COIN leg on the same row -- ETH gas, never a USD amount). No price, no
     amount and no basis is written on either: for a paper-wallet address there is
@@ -1878,7 +1882,8 @@ def _finish_crypto(conn, account_id: int, txn_id: int,
 
 def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
                         txn_id: Optional[int] = None,
-                        review_id: Optional[int] = None) -> None:
+                        review_id: Optional[int] = None,
+                        account_id: Optional[int] = None) -> None:
     """Record an individually accepted row in the rename tree's example log
     and update the applied/overridden tallies.
 
@@ -1903,7 +1908,7 @@ def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
     # The same evidence the prediction used (a supplied payee's tokens are part
     # of the description's pool), so the tally reflects what was actually shown.
     extra = (mapped.payee or "") if getattr(mapped, "payee_supplied", False) else ""
-    sugg = rename_tree.suggest(conn, mapped.memo, extra=extra)
+    sugg = rename_tree.suggest(conn, mapped.memo, extra=extra, account_id=account_id)
     if sugg.action == rename_tree.ACTION_AUTO:
         if final == sugg.payee:
             rename_tree.note_applied(conn, final)
@@ -1912,14 +1917,14 @@ def _learn_payee_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
     elif sugg.action == rename_tree.ACTION_DROPDOWN and final in sugg.payees:
         rename_tree.note_applied(conn, final)
     rename_tree.learn(conn, mapped.memo, final, extra=extra,
-                      txn_id=txn_id, review_id=review_id)
+                      txn_id=txn_id, review_id=review_id, account_id=account_id)
 
 
 def _crypto_rename_source(mapped: MappedRow):
     """The ``(desc, extra)`` the rename tree keys on for a CRYPTO row.
 
     A crypto wallet row's stable identifier is the on-chain counterparty ADDRESS
-    (``mapped.payee``) -- the crypto analogue of a bank statement's gobbledygook
+    (``mapped.payee``) -- the crypto analog of a bank statement's gobbledygook
     text -- so it drives the rename; the memo rides along as the secondary field.
     With no address (a bare-memo row) the memo drives it. The SAME pair feeds
     :func:`predict_crypto_payee` and :func:`_learn_crypto_rename`, so what is
@@ -1933,7 +1938,8 @@ def _crypto_rename_source(mapped: MappedRow):
     return memo, ""
 
 
-def predict_crypto_payee(conn, mapped: MappedRow) -> str:
+def predict_crypto_payee(conn, mapped: MappedRow, *,
+                         account_id: Optional[int] = None) -> str:
     """Auto-fill a crypto review row's payee from learned renames, the way
     :func:`predict_fields` does for a cash row (payee resolved first).
 
@@ -1946,14 +1952,15 @@ def predict_crypto_payee(conn, mapped: MappedRow) -> str:
     desc, extra = _crypto_rename_source(mapped)
     if not (desc or extra):
         return default
-    sugg = rename_tree.suggest(conn, desc, extra=extra)
+    sugg = rename_tree.suggest(conn, desc, extra=extra, account_id=account_id)
     if sugg.action == rename_tree.ACTION_AUTO and sugg.payee:
         return sugg.payee
     return default
 
 
 def _learn_crypto_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
-                         review_id: Optional[int] = None) -> None:
+                         review_id: Optional[int] = None,
+                         account_id: Optional[int] = None) -> None:
     """Learn a crypto counterparty rename from an accepted review row, the same
     way :func:`_learn_payee_rename` does for a cash row -- so the next import of
     the same on-chain address auto-fills the name.
@@ -1981,7 +1988,7 @@ def _learn_crypto_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
     desc, extra = _crypto_rename_source(mapped)
     if not (desc or extra):
         return
-    sugg = rename_tree.suggest(conn, desc, extra=extra)
+    sugg = rename_tree.suggest(conn, desc, extra=extra, account_id=account_id)
     if sugg.action == rename_tree.ACTION_AUTO:
         if final == sugg.payee:
             rename_tree.note_applied(conn, final)
@@ -1990,12 +1997,13 @@ def _learn_crypto_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
     elif sugg.action == rename_tree.ACTION_DROPDOWN and final in sugg.payees:
         rename_tree.note_applied(conn, final)
     rename_tree.learn(conn, desc, final, extra=extra,
-                      txn_id=None, review_id=review_id)
+                      txn_id=None, review_id=review_id, account_id=account_id)
 
 
 def _record_applied_rename(conn, mapped: MappedRow, final_payee: Optional[str], *,
                            txn_id: Optional[int] = None,
-                           review_id: Optional[int] = None) -> None:
+                           review_id: Optional[int] = None,
+                           account_id: Optional[int] = None) -> None:
     """The bulk-accept half of :func:`_learn_payee_rename`: log the row only
     when its payee is a RENAME of what it was shown with. A kept default from a
     row nobody read is not evidence and is not logged; an applied auto-fill is
@@ -2006,7 +2014,7 @@ def _record_applied_rename(conn, mapped: MappedRow, final_payee: Optional[str], 
     if not rename_tree.is_correction(final, mapped.memo, extra):
         return
     rename_tree.learn(conn, mapped.memo, final, extra=extra,
-                      txn_id=txn_id, review_id=review_id)
+                      txn_id=txn_id, review_id=review_id, account_id=account_id)
 
 
 def accept_match(conn, entry: ReviewEntry) -> dict:
@@ -2091,6 +2099,8 @@ def accept_match(conn, entry: ReviewEntry) -> dict:
                prior_reconciled=prior["reconciled"],
                prior_amount=prior["amount"])
     conn.commit()
+    if int(entry.mapped.amount_cents) != int(prior["amount"]):
+        _touch_balance(conn, txn_id)
     return prior
 
 
@@ -2212,6 +2222,8 @@ def revert_match(conn, entry: ReviewEntry, prior: dict) -> None:
              prior.get("reconciled", 0), int(prior["amount"]), txn_id))
     _set_state(conn, entry.review_id, "pending", accepted_txn_id=None)
     conn.commit()
+    if prior.get("amount") is not None:
+        _touch_balance(conn, txn_id)
 
 
 def delete_saved(conn, txn_id: int, review_id: Optional[int] = None) -> None:
@@ -2669,10 +2681,12 @@ def _accept_one_predicted(conn, account_id: int, entry: ReviewEntry) -> int:
         # user has not yet named stays the address and teaches nothing, so a bulk
         # accept of un-renamed rows behaves exactly as before.
         return save_new(conn, account_id, m, review_id=entry.review_id,
-                        payee=predict_crypto_payee(conn, m), learn=True)
+                        payee=predict_crypto_payee(conn, m, account_id=account_id),
+                        learn=True)
     if m.is_investment:
         return save_new(conn, account_id, m, review_id=entry.review_id,
-                        learn=False, action=predict_action(conn, m))
+                        learn=False,
+                        action=predict_action(conn, m, account_id=account_id))
     payee, category_id = predict_fields(conn, m, account_id=account_id)
     m.predicted_payee = payee
     m.category_id = category_id
@@ -2730,6 +2744,17 @@ def discard_one(conn, review_id: Optional[int]) -> None:
         (review_id,),
     )
     conn.commit()
+
+
+def _touch_balance(conn, txn_id) -> None:
+    """Refresh the Accounts list's cached balance after this module wrote a
+    matched line's AMOUNT itself (the bank's figure over a forecast, or the
+    forecast back). Those writes bypass :mod:`mammon.ledger`'s own update path,
+    so they have to hand it the (account, year) they changed."""
+    row = conn.execute("SELECT account_id, date FROM transactions WHERE id=?",
+                       (int(txn_id),)).fetchone()
+    if row is not None:
+        ledger.touch_balance_cache(conn, (int(row["account_id"]), int(row["date"][:4])))
 
 
 def _restore_matched_line(conn, row) -> None:
@@ -2795,6 +2820,9 @@ def unmatch_one(conn, review_id: Optional[int]) -> bool:
         "WHERE id=?",
         (LABEL_NEW, int(review_id)))
     conn.commit()
+    if (row["state"] == "accepted" and not row["is_investment"]
+            and row["prior_amount"] is not None and row["accepted_txn_id"] is not None):
+        _touch_balance(conn, row["accepted_txn_id"])
     return True
 
 

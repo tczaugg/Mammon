@@ -900,7 +900,7 @@ def report_rows_to_html(rows, title: str, columns=COLUMNS) -> str:
     Mirrors :func:`report_rows_to_csv`: the same header ``columns`` in the same
     order (a report's own set — the shared three, or the Itemize report's two),
     the same rows, the amount rendered with :func:`fmt_cents` so the page matches
-    what is on screen. Every field is HTML-escaped -- the analogue of the CSV
+    what is on screen. Every field is HTML-escaped -- the analog of the CSV
     writer's quoting -- so a category name containing ``&`` or ``<`` renders as
     text, not markup. The amount column (the last) is right-aligned; ``title``
     becomes both the document ``<title>`` and its heading.

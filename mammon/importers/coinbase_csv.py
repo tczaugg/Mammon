@@ -158,7 +158,7 @@ def _norm_type(text: str) -> str:
 
 def _dec(value: str) -> Optional[Decimal]:
     """Tolerant Decimal parse of a cell. Strips the currency symbol, thousands
-    separators and a parenthesised negative; blank/garbage -> ``None``."""
+    separators and a parenthesized negative; blank/garbage -> ``None``."""
     s = (value or "").strip().replace(",", "").replace("$", "")
     neg = s.startswith("(") and s.endswith(")")
     if neg:

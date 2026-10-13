@@ -1,7 +1,7 @@
 """Regression tests for the Spanish-Fork-Recast doubled-loan-row defect.
 
 The balance-driven recast/regenerate work (dated ``loan_payments``, migration
-_V19) could re-materialise a loan's scheduled principal legs from a change's
+_V19) could re-materialize a loan's scheduled principal legs from a change's
 effective date forward WITHOUT clearing the prior generation, so on the LOAN
 side every regenerated payment landed twice while the single mirrored checking
 leg was untouched. The principal-only paydown (a genuine PAIRED transfer) and
@@ -20,7 +20,8 @@ from __future__ import annotations
 import pytest
 
 from mammon import db, ledger, loans, loans_schedule
-from mammon.tests import fresh_db
+from mammon.tests import (assert_balance_cache_matches, fresh_db,
+                          seed_balance_cache)
 
 # A small synthetic fixed-rate loan.
 PRINCIPAL = 300_000_00
@@ -408,3 +409,25 @@ def test_apply_payment_change_preserves_reconciled_loan_transfer_leg(conn):
     assert ledger.get_transaction(conn, apr["id"])["reconciled"] == 0
     for d in ("2024-03-01", "2024-04-01"):
         assert len(_loan_leg_on(conn, loan, d)) == 1
+
+
+def test_dedupe_keeps_the_loan_balance_cache_in_step(conn):
+    """The dedupe deletes loan rows with its own SQL; the Accounts list must
+    still show what the loan register adds up to."""
+    loan = ledger.create_account(conn, "recast", "liability",
+                                 opening_balance=-PRINCIPAL)
+    checking = ledger.create_account(conn, "Checking", "cash")
+    loans.set_loan_params(
+        conn, loan, original_principal=PRINCIPAL, term_months=TERM,
+        payment_amount=PAYMENT, origination_date=ORIGINATION, interval="monthly",
+        rates=[(ORIGINATION, "6.0")], extras=[("Escrow", ESCROW, "Taxes")])
+    for d in ("2024-02-01", "2024-03-01"):
+        _post_real_payment(conn, loan, checking, d, PAYMENT)
+        conn.execute(
+            "INSERT INTO transactions(account_id, date, amount, payee, "
+            "transfer_account_id, scheduled) VALUES (?,?,?,?,?,0)",
+            (loan, d, PAYMENT // 3 + 111, "US Bank", checking))
+    conn.commit()
+    seed_balance_cache(conn)
+    assert loans_schedule.dedupe_loan_payment_legs(conn, loan) == 2
+    assert_balance_cache_matches(conn)

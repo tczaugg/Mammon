@@ -30,7 +30,7 @@ re-grouping them by payee would be a no-op -- except that dropping the transfer
 legs unbalances the split and leaves a number that is neither what the payee
 paid you nor what you paid them. A real paycheck showed this: gross salary and
 the employer match in, tax legs out, a 401(k) deferral transferring to the
-retirement account, and the by-payee report totalled the employer at $12,000 --
+retirement account, and the by-payee report totaled the employer at $12,000 --
 the withholding -- for a year in which they had deposited $60,000. Passing
 ``split_lines=False`` bills the whole transaction to its payee at the parent's
 own amount, which the ledger guarantees equals the sum of its legs

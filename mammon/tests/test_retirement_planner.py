@@ -30,7 +30,7 @@ from decimal import ROUND_HALF_UP, Decimal
 import pytest
 from PyQt5.QtCore import Qt
 
-from mammon import forecast, ledger, rebalance, retirement
+from mammon import forecast, ledger, rebalance, retirement, retirement_plan
 from mammon.tests import fresh_db
 from mammon.ui import retirement_planner as rp
 from mammon.ui.models import fmt_money
@@ -379,7 +379,7 @@ def test_empty_ledger_says_so_instead_of_drawing_nothing(qapp, tmp_path):
         _click(p.roth_chart, 2030, 10_000.0)          # no axes, no crash, no write
         assert retirement.list_conversions(c, 2030) == []
         assert any("birth year" in line for line in p.assumption_lines())
-        assert len(p.income_rows()) == rp.FALLBACK_HORIZON_YEARS
+        assert len(p.income_rows()) == retirement_plan.FALLBACK_HORIZON_YEARS
     finally:
         p.deleteLater()
         c.close()
@@ -419,7 +419,7 @@ def test_the_faq_button_opens_the_faq_without_a_modal(page):
 
 def test_no_fund_line_when_the_mix_cannot_be_measured(qapp, conn, plan, monkeypatch):
     # The seam every projection on the page reads its weights through.
-    monkeypatch.setattr(rp, "projection_mix", lambda *a, **k: None)
+    monkeypatch.setattr(retirement_plan, "projection_mix", lambda *a, **k: None)
     p = RetirementPlannerPage(conn, today=TODAY)
     try:
         p.refresh()
@@ -484,7 +484,7 @@ def test_the_base_income_series_is_seeded_from_the_plans_own_flows(page, conn):
     def after_deduction(year, gross):
         # The deduction is INDEXED to the year, like the bracket tops.
         return max(0, gross - retirement.standard_deduction_in(
-            status, rp.deduction_conditions(conn, year, status), year,
+            status, retirement_plan.deduction_conditions(conn, year, status), year,
             retirement.get_bracket_index_pct(conn)))
 
     row = _row(page, 2031)
@@ -823,6 +823,29 @@ def test_a_conversion_goes_to_the_same_institutions_roth_or_a_planned_one(
     assert retirement.resolve_conversion_target(conn, plan["ira"])[0] == plan["roth"]
 
 
+def test_the_owners_real_roths_are_listed_apart_from_the_routing_rule(conn, plan):
+    """``owner_roth_accounts`` answers the weaker question "does this owner hold
+    a Roth at all" - including for a hypothetical Roth's negative key, and
+    across institutions, where the custodian's routing rule says no."""
+    saver = plan["person"]
+    for key in ("ira", "roth"):
+        retirement.set_account_owner(conn, plan[key], saver)
+    ledger.update_account(conn, plan["ira"], institution="ANON Custodian")
+    ledger.update_account(conn, plan["roth"], institution="ANON Other")
+    target = retirement.conversion_target(conn, plan["ira"])
+    assert retirement.is_planned(target)
+    # The routing rule refuses the Roth at the other custodian; this does not.
+    assert retirement.owner_roth_accounts(conn, target) == [plan["roth"]]
+    assert retirement.owner_roth_accounts(conn, plan["ira"]) == [plan["roth"]]
+    # A Roth of the OTHER spouse is not the owner's (IRC 408A(d)(3)).
+    spouse = retirement.add_person(conn, "ANON Spouse", "spouse", birth_year=1962)
+    retirement.set_account_owner(conn, plan["roth"], spouse)
+    assert retirement.owner_roth_accounts(conn, target) == []
+    # A Roth is not its own answer, and a key that names no plan account has none.
+    assert retirement.owner_roth_accounts(conn, plan["roth"]) == []
+    assert retirement.owner_roth_accounts(conn, -999) == []
+
+
 def test_a_planned_roth_is_dropped_when_nothing_converts_into_it(conn, plan):
     ledger.update_account(conn, plan["roth"], institution="ANON Other")
     target = retirement.conversion_target(conn, plan["ira"])
@@ -927,7 +950,7 @@ def _need(page, conn, year, amount_cents, offset, pct="0"):
     Security and other income (the amount is a spending need, not a draw),
     plus the income tax the plan pays out of them."""
     target = retirement.household_amount_cents(amount_cents, pct, offset)
-    covered = (rp.social_security_cents(conn, year, base_year=TODAY.year)
+    covered = (retirement_plan.social_security_cents(conn, year, base_year=TODAY.year)
                + retirement.other_income_cents(conn, year))
     return max(0, target - covered) + _tax_paid(page, year)
 
@@ -1216,16 +1239,16 @@ def test_income_rows_does_not_raise_for_a_person_with_a_future_eligibility_year(
 
     for year in (2026, 2050, 2079, rows[-1].year):
         # No earnings means no benefit, in every year of the projection.
-        assert rp.social_security_cents(conn, year, [child_row]) == 0
+        assert retirement_plan.social_security_cents(conn, year, [child_row]) == 0
         # And the household total is its earners, with nothing for the child.
-        assert rp.social_security_cents(conn, year) == (
-            rp.social_security_cents(conn, year, [saver_row, worker_row]))
+        assert retirement_plan.social_security_cents(conn, year) == (
+            retirement_plan.social_security_cents(conn, year, [saver_row, worker_row]))
 
     # Not vacuous: the worker on a PROJECTED cohort still draws a benefit, and
     # the retiree on a published one still draws theirs.
-    assert rp.social_security_cents(conn, 2079, [worker_row]) > 0
+    assert retirement_plan.social_security_cents(conn, 2079, [worker_row]) > 0
     assert retirement.pia_bend_points(1995 + retirement.SS_ELIGIBILITY_AGE).projected
-    assert rp.social_security_cents(conn, 2040, [saver_row]) > 0
+    assert retirement_plan.social_security_cents(conn, 2040, [saver_row]) > 0
 
 
 def test_a_conversion_is_capped_at_what_the_source_holds(page, conn, plan):
@@ -1560,7 +1583,7 @@ def test_contributions_continue_until_the_plan_starts(page, conn, plan):
                                1_000_00)
     wd = page.withdrawals
     assert wd.apply_household(40_000_00, start_year=2030) is True
-    measured = rp.planned_contributions(conn, TODAY, 2030)
+    measured = retirement_plan.planned_contributions(conn, TODAY, 2030)
     assert set(measured) == {2026, 2027, 2028, 2029}   # stops at retirement
     yearly = measured[2027][plan["ira"]]
     assert yearly == 8_000_00                          # the trailing-year sum
@@ -1600,22 +1623,22 @@ def test_a_salary_deferral_and_match_fund_the_linked_401k(page, conn, plan):
                                           end_year=2029, change_pct=2)
     retirement.update_income_source(conn, salary, deferral_pct=7, match_pct=3,
                                     into_account_id=plan["ira"])
-    measured = rp.planned_contributions(conn, TODAY, None)
+    measured = retirement_plan.planned_contributions(conn, TODAY, None)
     # 2027: salary 102,000; 10% of it goes in.
     assert measured[2027][plan["ira"]] == 10_200_00
     assert measured[2026][plan["ira"]] == 10_000_00 * 3 // 12   # Oct-Dec only
     assert 2030 not in measured                                  # salary ended
     # Taxable income: the 7% deferral is pre-tax.
     sources = retirement.list_income_sources(conn)
-    assert rp.gross_taxable_cents(conn, 2027, 0, 0, sources) == 102_000_00 - 7_140_00
+    assert retirement_plan.gross_taxable_cents(conn, 2027, 0, 0, sources) == 102_000_00 - 7_140_00
     # A Roth 401(k) deferral is not pre-tax.
     retirement.update_income_source(conn, salary, into_account_id=plan["roth"])
     sources = retirement.list_income_sources(conn)
-    assert rp.gross_taxable_cents(conn, 2027, 0, 0, sources) == 102_000_00
+    assert retirement_plan.gross_taxable_cents(conn, 2027, 0, 0, sources) == 102_000_00
     # The deferral never pays spending.
     wd = page.withdrawals
     covered, _room = wd.household_income([2027], wd.accounts(), None)
-    assert covered[2027] == rp.social_security_cents(conn, 2027, base_year=TODAY.year)         + 102_000_00 - 7_140_00
+    assert covered[2027] == retirement_plan.social_security_cents(conn, 2027, base_year=TODAY.year)         + 102_000_00 - 7_140_00
 
 
 def test_the_income_dialog_edits_other_income_and_re_applies(page, conn, plan, qapp):
@@ -1675,7 +1698,7 @@ def test_each_earner_has_a_salary_on_their_own_schedule(page, conn, plan, qapp):
                 if src.kind == "salary"}
     assert salaries[plan["person"]].end_year == 2028
     assert salaries[spouse].end_year == 2031
-    contributions = rp.planned_contributions(conn, TODAY, None)
+    contributions = retirement_plan.planned_contributions(conn, TODAY, None)
     assert contributions[2028][plan["ira"]] == 10_000_00
     assert plan["ira"] not in contributions.get(2029, {})     # he retired
     assert contributions[2031][plan["roth"]] == 2_500_00       # she has not
@@ -1695,6 +1718,36 @@ def test_fill_years_fills_each_year_to_the_bracket_top(page, conn, plan, qapp):
         assert got == max(0, top - page._base[year]) or got > 0, year
     assert total > 0 and "Filled" in page.roth_notice.text()
     qapp.processEvents()
+
+
+def test_the_withdrawal_button_flags_a_plan_the_ledger_has_moved_under(
+        page, conn, plan):
+    """Apply writes the plan as the ledger stood that day; when the data under
+    it moves (here a deposit), the stored draws no longer match what the plan
+    computes, and the Withdrawal Schedule button wears the amber triangle with
+    a tooltip saying to re-apply. Re-applying clears it. Nothing is rewritten
+    by the flag itself."""
+    wd = page.withdrawals
+    assert wd.apply_household(40_000_00, "2") is True
+    page.refresh()
+    assert page.withdrawal_button.icon().isNull()
+    assert page.stale_withdrawal_years == []
+    assert "Re-apply" not in page.withdrawal_button.toolTip()
+
+    ledger.add_transaction(conn, plan["ira"], "2026-03-01", 150_000_00)
+    stored = retirement.list_withdrawals(conn)
+    page.refresh()
+    assert not page.withdrawal_button.icon().isNull()
+    assert page.stale_withdrawal_years
+    assert "Re-apply the spending plan" in page.withdrawal_button.toolTip()
+    assert str(page.stale_withdrawal_years[0]) in page.withdrawal_button.toolTip()
+    assert retirement.list_withdrawals(conn) == stored          # flagged, not rewritten
+
+    params = retirement.get_withdrawal_plan(conn)
+    assert wd.apply_household(params.start_cents, params.increase_pct) is True
+    page.refresh()
+    assert page.withdrawal_button.icon().isNull()
+    assert page.stale_withdrawal_years == []
 
 
 def test_maximize_spending_leaves_the_ending_reserve(page, conn, plan):
@@ -1947,7 +2000,7 @@ def test_the_survivor_scenario_runs_the_plan_on_for_the_spouse(page, conn, plan,
     page.filing_combo.setCurrentIndex(at.index("joint"))
     death = 2034
     later = death + 2
-    both = rp.social_security_cents(conn, later, base_year=TODAY.year)
+    both = retirement_plan.social_security_cents(conn, later, base_year=TODAY.year)
     # Choose "If <self> dies" in the header, then the year.
     combo = page.survivor_combo
     assert combo.isVisible() or combo.count() == 3
@@ -1956,7 +2009,7 @@ def test_the_survivor_scenario_runs_the_plan_on_for_the_spouse(page, conn, plan,
     qapp.processEvents()
     scenario = retirement.get_survivor_scenario(conn)
     assert scenario.deceased_id == plan["person"] and scenario.death_year == death
-    widowed = rp.social_security_cents(conn, later, base_year=TODAY.year)
+    widowed = retirement_plan.social_security_cents(conn, later, base_year=TODAY.year)
     assert 0 < widowed < both                    # the larger of the two, not both
     assert page.status_in(death) == "joint" and page.status_in(later) == "single"
     assert [p["id"] for p in rp.horizon_people(conn)] == [spouse]
@@ -2248,7 +2301,7 @@ def test_the_aca_credit_slopes_down_to_the_cliff_and_then_goes_at_once(page, con
     page.refresh()
     assert page.aca_line().get(2027) is not None      # the spouse is under 65
     small = page.aca_by_year().get(2027, 0)
-    full = rp.aca_credit_in(conn, 2027, rp.aca_poverty_line_in(conn, 2027, "joint"), "joint")
+    full = rp.aca_credit_in(conn, 2027, retirement_plan.aca_poverty_line_in(conn, 2027, "joint"), "joint")
     assert 0 < small < full                           # part of it, not all
     assert "ACA premium credit: " in page.year_details(2027)
     retirement.set_conversion(conn, plan["ira"], plan["roth"], 2027, 300_000_00)
@@ -2269,9 +2322,9 @@ def test_a_spouse_with_no_record_draws_the_spousal_benefit(conn, plan):
     spousal = retirement.spousal_benefit_cents(pia, 0, 1961, 67 * 12)
     assert spousal == retirement.to_lower_dime_cents(pia // 2) > 0
     # 2030: both claims are in force (2027 and 2028) for the whole year.
-    assert rp.social_security_cents(conn, 2030) == (own + spousal) * 12
+    assert retirement_plan.social_security_cents(conn, 2030) == (own + spousal) * 12
     # 2027: the worker's own claim from June; the spouse has not claimed yet.
-    assert rp.social_security_cents(conn, 2027) == own * 7
+    assert retirement_plan.social_security_cents(conn, 2027) == own * 7
 
 
 def test_the_earnings_test_withholds_while_a_salary_runs_before_fra(conn, plan):
@@ -2283,12 +2336,12 @@ def test_the_earnings_test_withholds_while_a_salary_runs_before_fra(conn, plan):
                                  kind="salary")
     earnings = retirement.earnings_map(conn, plan["person"])
     pia = retirement.primary_insurance_cents(earnings, BIRTH_YEAR)
-    assert rp.social_security_cents(conn, 2026) == 0             # all withheld
+    assert retirement_plan.social_security_cents(conn, 2026) == 0             # all withheld
     # Claimed June 2022, so 55 months were paid before full retirement age
     # (June 2027) and every one was withheld: from 2028 the benefit is the
     # one for a claim 55 months later.
     later = retirement.monthly_benefit(earnings, BIRTH_YEAR, 62 * 12 + 55)
-    assert rp.social_security_cents(conn, 2028) == later * 12
+    assert retirement_plan.social_security_cents(conn, 2028) == later * 12
     assert retirement.monthly_benefit(earnings, BIRTH_YEAR, 62 * 12) < later < pia
 
 
@@ -2333,24 +2386,56 @@ def test_married_filing_separately_is_not_offered(page):
             for i in range(page.filing_combo.count())] == ["single", "joint"]
 
 
-def test_a_current_employer_plan_does_not_convert_before_59_and_a_half(page, conn, plan):
-    """Audit: fills converted out of a current 401(k) at any age; money there
-    moves only after leaving or at 59 1/2 (IRC 401(k)(2)(B), 402A(c)(4))."""
+def test_a_current_employer_plan_does_not_convert_until_the_job_ends(page, conn, plan):
+    """A current 401(k) converts nothing while the owner still works there -
+    past 59 1/2 too: an in-service distribution is the plan's to allow, and
+    Mammon cannot see whether it does (reported: a plan converted a current
+    employer's 401(k) the owner could not yet draw). The year the job ends,
+    it can."""
     retirement.update_person(conn, plan["person"], birth_year=1975)
     _mark_current_employer_plan(conn, plan["ira"])
     page.refresh()
     sched = page.schedule
     assert sched.not_convertible_reason(plan["ira"], 2030) is not None
     assert sched.conversion_cap_cents(plan["ira"], 2030) == 0
-    assert sched.not_convertible_reason(plan["ira"], 2035) is None      # 59 1/2 in 2034
+    assert sched.not_convertible_reason(plan["ira"], 2035) is not None  # 59 1/2 in 2034
     assert sched.set_conversion(plan["ira"], plan["roth"], 2030, 10_000_00) == 0
     assert "cannot be converted" in page.roth_notice.text()
+    retirement.set_withdrawal_plan(conn, 40_000_00, 0, start_year=2036)
+    assert sched.not_convertible_reason(plan["ira"], 2035) is not None
+    assert sched.not_convertible_reason(plan["ira"], 2036) is None
+
+
+def test_a_years_conversion_is_split_in_proportion_to_what_each_source_holds(
+        page, conn, plan):
+    """The plan treats the IRAs and 401(k)s as one hypothetical IRA; the
+    per-account rows are its breakout, so every source gives the same share of
+    what it holds - whatever split the year held before. Draining them one
+    after another put one account at zero on the dashboard beside others
+    untouched, for no gain in the plan."""
+    other = ledger.create_account(conn, "ANON 401k", "investment")
+    rebalance.set_account_treatment(conn, other, "deferred")
+    ledger.add_transaction(conn, other, "2024-01-05", 300_000_00)
+    page.refresh()
+    sched = page.schedule
+    for year, total in ((2028, 60_000_00), (2029, 80_000_00)):
+        # 2028 starts all out of the IRA (the fixture's conversion); 2029 empty.
+        assert sched.set_total_conversion(year, total) == total
+        got = {int(r["from_account_id"]): int(r["amount_cents"])
+               for r in retirement.list_conversions(conn, year)}
+        assert sum(got.values()) == total
+        caps = {aid: sched.cap_cents(aid, year) for aid in (plan["ira"], other)}
+        # What each holds entering the year is measured AFTER the write (a
+        # conversion does not move its own year's entering balance).
+        for aid in caps:
+            expected = total * caps[aid] / sum(caps.values())
+            assert abs(got[aid] - expected) <= 1, (year, aid, got, caps)
 
 
 def test_a_child_raises_the_poverty_line_and_retiring_without_a_salary_is_no_appeal(conn, plan):
-    couple_only = rp.aca_poverty_line_in(conn, 2027, "single")
+    couple_only = retirement_plan.aca_poverty_line_in(conn, 2027, "single")
     retirement.add_person(conn, "ANON Child", "child", birth_year=2015, birth_month=1)
-    assert rp.aca_poverty_line_in(conn, 2027, "single") > couple_only
+    assert retirement_plan.aca_poverty_line_in(conn, 2027, "single") > couple_only
     retirement.set_withdrawal_plan(conn, 40_000_00, 0, start_year=2028)
     assert rp.appealed_premium_years(conn) == {}                  # no salary ends
     retirement.add_income_source(conn, "ANON salary", 90_000_00, 2020, end_year=2027,
@@ -2398,11 +2483,11 @@ def test_plan_rows_for_a_past_year_do_not_pull_the_horizon_back(page, conn, plan
 
 def test_plan_last_year_is_the_planners_own_last_bar(conn, plan):
     age = retirement.get_plan_through_age(conn)
-    assert rp.plan_last_year(conn, TODAY) == rp.plan_horizon(conn, age, TODAY)[-1] \
+    assert retirement_plan.plan_last_year(conn, TODAY) == rp.plan_horizon(conn, age, TODAY)[-1] \
         == BIRTH_YEAR + age
     retirement.set_conversion(conn, plan["ira"], plan["roth"], BIRTH_YEAR + age + 3,
                               1_000_00)
-    assert rp.plan_last_year(conn, TODAY) == rp.plan_horizon(conn, age, TODAY)[-1] \
+    assert retirement_plan.plan_last_year(conn, TODAY) == rp.plan_horizon(conn, age, TODAY)[-1] \
         == BIRTH_YEAR + age + 3
 
 
@@ -2436,7 +2521,7 @@ def test_the_fund_line_projects_at_the_typed_mix_not_the_ladders_rung(conn, plan
     first year is the months left in it."""
     retirement.set_plan_mix(conn, (0, 100, 0))
     ids = [plan["ira"], plan["roth"]]
-    line = rp.fund_values_cents(conn, ids, [0] * 5, start_cents=100_000_00,
+    line = retirement_plan.fund_values_cents(conn, ids, [0] * 5, start_cents=100_000_00,
                                 as_of=TODAY.isoformat())
     mu, sigma = forecast.portfolio_moments(retirement.plan_mix_weights((0, 100, 0)))
     first = forecast.first_year_periods(TODAY)
@@ -2449,7 +2534,7 @@ def test_the_fund_line_projects_at_the_typed_mix_not_the_ladders_rung(conn, plan
         forecast.mix_for_risk(retirement.get_planning_risk(conn)))
     assert rung_sigma == pytest.approx(sigma, abs=1e-6)
     assert rung_mu > mu + 0.003                   # the rung's mean is not the mix's
-    assert rp.measured_risk(conn, ids, TODAY.isoformat()) == pytest.approx(
+    assert retirement_plan.measured_risk(conn, ids, TODAY.isoformat()) == pytest.approx(
         retirement.get_planning_risk(conn), abs=1e-9)
 
 

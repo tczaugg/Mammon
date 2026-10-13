@@ -15,7 +15,8 @@ from mammon.importers.record import (
     normalize_payee,
     parse_date,
 )
-from mammon.tests import fresh_db
+from mammon.tests import (assert_balance_cache_matches, fresh_db,
+                          seed_balance_cache)
 
 
 @pytest.fixture
@@ -2612,4 +2613,37 @@ def test_ofx_split_keeps_an_odd_ratio_exact(tmp_path):
         split_num=r.split_num, split_den=r.split_den)
     investments.rebuild_holdings(conn, acct)
     assert investments.get_holding(conn, acct, "ABC")["quantity"] == "400"
+    conn.close()
+
+
+def test_an_import_that_fails_partway_leaves_the_balance_cache_right(
+        tmp_path, monkeypatch):
+    """Each imported row commits as it lands, and the year-end balance cache is
+    rebuilt once at the end of the run. A run that raises in between has to
+    repair the cache for the rows it already wrote, or the Accounts list
+    disagrees with the register from then on."""
+    conn = fresh_db(tmp_path / "fail.db")
+    checking = ledger.create_account(conn, "Checking", "checking")
+    savings = ledger.create_account(conn, "Savings", "savings")
+    for year in (2020, 2021, 2022):
+        ledger.add_transaction(conn, checking, f"{year}-02-01", 1_000_00)
+        ledger.add_transaction(conn, savings, f"{year}-02-01", 50_00)
+    seed_balance_cache(conn)
+
+    # One leg of a transfer whose other register the file carries: written by
+    # the importer itself, not through ledger.create_transfer.
+    leg = importers.NormalizedTxn(
+        external_account="Checking", account_type="checking", date="2021-05-05",
+        amount_cents=-123_45, payee="Move", transfer_account="Savings")
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(ledger, "link_split_mirrors", boom)
+    with pytest.raises(RuntimeError):
+        importers.import_records(conn, [leg], provider="test",
+                                 registers=[("Checking", "checking"),
+                                            ("Savings", "savings")])
+    assert conn.execute("SELECT COUNT(*) FROM transactions WHERE amount=-12345"
+                        ).fetchone()[0] == 1          # the leg did land
+    assert_balance_cache_matches(conn)
     conn.close()

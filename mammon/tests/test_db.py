@@ -263,9 +263,9 @@ def test_v69_drops_only_balance_snapshots_from_before_an_opening_date(tmp_path):
                      [(1, 2001, -15050000), (1, 2002, -15050000), (1, 2003, -14950000),
                       (2, 1999, 10000)])
     conn.commit()
-    conn.close()
-
-    conn = db.init_db(path)
+    # v69 alone: every later migration is free to rebuild the cache (v118
+    # recomputes it from the rows, and this fixture has none).
+    conn.executescript(db.MIGRATIONS[68])
     kept = conn.execute("SELECT account_id, year FROM balance_checkpoints ORDER BY 1, 2").fetchall()
     assert [tuple(r) for r in kept] == [(1, 2002), (1, 2003), (2, 1999)]
     conn.close()
@@ -484,6 +484,110 @@ def test_v111_rebuilds_budget_settings_keeping_every_row_and_retargeting_group(
     conn.close()
 
 
+def test_v117_drops_the_debt_plan_tables_and_keeps_the_terms(tmp_path):
+    """The Budget page's pay-down line projects one debt from its own terms
+    (SRD 5.12h); the multi-debt plan tables nothing read are dropped, and an
+    account's stored terms survive the upgrade."""
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(116):                       # MIGRATIONS[:116] -> user_version 116
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 116")
+    conn.execute("INSERT INTO accounts(id, name, type) VALUES (1, 'Card', 'credit')")
+    conn.execute("INSERT INTO debt_terms(account_id, apr, updated_at) "
+                 "VALUES (1, '19.99', '2026-01-01')")
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert {"debt_plans", "debt_plan_members"}.isdisjoint(db.table_names(conn))
+    assert conn.execute("SELECT apr FROM debt_terms WHERE account_id = 1"
+                        ).fetchone()[0] == "19.99"
+    conn.close()
+
+
+def test_v119_keeps_real_corrections_by_account_and_releases_reused_ids(tmp_path):
+    """A correction recorded at an accept survives, tagged with its review row's
+    account; one whose transaction id was handed to an unrelated row stops
+    reading that row (it falls back to the label chosen at the accept), and so
+    does the review row's own reference. After the upgrade a deleted
+    transaction releases its id at once, and a pending match to it is NEW."""
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(118):                       # MIGRATIONS[:118] -> user_version 118
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 118")
+    conn.execute("INSERT INTO accounts(id, name, type) VALUES (1, 'Checking', 'checking'),"
+                 " (2, 'Wallet', 'checking')")
+    # 10: what review row 100's accept created. 11: an unrelated row in another
+    # account that inherited the id review row 101's transaction had.
+    conn.execute("INSERT INTO transactions(id, account_id, date, amount, payee) VALUES "
+                 "(10, 1, '2026-08-05', 155000, 'Standard Transfer'),"
+                 "(11, 2, '2026-05-05', 6000, 'A Stranger'),"
+                 "(12, 1, '2026-08-06', -500, 'Corner Market')")
+    conn.execute("INSERT INTO review_items(id, account_id, date, amount, memo, label, "
+                 "state, accepted_txn_id, matched_txn_id, created_at) VALUES "
+                 "(100, 1, '2026-08-05', 155000, 'VENMO CASHOUT', 'NEW', 'accepted', 10, NULL, '2026-08-24 06:00:00'),"
+                 "(101, 1, '2026-08-05', 70000, 'VENMO CASHOUT', 'NEW', 'accepted', 11, NULL, '2026-08-24 06:00:00'),"
+                 "(102, 1, '2026-08-06', -500, 'CORNER MKT', 'MATCHING', 'pending', NULL, 12, '2026-08-24 06:00:00')")
+    conn.execute("INSERT INTO rename_examples(id, kind, txn_id, review_id, text, label, created_at) VALUES "
+                 "(1, 'payee', 10, 100, 'VENMO CASHOUT', 'Standard Transfer', '2026-09-10 05:00:00'),"
+                 "(2, 'payee', 11, 101, 'VENMO CASHOUT', 'Standard Transfer', '2026-09-10 05:00:01')")
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    rows = {r["id"]: dict(r) for r in conn.execute(
+        "SELECT id, txn_id, account_id FROM rename_examples")}
+    assert rows == {1: {"id": 1, "txn_id": 10, "account_id": 1},
+                    2: {"id": 2, "txn_id": None, "account_id": 1}}
+    assert conn.execute("SELECT accepted_txn_id FROM review_items WHERE id=101"
+                        ).fetchone()[0] is None
+    assert conn.execute("SELECT accepted_txn_id FROM review_items WHERE id=100"
+                        ).fetchone()[0] == 10
+    conn.execute("DELETE FROM transactions WHERE id IN (10, 12)")
+    conn.commit()
+    assert conn.execute("SELECT txn_id FROM rename_examples WHERE id=1").fetchone()[0] is None
+    assert conn.execute("SELECT accepted_txn_id FROM review_items WHERE id=100"
+                        ).fetchone()[0] is None
+    pending = conn.execute("SELECT label, matched_txn_id FROM review_items WHERE id=102"
+                           ).fetchone()
+    assert tuple(pending) == ("NEW", None)
+    conn.close()
+
+
+def test_v118_recomputes_stale_balance_checkpoints(tmp_path):
+    """A checkpoint a write path forgot to refresh is rebuilt from the rows, by
+    the same rule as ledger.rebuild_checkpoints -- opening balance included only
+    from its date's year on."""
+    from mammon import ledger
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(117):                       # MIGRATIONS[:117] -> user_version 117
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 117")
+    conn.execute("INSERT INTO accounts(id, name, type, opening_balance, opening_date) "
+                 "VALUES (1, 'Checking', 'checking', 50000, '2021-06-01')")
+    for d, amt in (("2020-03-01", 1000), ("2021-03-01", 2000), ("2023-03-01", -500)):
+        conn.execute("INSERT INTO transactions(account_id, date, amount) VALUES (1, ?, ?)",
+                     (d, amt))
+    # Stale: missing a year, one wrong, one for a year with no rows left.
+    conn.executemany("INSERT INTO balance_checkpoints(account_id, year, balance) "
+                     "VALUES (1, ?, ?)", ((2020, 999), (2023, 1), (2024, 7)))
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    got = [tuple(r) for r in conn.execute(
+        "SELECT year, balance FROM balance_checkpoints WHERE account_id=1 ORDER BY year")]
+    assert got == [(2020, 1000), (2021, 53000), (2023, 52500)]
+    for year in (2020, 2021, 2022, 2023):
+        assert ledger.balance_via_checkpoint(conn, 1, f"{year}-12-31") == \
+            ledger._account_balance_full(conn, 1, f"{year}-12-31")
+    conn.close()
+
+
 def test_v116_keeps_learned_votes_and_drops_the_keyword_tables(tmp_path):
     """Every learned behavior is a tree (SRD 5.5b). Migration 116 drops the
     keyword tables and the learned/pinned payee mappings, but the category
@@ -491,7 +595,6 @@ def test_v116_keeps_learned_votes_and_drops_the_keyword_tables(tmp_path):
     on open -- are carried across into the new category-or-account shape, and
     a ledger with accepted review rows is flagged for the one-time seed that
     teaches the tree its transfers."""
-    from mammon import category_tree
     path = tmp_path / "legacy.db"
     conn = db.connect(path)
     for i in range(115):                       # MIGRATIONS[:115] -> user_version 115
@@ -524,26 +627,38 @@ def test_v116_keeps_learned_votes_and_drops_the_keyword_tables(tmp_path):
     conn.commit()
     conn.close()
 
-    conn = db.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    # v116 alone: v120 later empties the tree (nothing seeded survives).
+    conn = db.connect(path)
+    conn.executescript(db.MIGRATIONS[115])
     assert {"category_rules", "transfer_rules"}.isdisjoint(db.table_names(conn))
     assert [r[0] for r in conn.execute("SELECT payee_pattern FROM import_mappings")] \
         == ["@acct:9"]
-    assert conn.execute("SELECT value FROM category_meta WHERE key='seed_v116'"
-                        ).fetchone()[0] == "pending"
-    assert category_tree.known_categories(conn, "Market") == [(1, 3)]
-
-    assert category_tree.ensure_seeded(conn) == 1
-    assert category_tree.suggest(conn, "Market", "MARKET 42").label == 1
-    assert category_tree.known_categories(conn, "Cardco") == [
-        (category_tree.account_label(2), 1)]
-    assert category_tree.known_categories(conn, "Cardco", account_id=1) == [
-        (category_tree.account_label(2), 1)]
-    assert category_tree.ensure_seeded(conn) == 0           # once only
+    assert tuple(conn.execute("SELECT category_id, count FROM category_payee_stats "
+                              "WHERE payee_key='MARKET'").fetchone()) == (1, 3)
     conn.close()
 
 
-def test_a_new_ledger_has_nothing_to_seed(tmp_path):
-    conn = db.init_db(tmp_path / "new.db")
-    assert conn.execute("SELECT COUNT(*) FROM category_meta").fetchone()[0] == 0
+def test_v120_empties_the_category_tree_to_relearn(tmp_path):
+    """Seeded votes cannot be told apart from cast ones in a pooled tally, so
+    the tree starts empty and relearns; the categories themselves stay."""
+    from mammon import category_tree
+    path = tmp_path / "legacy.db"
+    conn = db.connect(path)
+    for i in range(119):                       # MIGRATIONS[:119] -> user_version 119
+        conn.executescript(db.MIGRATIONS[i])
+    conn.execute("PRAGMA user_version = 119")
+    conn.execute("INSERT INTO categories(id, name) VALUES (1, 'Groceries')")
+    conn.execute("INSERT INTO category_nodes(id, parent_id, payee_key, token) "
+                 "VALUES (1, NULL, 'MARKET', NULL)")
+    conn.execute("INSERT INTO category_node_labels(node_id, category_id, count) "
+                 "VALUES (1, 1, 3)")
+    conn.execute("INSERT INTO category_payee_stats(payee_key, category_id, count) "
+                 "VALUES ('MARKET', 1, 3)")
+    conn.commit()
+    conn.close()
+
+    conn = db.init_db(path)
+    assert category_tree.known_categories(conn, "Market") == []
+    assert {"category_forgotten", "category_meta"}.isdisjoint(db.table_names(conn))
+    assert conn.execute("SELECT name FROM categories WHERE id=1").fetchone()[0] == "Groceries"
     conn.close()

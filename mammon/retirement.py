@@ -2635,6 +2635,37 @@ def resolve_conversion_target(conn, from_account_id: int
     return key, name
 
 
+def owner_roth_accounts(conn, account_key: int) -> list[int]:
+    """The REAL Roth accounts the owner of ``account_key`` already holds, the
+    ones at the SAME institution first.
+
+    Deliberately looser than :func:`resolve_conversion_target`, and not a
+    routing rule. That function answers the custodian's question - where the
+    money would actually go, which is a Roth at the same institution or a new
+    one - and must stay strict. This answers the weaker question "does this
+    owner hold a Roth at all", for a display that has to attribute planned
+    money to an account a human recognizes (see
+    ``ui.investment_dashboard.roth_ring_targets``). Nothing here moves money.
+
+    ``account_key`` may be a planned Roth's negative key, so owner equality is
+    read off the :class:`PlanAccount` fields rather than through
+    :func:`same_owner`, which would look the key up in ``accounts``. The rule
+    is the same as that function's: an unrecorded owner matches anything, so an
+    unlabeled household still gets an answer.
+    """
+    accounts = plan_accounts(conn)
+    source = next((a for a in accounts if a.account_id == int(account_key)), None)
+    if source is None:
+        return []
+    mine = [a for a in accounts
+            if a.is_roth and not a.planned and a.account_id != source.account_id
+            and (a.owner_person_id is None or source.owner_person_id is None
+                 or a.owner_person_id == source.owner_person_id)]
+    mine.sort(key=lambda a: (not _same_institution(a.institution,
+                                                   source.institution), a.name))
+    return [a.account_id for a in mine]
+
+
 def conversion_target(conn, from_account_id: int) -> Optional[int]:
     """:func:`resolve_conversion_target`, creating the planned Roth if needed."""
     key, _name = resolve_conversion_target(conn, from_account_id)
@@ -2672,7 +2703,7 @@ def taxable_accounts(conn) -> list[PlanAccount]:
     """The taxable brokerage accounts the household can spend in retirement:
     open, visible accounts whose tax treatment is explicitly 'taxable'. An
     account with no treatment is left out - a college fund or a business
-    account must not be spent because nobody labelled it."""
+    account must not be spent because nobody labeled it."""
     from mammon import ledger, rebalance
 
     out = [PlanAccount(account_id=int(acct["id"]), name=acct["name"],

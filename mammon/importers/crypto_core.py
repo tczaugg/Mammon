@@ -42,7 +42,7 @@ The four import rules the real 2020 ETH export forced (all applied here):
    reclassifies. From the data alone none auto-classify -- that is user intent.
 
 Dedup: the on-chain ``tx_hash`` is a globally-unique, immutable exact key -- the
-crypto analogue of ``fitid`` and strictly better. A re-import is a NO-OP: each
+crypto analog of ``fitid`` and strictly better. A re-import is a NO-OP: each
 row whose ``(account_id, tx_hash)`` already exists is skipped before any write,
 so re-scraping a wallet's full history never double-inserts (the discipline of
 the QIF-reimport regression tests, re-expressed for chain data).
@@ -54,10 +54,9 @@ import sqlite3
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Optional
 
 from mammon import crypto
-from mammon.importers.coinbase_csv import ExchangeRecord, looks_like_coinbase, parse_coinbase
+from mammon.importers.coinbase_csv import looks_like_coinbase, parse_coinbase
 from mammon.importers.crypto_csv import CryptoRecord, looks_like_etherscan, parse_etherscan
 
 
@@ -94,7 +93,7 @@ def _wallet_registry(conn: sqlite3.Connection) -> dict[str, int]:
 def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
                           account_id: int, *, rebuild: bool = True) -> CryptoImportResult:
     """Book ``records`` (from a native-coin by-address export) onto the crypto
-    wallet ``account_id``, funnelling every write through ``mammon.crypto``.
+    wallet ``account_id``, funneling every write through ``mammon.crypto``.
 
     Idempotent: a row already present by ``(account_id, tx_hash)`` is skipped, so
     re-importing the same export changes nothing.
@@ -189,7 +188,7 @@ def import_crypto_records(conn: sqlite3.Connection, records: list[CryptoRecord],
 def _import_wallet_records(conn: sqlite3.Connection, records: list[CryptoRecord],
                            account_id: int, *, rebuild: bool = True) -> CryptoImportResult:
     """Book a coin-native wallet export onto ``account_id`` (a ``kind='wallet'``
-    account), the ShrsIn/ShrsOut analogue with NO fiat leg:
+    account), the ShrsIn/ShrsOut analog with NO fiat leg:
 
     - a ``Value_IN`` row -> :func:`crypto.record_wallet_credit` (coin in), the
       on-chain ``From`` riding ``payee``; no fee (the sender, not the user, paid
